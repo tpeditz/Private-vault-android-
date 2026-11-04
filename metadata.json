@@ -1,0 +1,6 @@
+{
+  "name": "PRIVATE VAULT",
+  "description": "Offline encrypted Android privacy vault with Private Notes, Password Vault, Cryptographic Password Generator, Offline Strength Checker, Isolated Decoy Vault, Encrypted Backups, and Verified OTA Updates.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

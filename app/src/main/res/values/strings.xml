@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">PRIVATE VAULT</string>
+    <string name="developer_name">Tp Editz</string>
+    <string name="developer_telegram">@Tp_Editz</string>
+    <string name="developer_telegram_url">https://t.me/Tp_Editz</string>
+    <string name="ota_default_manifest_url">https://raw.githubusercontent.com/tpeditz/Private-vault-updates/main/update.json</string>
+    <string name="ota_repo_url">https://github.com/tpeditz/Private-vault-updates</string>
+    <string name="nav_notes">Notes</string>
+    <string name="nav_passwords">Passwords</string>
+    <string name="nav_generator">Generator</string>
+    <string name="nav_strength">Strength Check</string>
+    <string name="action_lock_vault">Lock Vault</string>
+    <string name="action_settings">Settings &amp; Tools</string>
+</resources>

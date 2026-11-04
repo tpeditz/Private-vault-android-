@@ -1,0 +1,695 @@
+PRIVATE VAULT
+COMPLETE ANDROID APPLICATION MASTER PROMPT
+Prepared: 04 November 2026
+Owner/developer credit: Tp Editz | Telegram: @Tp_Editz
+
+AI IMPLEMENTATION BRIEF - BEGIN
+
+Read this entire specification before changing the project. This is a build instruction for the coding AI, not a checklist of account-setup tasks for the owner. The owner will receive their personal preparation instructions separately. Do not assume that bracketed configuration values are real, and do not ship them in a release.
+
+01. YOUR ROLE AND THE REQUIRED OUTCOME
+
+Act as my senior Android engineer, application architect, security engineer, product designer, test engineer and release engineer. Build PRIVATE VAULT as a complete, polished, native Android application. I am a beginner with no coding knowledge. Use simple English when communicating with me, explain the result of each stage and carry out the technical work that your environment actually supports.
+
+The application must have four primary user-facing tools:
+1. Private Notes.
+2. Saved Passwords / Password Vault.
+3. Password Generator.
+4. Password Strength Checker with offline improvement suggestions.
+
+Protect these tools with a real encrypted vault, a master password, automatic locking and an independently isolated fake/decoy vault unlocked by a different password. Include the supporting security, encrypted manual backup/restore, settings and About functions described below. Include a working APK update system in the first distributed version.
+
+All normal vault operations must work offline. The only built-in internet feature is OTA update checking and APK downloading. In the owner's earlier wording, "OTS" refers to this OTA update system; it does not mean SMS OTP or an online login service.
+
+Create a usable application with real persistence and real security boundaries. Do not substitute a website, React interface, PWA, WebView shell, design-only preview, sample password manager, fake encryption implementation or static demo. A good-looking unlock screen alone does not meet this specification.
+
+The project is developed privately. The update hosting is a separate public surface. Do not make the source repository public to solve update distribution. Do not upload vault data to GitHub or another backend.
+
+02. REQUIREMENT PRIORITY AND SCOPE
+
+Use this specification as the consolidated product direction. The three supplied PDFs are supporting planning material. Their earlier navigation proposals and optional future features must not override the owner's four requested primary tools or expand this first release unnecessarily.
+
+When sources differ, follow this order:
+1. The owner's latest explicit decisions.
+2. The core requirements and security constraints in this master prompt.
+3. The companion PRIVATE_VAULT_Private_Source_Public_OTA_Prompt.txt for release operations.
+4. Supporting details from the supplied PDFs.
+
+Keep the following in the first release: four main tools, strong encrypted storage, master authentication, isolated decoy mode, safe local backup/restore, auto-lock, optional correctly integrated biometric unlock when compatible with decoy policy, premium accessible design, About credits and OTA updates.
+
+Use folders, favourites, search, lightweight note formatting and local password reuse warnings as supporting features. Keep them proportionate to the main product. Do not add cloud sync, account registration, subscriptions, ads, social feeds, AI chat, remote password analysis, passkey provider functionality, Android Autofill service, browser extensions, private file attachments or team sharing to this release without a new owner request.
+
+The AI used to develop this application is a development tool. The finished application does not need Gemini, another AI service or any runtime AI API key.
+
+03. PROJECT VALUES AND CONFIGURATION
+
+Known values:
+- Display name: PRIVATE VAULT.
+- Developer name in About: Tp Editz.
+- Telegram account in About: @Tp_Editz.
+- Platform: native Android phones, with responsive larger-screen layouts where practical.
+- Main implementation direction: Kotlin, Jetpack Compose and Material 3.
+- Normal storage: local encrypted data on the device.
+- Source code visibility: private.
+- OTA metadata and release APK visibility: public, in a separate repository.
+- Distribution direction: direct signed APK; no Play Store listing is required by this project brief.
+- First suggested versionName: 1.0.0.
+- First suggested versionCode: 1.
+
+Configuration still to verify:
+GITHUB_OWNER = [OWNER TO PROVIDE EXACT USERNAME]
+PRIVATE_SOURCE_REPOSITORY = [EXACT PRIVATE REPOSITORY NAME]
+PUBLIC_OTA_REPOSITORY = [EXACT PUBLIC REPOSITORY NAME]
+OTA_BRANCH = [VERIFY ACTUAL BRANCH; SUGGESTED main]
+OTA_MANIFEST_PATH = update.json
+APPLICATION_ID = [PROPOSE com.tpeditz.privatevault; CONFIRM BEFORE FIRST RELEASE]
+MIN_ANDROID_VERSION = [PROPOSE AND EXPLAIN BASED ON CURRENT DEPENDENCY SUPPORT]
+COMPILE_AND_TARGET_SDK = [CURRENT STABLE COMPATIBLE VALUES AT IMPLEMENTATION]
+RELEASE_SIGNING_CONFIGURATION = [LOCAL SECURE CONFIGURATION, NEVER CHAT SECRETS]
+TEST_DEVICES = [CONFIRM AVAILABLE DEVICES; INCLUDE ANDROID 15 TESTING IF AVAILABLE]
+
+Do not invent an owned internet domain, GitHub username, verified package identity, existing repository, release URL, checksum, signing fingerprint or tested device. A proposed application ID is an owner choice, not proof of trademark or namespace ownership.
+
+Unknown account details should not block reversible design and local implementation. Build a configurable updater and use local test fixtures while account details are pending. Clearly distinguish a test configuration from a verified release configuration.
+
+04. GOOGLE AI DEVELOPMENT ENVIRONMENT
+
+Use the native Android platform option in Google AI Studio when it is available. Check the actual tool capabilities and current official documentation before relying on export, signing, repository integration or device-install controls.
+
+At the preparation date, Google's Android documentation describes Kotlin/Compose generation, a single activity and single module, and ZIP project export. It lists limits on native C/C++/NDK code and Android GitHub export. Verify those limitations rather than assuming that web-project features also work for Android. Source reference: https://ai.google.dev/gemini-api/docs/aistudio-android
+
+Organise a single app module into clear packages while working within that environment. Separate concerns through interfaces and package boundaries; do not force a multi-module design that the environment cannot build. If a security dependency requires unavailable native support, investigate a vetted compatible implementation or export the project to a trusted Android build environment. Explain the actual blocker. Never replace encryption with plaintext or remove decoy isolation just to make a preview run.
+
+Do not assume Google AI Studio has created or pushed a GitHub repository. If the Android project can only be exported as a ZIP, produce the complete ZIP and explain the separate private repository import/push step. Preserve the Gradle wrapper and build configuration. Do not describe project export as public deployment.
+
+The owner needs a normal release APK signed with a signing identity they can retain for later direct updates. A preview install or a platform-managed Play testing signature is not automatically the approved permanent direct-distribution identity. Verify control of the release key before first distribution.
+
+Do not automatically provision Firebase Authentication, Firestore, Analytics, Crashlytics, Firebase AI Logic, remote configuration or a Gemini connection. They are unnecessary for this offline vault.
+
+05. PRODUCT EXPERIENCE AND PRIMARY NAVIGATION
+
+Use a clear, premium phone interface with four main destinations or equally prominent primary actions:
+Notes | Passwords | Generator | Strength Check.
+
+Keep Backup & Restore, Security, Settings, Updates and About as secondary destinations reached through a clear menu or settings action. Do not replace the generator and strength checker with backup/security navigation just because an earlier PDF proposed different tabs.
+
+The app opens to setup on first use and an unlock screen on later use. After a successful unlock, show the current vault's primary interface. Provide a visible lock action. Back navigation must be predictable and must never reveal a previous authenticated screen after the vault has locked.
+
+Use real state for every screen: initial/loading, content, empty, validation failure, operation in progress and recoverable error. Do not use fake progress or success indicators. Do not preload realistic real-person credentials. Any decoy examples must be clearly fictitious in development documentation while looking ordinary inside the decoy experience.
+
+All four tools operate in the currently authenticated vault session. Search, recent records, counts, favourites, generator save targets, reuse checks and strength-check context must use only that session's data.
+
+06. PREMIUM VISUAL DESIGN
+
+Create an original, professional visual system. The experience should feel suitable for a serious paid-quality privacy application even if distributed free. Use a restrained visual identity, strong hierarchy, balanced whitespace, consistent controls and deliberate detail.
+
+Suggested art direction, adjustable if the owner later supplies branding:
+- Dark theme: near-black or charcoal surfaces, subtle elevation and a refined teal or emerald accent.
+- Light theme: warm off-white background, clean surfaces and matching restrained accent.
+- Use colour for meaningful status and focus, with text/icons alongside status colour.
+- Use high-quality bundled typography, consistent iconography and a polished adaptive launcher icon.
+- Avoid excessive neon, fake metallic shields, busy gradients, cluttered dashboards, emoji-heavy buttons and oversized promotional banners.
+
+Define reusable tokens for typography, spacing, shapes, colour, elevation and animation. Use a consistent spacing rhythm, comfortable row heights, clear field labels and distinct primary/secondary/destructive actions. Keep the note editor readable for long text and make credential forms comfortable above the keyboard.
+
+Provide light, dark and system-theme settings. Respect font scaling and system accessibility settings. Support TalkBack labels, meaningful focus order, touch targets of at least 48 dp where applicable and adequate contrast. Password reveal controls should announce their state without reading the secret automatically.
+
+Use subtle transitions and tactile feedback where supported: smooth navigation, restrained list changes, clear save feedback and short button feedback. Honour reduced-motion/system animation settings. Avoid decorative animation that delays unlock, typing or access to saved data.
+
+Do not promise a fixed frame rate without device measurements. Keep database, KDF, file, network and password-estimation work off the main thread. Use efficient Compose state and list rendering. Never reduce password KDF security to make a decorative animation feel faster.
+
+07. PRIVATE NOTES
+
+Implement a reliable notes area with:
+- Create, view, edit, duplicate and delete notes.
+- Title and body fields with sensible length/resource limits and useful validation.
+- Lightweight formatting: headings, paragraphs, bullets, numbered lists and checklists.
+- Folders/categories, user-created folders, tags, pinning and favourites.
+- Local search over titles/content in the active unlocked vault.
+- Sorting by title and last-modified date.
+- Archive and recoverable trash with a documented retention policy.
+- Created and updated timestamps.
+- Clear saving/saved/error status and safe draft handling.
+
+Implement autosave through encrypted persistence. Do not write plaintext drafts to cache, preferences, saved-instance state, navigation arguments or editor history files. If an encrypted save fails, preserve the in-session draft where safe and show an actionable error; do not falsely display "Saved."
+
+On locking, avoid sacrificing data integrity: finish an already authorised atomic encrypted write when safe, cancel unsafe pending work and clear the UI. Do not leave readable unsaved note content in a backgrounded screen. On process death, recover only data that was actually saved in encrypted storage.
+
+Do not show note bodies in notifications, widgets or recent-app previews. Do not include external image rendering, web embeds, remote fonts or HTML scripts. Lightweight text formatting must not become an executable HTML editor.
+
+Permanent deletion requires clear confirmation. Explain in technical documentation that deletion on flash storage cannot guarantee physical erasure of all prior copies, snapshots or user-exported backups.
+
+08. SAVED PASSWORDS / PASSWORD VAULT
+
+Support multiple independent accounts for the same service or app. A service name is not a unique primary key. Each record has a stable unique ID.
+
+Credential fields:
+- Service/app name.
+- Account label, such as Personal or Work.
+- Username and/or email.
+- Password.
+- Optional website/app reference.
+- Folder/category and tags.
+- Optional private notes and a small set of custom text fields.
+- Favourite/pinned state.
+- Created and updated timestamps.
+
+Required actions:
+- Add, view, edit, duplicate, organise, search, archive if appropriate, delete and restore from trash.
+- Mask passwords by default.
+- Deliberately reveal and hide a password.
+- Copy username and password independently.
+- Generate a new password directly from an add/edit form.
+- Show local strength feedback and relevant local reuse warnings.
+- Search service name, account label, username, email and category without exposing password values in search results.
+
+Do not fetch service logos/favicons from the internet. Use bundled generic icons, local initials or user-selected local colour/icon tokens. Do not preload banking logos through a network library.
+
+Opening a stored website is optional and must require an explicit user action through a validated external browser intent. Do not auto-open links, render URLs in an internal WebView or attach credential values to a URL. A user-opened Telegram or website link is an external action, not permission for background app networking.
+
+Editing an entry changes the locally saved record. It does not change the password on the service's website. State that distinction when suggesting replacement of weak/reused credentials.
+
+09. PASSWORD GENERATOR
+
+Make the generator a first-class destination and reusable component in credential editing.
+
+Provide:
+- Password length control, with a strong useful default such as 20 characters.
+- Configurable uppercase, lowercase, digits and symbols.
+- An option to exclude visually ambiguous characters.
+- A regenerate action.
+- Show/hide and copy controls.
+- An explicit "Use in credential" or "Save to Passwords" action.
+- A short local explanation of the selected settings.
+
+Use an operating-system-backed cryptographically secure random source, such as Android's appropriate SecureRandom facilities. Never use Math.random, timestamps, predictable seeds, a fixed test seed in production, sequential templates or a list of pre-generated passwords.
+
+Use unbiased selection. If the design guarantees at least one character from every enabled category, use a reviewed unbiased construction or sampling procedure and secure shuffling; do not always put an uppercase character first and a symbol last. Explain the distribution and constraints in developer documentation.
+
+Reject impossible settings gracefully: all categories off, length below a required category count, unsupported symbol policy or out-of-bounds lengths. Do not silently create a weaker password than the UI claims.
+
+Do not automatically save generated values or maintain generator history. Clear temporary generated values on lock/session teardown. Saving requires a deliberate action into the currently active vault. Do not automatically copy a new password to the clipboard.
+
+A random passphrase mode is optional only if it can be implemented locally with a bundled, licensed word list and secure uniform random word choice. It is not required to satisfy the initial scope. Do not add an online word service.
+
+10. OFFLINE PASSWORD STRENGTH CHECKER
+
+Provide a separate Strength Check screen and reuse its logic in credential forms.
+
+The user can type or paste a password and receive immediate local feedback:
+- A readable rating such as Very weak, Weak, Fair, Strong or Very strong.
+- A concise explanation of the main weaknesses detected.
+- Practical suggestions, such as use a longer unique password, avoid common phrases, remove predictable sequences or generate a fresh random password.
+- A clear statement that the rating is an estimate and cannot prove safety.
+
+Use a maintained, locally executable password-guessability estimator or a thoroughly documented conservative offline approach. Consider common-password patterns, dictionary words, keyboard walks, repetition, predictable dates and substitutions where the selected estimator supports them. Bundle required dictionaries in the app and check their licence and size.
+
+Do not use a simplistic formula that marks every short password with uppercase, digit and symbol as strong. Do not claim precise "time to crack" values without a well-explained model; prefer qualified feedback over dramatic numerical certainty.
+
+The checker must never send a password, password hash, hash prefix, username, service name or checker text to an API. Do not call Have I Been Pwned, a cloud AI model, analytics or a breach service. With this offline-only design, the app cannot determine whether a password appears in a current online breach database. Label this limitation accurately.
+
+For an arbitrary input, do not save the checked password, query history or failed checker content. Use password-style input behaviour and clear it on lock. Avoid IME learning/personalised suggestions where Android supports the relevant controls; acknowledge that a compromised or untrusted keyboard is outside the app's complete control.
+
+Local password reuse checking is scoped only to saved credentials in the current vault. Decrypt/compare only while authorised and minimise plaintext lifetime. Do not create an unencrypted global list of passwords or unsalted password hashes. No reuse warning, score, count or recommendation may reference the other vault.
+
+Suggestions must never silently replace a stored password. If the user chooses a generated replacement, explain that they also need to update that password with the actual service before relying on the new saved value.
+
+11. REAL ENCRYPTION AND THREAT MODEL
+
+Design security before persisting user data. Use established cryptographic primitives and maintained libraries correctly. Never invent a cipher or describe Base64, obfuscation, string reversal, hidden filenames, a UI PIN or a plain SHA-256 digest as data encryption.
+
+Target strong practical protection for:
+- A lost or stolen locked phone.
+- Copied app data and copied encrypted backup files.
+- Tampered or corrupted ciphertext/backups.
+- Accidental disclosure through logs, clipboard, UI previews and cache.
+- Fake-password access attempting to reach real-vault data.
+- A malicious, malformed or incompatible OTA update candidate.
+
+Document limits: an unlocked compromised device, root/OS compromise, malicious keyboard, physical observation, user-selected sharing, weak chosen passwords and coercion can defeat assumptions. Do not market the application as unhackable, 100% secure or forensically invisible.
+
+Specify the encryption boundary in writing. Sensitive data includes note titles/bodies, credential service names, account labels, usernames, emails, passwords, URLs, private notes, custom fields, folders/tags, trash contents, private timestamps and search indexes where stored. Do not encrypt only the password column while leaving sensitive metadata exposed.
+
+Room is a persistence abstraction, not encryption. Choose a maintained encrypted database solution compatible with the actual environment, or a carefully reviewed record-encryption design over structured persistence. If using record encryption, address associated metadata, relationship leakage, indexes, WAL/journal files, temporary files, sorting and migration behaviour. State any residual metadata leakage explicitly.
+
+Use authenticated encryption such as AES-256-GCM for appropriate record/key-wrap/backup operations, through vetted APIs. Define fresh nonce generation and uniqueness under each key, authentication-tag handling and bounded message sizes. Use domain separation and authenticated associated data where appropriate to bind ciphertext to its vault, record type, record identity and format version. Never reuse a GCM key/nonce pair or return unauthenticated plaintext after tag failure.
+
+Use a recognised password KDF such as Argon2id from a maintained tested implementation, with fresh random salts and measured device-appropriate memory/time parameters. Do not write Argon2 yourself or set weak parameters purely for speed. Record KDF algorithm/version/parameters in the versioned envelope, bound them before allocation and test behaviour on supported lower-memory devices. Explain and review any necessary alternative before using it.
+
+These are architecture requirements, not a complete custom cryptographic protocol. Produce a concrete key lifecycle and storage design for review, with implementation/library references, before treating this as ready for valuable secrets.
+
+12. KEY HIERARCHY AND SECRET SEPARATION
+
+Keep three categories distinct:
+1. Vault encryption keys: protect one user's data on one installation.
+2. Backup encryption keys: derived for a portable encrypted export.
+3. APK release signing key: identifies official app releases for Android updates.
+
+Never derive vault keys from the APK signing key. Never embed a universal decrypt key in the application. Each installation and each vault must have independent random data-encryption key material.
+
+Define at least:
+- Random per-vault data-encryption key generation.
+- Password-derived key-encryption/wrapping keys.
+- Versioned authenticated key envelopes.
+- Salt and nonce creation, storage and validation.
+- Unlock, lock and session termination.
+- Master-password change and crash-safe rewrapping.
+- Optional biometric wrapping and invalidation.
+- Backup export/restore across devices.
+- Migration and future key rotation.
+- Failure handling for corruption, interruption and unavailable keys.
+
+The master password must not be stored in plaintext, recoverably encrypted with a hard-coded key or sent anywhere. Use the reviewed key-unwrapping/authentication design rather than a separate quick password comparison that bypasses the intended KDF cost.
+
+Use Android Keystore for suitable device-bound key protection. Integrate authentication with cryptographic key use when implementing biometrics; a successful biometric UI callback alone is not an adequate key-access boundary. Confirm actual hardware support rather than claiming all devices use StrongBox.
+
+A password-wrapped portable path may still permit offline guessing if copied by an attacker. Document that protection depends on a strong master password and KDF; a biometric hardware path does not automatically strengthen every alternate path.
+
+On master-password change, require the current real-vault authorisation and atomically update the relevant wrapping state. Preserve usable data if the process is interrupted. Do not change the decoy password, backup passwords or signing key as an accidental side effect.
+
+Minimise decrypted data and key lifetime in memory. Clear mutable buffers where practical and release database handles/session references on lock. Do not claim perfect memory zeroisation in Kotlin/JVM or that garbage collection instantly removes every copy.
+
+13. MASTER AUTHENTICATION, SESSION LOCKING AND RECOVERY
+
+First use:
+- Explain local storage and the importance of a strong unique master passphrase.
+- Create and confirm the master password without transmitting it.
+- Initialise encrypted storage and key envelopes atomically.
+- Explain that there is no developer backdoor or online password reset.
+- Offer decoy setup and explain its limitations privately.
+- Offer biometric convenience only under the decoy-compatible policy below.
+
+Repeated incorrect attempts must receive a generic error and a sensible local delay/backoff without revealing whether real or decoy credentials were close. Local delays are not protection against all offline attacks on copied data. Never implement automatic destructive wiping after a few failures by default.
+
+Provide configurable auto-lock with a secure default, a manual lock action and locking on device lock. Define background behaviour and a short grace period if offered. Cover system document picker, biometric dialogs and update installer transitions explicitly; do not keep an unrestricted unlocked session indefinitely just because another activity is open.
+
+On lock:
+- Hide all secret UI immediately.
+- Remove sensitive navigation/back-stack state.
+- End access to the active repository/database session and key material as far as practical.
+- Clear password-checker/generator transient values.
+- Clear sensitive clipboard data when safe and feasible.
+- Cancel or safely complete in-flight writes according to the documented transaction design.
+
+Do not persist an "isUnlocked" preference that bypasses authentication on process restart. A fresh process must establish a new authorised session. Saved state and navigation arguments must contain identifiers only when safe, never passwords, plaintext note bodies or keys.
+
+Forgotten master password: explain the available user-controlled backup path and its limits. An encrypted backup plus its separate backup password can support a deliberate fresh-vault restore. Do not promise recovery of an inaccessible existing vault. Never remotely reset encryption or reveal secrets to developer support.
+
+Uninstalling, clearing app data or losing device-bound keys may destroy local access. Do not suggest uninstall/reinstall to fix a signature mismatch or migration problem when that would erase vault data.
+
+14. FAKE VAULT / DECOY MODE - REQUIRED
+
+Purpose: a separate fake password opens a separate ordinary-looking vault containing empty or user-created fictitious notes/credentials. This is a privacy feature for coercion scenarios, not a guarantee of personal safety or undetectable hidden storage.
+
+Credential routing:
+- Correct real master password opens only the real vault.
+- Correct separately configured decoy password opens only the decoy vault.
+- Every other password opens neither vault.
+- An arbitrary wrong password must not automatically create/open a decoy vault.
+- The real and decoy passwords must differ; validate during setup/change without exposing one from the other session.
+
+Isolation requirements:
+- Independent random data keys, password salts, authenticated key envelopes and encrypted storage contexts.
+- No shared secret-bearing database connection or global singleton that retains real data in decoy mode.
+- Vault-scoped repositories, caches, search, recent items, trash, favourites, settings and backup operations.
+- Strongly typed or otherwise enforced session capability/active-vault identity passed through sensitive operations.
+- Never decrypt the real vault merely to populate decoy UI.
+- Never let an in-flight real-vault search/save/export callback update a decoy screen after session change.
+- Destroy the prior session before opening a different one; cancellation and generation/session tokens should prevent stale work from crossing sessions.
+
+The decoy interface must not show a "Decoy mode" badge, real-vault counts, hidden real folder names, real backup paths, "switch to real vault" controls or a revealing error message. Use the same general quality, navigation and update experience as the real vault. A safe internal documentation label is fine; exposing that label in ordinary decoy UI is not.
+
+Allow the owner to prepare harmless dummy content through an authenticated real-vault configuration flow that explicitly provisions decoy data, or allow normal editing after a decoy unlock. Use fictitious credentials and reserved example domains, never working third-party credentials. If no dummy records exist, show a normal empty state.
+
+Decoy settings must never change the real master password, real encryption state, real backup configuration or real biometric wrappers. Disabling or reconfiguring decoy mode requires a real-vault authentication context. Shared non-sensitive app settings may exist only when they cannot expose real-vault state; document them.
+
+Biometric policy: when decoy mode is enabled, default to password entry and disable biometric unlocking of the real vault. Do not auto-launch a real-vault biometric prompt. Do not allow biometrics from a decoy session to jump into the real vault. An advanced alternative requires explicit owner choice and a reviewed design; do not silently weaken decoy behaviour for convenience.
+
+Attempt timing/errors must not trivially identify which vault exists or which path failed. Use a reviewed approach with comparable KDF costs and generic failure handling; do not claim perfect timing indistinguishability without analysis.
+
+Backup policy: an export contains only the currently authenticated vault. A decoy export must never include real data, real key wrappers, real counts or real-vault metadata. Do not include both vaults in one ordinary backup. Restore requires explicit authentication to its target context and must not overwrite the other vault. A fresh-install restore must bind imported data to newly created destination keys. Any design for backing up both vaults is outside this initial scope.
+
+Limitations must be explained to the owner during setup and in private security documentation: app files, storage size, a rooted device, forensic analysis, public source descriptions or observation may reveal the presence of decoy functionality or additional data. Ordinary isolation does not provide mathematically proven plausible deniability. Never claim that the existence of the real vault cannot be detected.
+
+Do not implement panic wiping, secret network alerts, remote commands, OS bypasses or surveillance as part of this feature.
+
+15. BIOMETRIC CONVENIENCE WHEN DECOY IS DISABLED
+
+Use AndroidX BiometricPrompt and supported strong authenticators where available. Tie successful authentication to authorised key use through a reviewed Keystore-backed design. Do not keep an unprotected plaintext vault key in preferences to make fingerprint unlock work.
+
+Support no hardware, no enrolled biometric, temporary hardware errors, cancelled prompt, lockout, new enrolment, biometric key invalidation and device restart. The master-password path remains the deliberate fallback according to the documented policy. Do not reset or delete vault data when a biometric key becomes invalid.
+
+Require appropriate authentication before enabling/disabling biometric unlock or changing sensitive security settings. Distinguish device PIN from vault master password; do not introduce a weaker device-credential fallback without an explicit design decision.
+
+If decoy mode is later enabled, safely disable real-vault biometric convenience and remove/invalidate its applicable wrapper according to the key lifecycle. Explain the consequence to the owner at that configuration action.
+
+16. CLIPBOARD, SCREEN, KEYBOARD AND PLATFORM PRIVACY
+
+Use short configurable clipboard lifetime, with a proposed default around 30 seconds subject to platform behaviour. Mark copied secrets as sensitive when Android supports it. Avoid showing passwords in clipboard previews or app snackbars.
+
+Clear only the app's still-current sensitive clipboard item where the platform allows reliable ownership/change checks; do not erase a new unrelated clip copied by the user. Handle background restrictions and OS auto-clear behaviour honestly. Do not promise that another app never read a copied value.
+
+Block sensitive screenshots/screen recordings and recent-app previews using supported Android controls, such as FLAG_SECURE where appropriate. Apply the policy consistently to unlock, vault, generator/checker and restore-preview screens. State platform limits rather than promising absolute capture prevention.
+
+Disable personalised keyboard suggestions where supported for secrets. Do not misuse accessibility services to control the device or block users' assistive tools unnecessarily. Never log keystrokes.
+
+Exclude sensitive database/key/cache material from Android automatic cloud backup and device-transfer paths with the correct version-specific backup configuration. Test the actual configuration; a single manifest flag may not cover every transfer mechanism. The deliberate portable encrypted export is the supported recovery path.
+
+Use app-private storage for internal data, narrowly scoped FileProvider access for installer handoff and Storage Access Framework for user-chosen backup files. No broad storage permission, contacts, location, SMS, microphone or camera access is needed for the core scope.
+
+Minimise exported Android components. Validate incoming intents and URIs; never expose a deep link that bypasses vault authentication. Use no cleartext network traffic, no trust-all TLS settings and no downloaded executable plugins.
+
+17. ENCRYPTED MANUAL BACKUP AND RESTORE
+
+Keep this as a supporting function from the project brief, accessible from Settings or the secondary menu. It must not replace any of the four primary tools.
+
+Export:
+- Require an authenticated active-vault session and deliberate export action.
+- Let the user select all supported active-vault data or Notes/Passwords sections.
+- Ask for and confirm a strong dedicated backup password.
+- Explain that the backup password may differ from the master password.
+- Build a consistent snapshot without plaintext temporary files.
+- Encrypt/authenticate it using a versioned reviewed portable format.
+- Let the user choose a destination with Android's document picker.
+- Report success only after a successful close/write result; show useful status and limitations of the chosen provider.
+
+Portable format:
+- Fresh random salt and nonce(s), recognised KDF and authenticated encryption.
+- Explicit format version, algorithm identifiers and bounded KDF parameters.
+- Only minimal non-secret header information; keep private record counts, names and detailed timestamps inside the authenticated encrypted content where practical.
+- No embedded backup password, raw master password, original device Keystore key or unwrapped long-term data key.
+- Document chunking/authentication order for large data if streaming is used.
+
+Restore:
+- Select a file through the system picker.
+- Bound input size and untrusted header values before expensive processing.
+- Request the backup password and authenticate/decrypt safely.
+- Reject wrong passwords, tampering, truncation and unsupported formats without changing the current vault.
+- Preview authenticated contents/counts only after successful verification.
+- Offer documented merge/replace options for the current authenticated vault.
+- Use staging and atomic transactions; a failure leaves current data intact.
+- Resolve stable-ID conflicts explicitly; do not silently overwrite unrelated records.
+- Encrypt restored records under destination-vault keys.
+- Test a restore on a compatible fresh installation without the original phone's Keystore.
+
+Do not silently write the backup to a cloud account. The system picker may let a user deliberately select a cloud-backed document provider; if they do, only the encrypted file goes there under their control. Do not add a built-in Drive integration or background upload.
+
+Backup data may remain accessible under its old backup password after the live master password changes. Explain that changing a master password does not retroactively re-encrypt previously exported files. Do not store a plaintext backup password for unattended future exports.
+
+18. LOCAL DATA, SEARCH AND MIGRATIONS
+
+Use stable IDs and explicit schema versions. Model Note, Credential, Folder, Tag, their relationships, TrashRecord, vault-local settings and backup format metadata. Keep vault identity and access enforcement explicit throughout the data layer.
+
+Validate data at UI and persistence boundaries. Use transactions for multi-record changes. Safely handle low disk space, interrupted writes, app termination, device rotation and duplicate save requests. Avoid corruption from concurrent editor/autosave and lock operations.
+
+Keep local search confined to the active unlocked vault. Any persistent index must be protected within the encryption boundary. Do not add a global Android search provider exposing private note titles or account labels.
+
+Production database upgrades must have tested explicit migrations. Do not enable destructive fallback migrations, silently drop tables, reset data on an exception or generate replacement encryption keys when an existing key cannot be read.
+
+On an update, preserve real-vault data, decoy-vault data, encryption envelopes, folders, tags, favourites, trash and security preferences. Test each supported old schema. Migration failures must preserve the previous usable data and provide a clear recovery path; do not claim the update installed successfully means all vault data migrated successfully.
+
+19. OFFLINE CONTRACT AND NETWORK BOUNDARY
+
+The following must work in airplane mode after installation/setup: unlock, real and decoy vaults, notes, saved passwords, generator, strength checker, local reuse feedback, settings, About text and local encrypted export/restore to accessible local files.
+
+The app itself may use the internet only to fetch the public OTA metadata and the associated APK asset. Keep the update component separate from vault data access. It must not receive database handles, master/backup passwords, note content, credential objects or encryption keys.
+
+No analytics, ad SDKs, remote crash uploads, online licence checks, remote fonts, favicons, remote password dictionaries, Firebase services, runtime AI or hidden diagnostics. Audit transitive dependencies and packet behaviour, not merely the application's obvious network calls.
+
+HTTPS hosting still exposes connection metadata such as IP address and request timing to the hosting service. "Offline vault" must not be described as "the app never connects to the internet" when update checking is enabled.
+
+Provide a user setting for automatic update checks and a manual Check for Updates action. A rate-limited launch check may be the default with clear disclosure. Do not make connectivity, an update response or a mandatory login a condition for opening local data.
+
+20. OTA ARCHITECTURE: PRIVATE SOURCE, PUBLIC UPDATES
+
+Use two separate repositories:
+- PRIVATE source repository: Android project, Kotlin/Compose source, tests, build scripts and private development documentation.
+- PUBLIC OTA repository: update.json, public release notes and signed release APK assets only.
+
+Never put source archives, private test data, vault databases, encrypted user backups, signing keystores, signing passwords, GitHub tokens or private encryption keys in the public repository. A private source repository is also not a place to commit secrets.
+
+Public APK hosting means anyone can download that APK. Private source hosting does not make the binary private or prevent reverse engineering. The application remains local/private in its treatment of user data. If the owner later requires authorised-user-only APK distribution, stop and propose a different distribution architecture rather than embedding a shared GitHub token.
+
+Permanent manifest address format:
+https://raw.githubusercontent.com/OWNER/PUBLIC_OTA_REPOSITORY/BRANCH/update.json
+
+Verify owner/repository/branch/file values before release. Keep the final URL in one configuration location. Do not invent a working endpoint or scatter URL strings throughout the app.
+
+Handle first-release bootstrapping correctly. The first APK needs the permanent endpoint configured, but the final manifest's APK checksum cannot exist until that APK is built and signed. Do not create a circular dependency by embedding the APK's own checksum in itself. During development, use clearly isolated fixtures or tolerate an unavailable manifest. Build/sign/hash the APK, upload the asset, then publish the complete real manifest. Verify the live endpoint before external distribution.
+
+The companion OTA prompt expands release execution. Both documents require the same data-preserving updater and offline contract.
+
+21. OTA MANIFEST AND TRUST RULES
+
+Use a documented strict JSON format. Minimum fields:
+- schemaVersion: manifest format version.
+- packageName: exact application ID.
+- versionName: friendly display version.
+- versionCode: strictly increasing release integer.
+- minimumSupportedVersionCode: advisory support information for this offline product.
+- downloadUrl: exact HTTPS release APK asset URL.
+- sha256: actual APK SHA-256 digest.
+- signingCertificateSha256: informational/consistency fingerprint, not a mutable source of trust.
+- releaseNotes: bounded plain text.
+- forceUpdate: false for this initial offline vault.
+- publishedAt: documented ISO date/time format.
+
+Optionally add APK byte size and minimum supported Android API to improve validation/UX. Validate their types and ranges. Reject missing security-critical fields, malformed URLs, impossible sizes, overflow values, conflicting package IDs and unsupported schema versions. Treat release notes as untrusted plain text; never render remote executable HTML.
+
+Compare versions numerically with versionCode. Offer only a strictly greater code as this app's update policy, even if some platform install paths can accept equal version codes. Reject downgrade candidates and detect mismatches between manifest version and downloaded APK metadata.
+
+A checksum detects corruption against the manifest; it is not sufficient authorship verification if an attacker can edit both files. Verify the candidate APK's actual signature and expected signing identity against the installed app/locally anchored trusted identity, not merely the certificate fingerprint written in the public JSON.
+
+Use an APK signature verifier appropriate for Android, not just an API that reads an unverified certificate from a malformed archive. Android's installer must independently enforce signing/package compatibility. The first release should use one stable signer. Future key rotation requires an explicit, tested signing-lineage design; never accept a new signer just because JSON announces it.
+
+The unsigned manifest may be used for advisory discovery only. It must never remotely disable vault access, alter encryption settings or authorise new trust roots. A signed-metadata system could be considered later if required, with separate key lifecycle and replay analysis; do not quietly add a fragile homemade signing protocol.
+
+22. OTA USER EXPERIENCE AND INSTALLER FLOW
+
+Implement:
+- Rate-limited automatic launch checks when enabled.
+- Manual Check for Updates in Settings/Updates.
+- Installed version and latest available version display.
+- Clear release notes and Download Update action.
+- Real download progress, cancellation and retry.
+- Verification state before installation.
+- Android installer handoff with user confirmation.
+- Plain-language handling of unknown-source installation permission when required.
+- Cleanup of failed/obsolete temporary APK files.
+
+Keep APK downloads in app-controlled storage. Stream with timeouts and size limits. Validate HTTPS URLs and redirects, including the actual GitHub asset delivery hosts used at implementation time. Do not accept HTTP redirects, arbitrary local/file/content schemes, path traversal or unrestricted redirect destinations. Use safe generated local filenames, not a remote filename as a filesystem path.
+
+Before installer handoff verify download completion, expected byte size when supplied, SHA-256, package ID, actual higher versionCode, required Android compatibility and authentic trusted signer. Never pass a failed/unverified candidate to installation.
+
+Use a supported PackageInstaller flow or a correctly scoped content-URI/FileProvider flow. Explain why Android requests "Install unknown apps" from this source when necessary and open the appropriate settings screen only when relevant. Do not promise silent installation or bypass Android protections.
+
+Lock the vault before handing off to external installation/settings activities. After restart, verify the actual installed version; opening the installer is not proof an update succeeded. Cancellation must leave the existing application and data usable.
+
+Handle no internet, missing manifest, malformed JSON, server failures, redirects, certificate/TLS errors, low storage, interrupted downloads, checksum mismatch, wrong package, wrong signer, incompatible Android version and cancelled installation without crashing or deleting vault data.
+
+No forced-update lockout in the first release. An old version may show a dismissible security/support warning but must still allow offline unlock and recovery/export. Do not implement a remote kill switch or make a stale/public manifest the authority to deny access to the user's own data.
+
+23. APP IDENTITY AND SIGNING
+
+Confirm a permanent application ID before the first distributed release. Keep it stable. Keep versionName understandable and increase versionCode for every published release.
+
+Create one owner-controlled release signing key through a trusted secure process. Keep it outside Git repositories and do not paste it or its passwords into chat. Ignore keystores and secret signing files in Git, but also verify no secrets were already tracked. Ignoring a file does not remove an earlier committed copy.
+
+Use local secure configuration/environment input for release signing. Do not put signing credentials in Kotlin source, build logs or a public workflow. Help establish two safe independent backups before first distribution and prove the key can sign a subsequent build with the same certificate. Never replace the key on routine updates.
+
+Debug/test builds may use separate development IDs/signatures where helpful. Never present a debug-signed preview as the official release and never tell the owner to uninstall their real vault just to install a test build.
+
+Direct OTA distribution needs a compatible signed APK, preferably one universal APK where practical. An AAB, source ZIP, browser preview or raw source listing is not a directly installable final APK. Include necessary native architectures if any dependencies require them, and test on supported devices.
+
+24. DEVELOPER CREDITS AND ABOUT
+
+Display professionally in About:
+
+PRIVATE VAULT
+Developed by Tp Editz
+Telegram: @Tp_Editz
+Version: [actual installed versionName and versionCode]
+
+Include a concise privacy statement, Check for Updates, third-party licences and support information. Telegram may be a copyable username and a deliberate external link to https://t.me/Tp_Editz. Do not contact the account, send vault data or open the link automatically.
+
+Use the exact spelling/capitalisation "Tp Editz" and "@Tp_Editz" for credits. Do not invent an email address, company registration, postal address or certification. Do not imply Google or Android developed, audited or endorsed the application.
+
+Credits should feel polished and visible in About without distracting from the vault. Do not place advertisements or repeated developer banners inside private notes/credential screens.
+
+25. IMPLEMENTATION QUALITY
+
+Use current stable compatible Android tooling, pin versions and document the tested build configuration. Verify library maintenance, Android support, licensing and known relevant vulnerabilities at implementation time; do not guess "latest" version numbers.
+
+Prefer a clear MVVM-style separation: Compose presentation, lifecycle-aware ViewModels, domain/use-case logic, vault-scoped repositories, security services and platform adapters. Kotlin coroutines/Flow may be used with explicit cancellation/session ownership. Avoid one huge activity and avoid unnecessary framework complexity.
+
+Keep updater interfaces independent of vault repositories. Use an explicit session model such as Locked, RealVaultSession and DecoyVaultSession rather than loosely connected global booleans. Model sensitive operations so they require the correct authenticated capability.
+
+Keep domain models containing secrets out of logs, generic toString output, serialised navigation and crash traces. Avoid data-class default logging accidentally dumping credential contents. Redact error contexts.
+
+Use resource strings, accessible semantic labels and consistent form validation. Handle back gestures, rotation, keyboard visibility and process recreation. Show destructive confirmation only where it protects user data; do not burden routine edits with repeated permission questions.
+
+Ship no unfinished buttons, placeholder update URLs, hard-coded test credentials, fake security scores, TODO implementations or demo-only cryptography. If an environment prevents completion, preserve the complete source and clearly identify what remains and how to finish it.
+
+26. DEVELOPMENT STAGES AND EVIDENCE
+
+Proceed in stages that produce reviewable results:
+
+Stage 1 - Understand and plan.
+Summarise known requirements, actual tool capabilities and remaining essential configuration. Produce the proposed screen map, storage/encryption boundary, real/decoy isolation design and key lifecycle. State any architecture issue needing resolution before real secrets are stored.
+
+Stage 2 - Establish the project and secure storage foundation.
+Create the buildable Android project, design tokens, navigation and testable security/data interfaces. Implement authentication/key access/encrypted persistence before treating saved data as secure. Temporary UI fixtures must be clearly separated from production storage.
+
+Stage 3 - Implement the four primary tools.
+Build real notes, credentials, secure generator and offline strength checker, including forms, persistence, error states and accessibility. Connect them only to the active vault session.
+
+Stage 4 - Complete security and decoy behaviour.
+Implement session locking, decoy password routing/isolation, secure settings and the biometric policy. Test transitions and stale asynchronous work carefully.
+
+Stage 5 - Implement local portable backups.
+Build authenticated encrypted export/restore, current-vault scoping, format validation, merge/replace preview and safe transactions.
+
+Stage 6 - Integrate OTA from the first release.
+Implement the configurable updater, signature/trust checks, progress/errors, installer flow and preservation of existing encrypted data. Resolve actual public endpoint configuration before distribution.
+
+Stage 7 - Polish and verify.
+Review visual quality, accessibility, startup, scrolling, typing, low-storage cases and offline behaviour. Run threat-driven tests and fix significant defects.
+
+Stage 8 - Release preparation.
+Build the signed APK in a supported environment, produce real hashes/fingerprints and a test report, retain complete private source, and prepare public release assets. Publish only within the owner's explicit release authorisation. Do not claim that creating a prompt or project is the same as delivering a verified secure application.
+
+27. FUNCTIONAL ACCEPTANCE TESTS
+
+For every test, record PASS, FAIL, BLOCKED or NOT TESTED, with device/build and evidence. Do not infer a pass from code presence. Use synthetic test records; never expose the owner's real secrets as evidence.
+
+F01. Clean install reaches setup and creates encrypted real-vault storage.
+F02. Wrong master password unlocks neither vault.
+F03. Correct real password opens the real vault.
+F04. Notes create/edit/autosave/search/folder/pin/archive/trash operations persist after restart.
+F05. Save failure shows an error rather than a false saved state.
+F06. Several credentials for the same service remain independent.
+F07. Reveal/hide and separate username/password copy controls work.
+F08. Generator handles all supported settings and rejects impossible combinations.
+F09. Generated secrets are not auto-saved or written to history.
+F10. Strength checking and suggestions work in airplane mode.
+F11. Common patterned passwords receive sensible cautious feedback.
+F12. Reuse feedback is local and never searches another vault.
+F13. Manual lock, background lock, device lock and process restart clear secret UI/session access.
+F14. Keyboard, rotation and back navigation do not reveal locked content or lose committed data.
+F15. Light/dark/system themes, large fonts and TalkBack work on core screens.
+F16. About displays exact developer credits and actual version information.
+
+28. SECURITY AND DECOY ACCEPTANCE TESTS
+
+S01. Synthetic distinctive note/credential text is absent from accessible at-rest files, indexes, preferences, journals, caches and logs that should be protected. Combine inspection with architecture/code review; absence of a sample string alone does not prove encryption.
+S02. Crypto library known-answer tests/vectors and tampered authentication-tag tests pass.
+S03. Wrong passwords, corrupted envelopes and invalid KDF parameters fail safely without replacing keys/data.
+S04. Master-password change works and an interrupted change cannot destroy the existing vault.
+S05. Correct decoy password opens only decoy records; arbitrary incorrect input opens nothing.
+S06. Decoy search, counts, favourites, trash, generator-save and reuse checks cannot reveal real data.
+S07. Start a real-vault asynchronous operation, lock, unlock decoy, and verify no late result/write crosses the session boundary.
+S08. Decoy export contains no real records, key envelopes or revealing real-vault metadata.
+S09. Restore into one vault cannot modify the other.
+S10. Decoy settings cannot change real security credentials.
+S11. Enabling decoy disables the default real-vault biometric path; biometric prompts never escape decoy into real.
+S12. With decoy disabled, biometric success authorises the intended crypto operation and cancellation/invalidation preserves data.
+S13. Sensitive previews/screenshots/clipboard handling follow the documented policy on tested Android versions.
+S14. App backup/transfer rules exclude sensitive internal state as designed.
+S15. Network inspection shows only permitted update traffic; no password/hash/checker/notes upload occurs.
+S16. Deep links/exported components cannot bypass authentication.
+S17. No keystore, signing secret, API token, developer backdoor or fixed vault decrypt key is present in committed source or release output.
+S18. Review against relevant OWASP MASVS storage, cryptography, authentication, network, platform and privacy controls. Record unresolved findings; do not claim certification.
+
+29. BACKUP AND UPDATE ACCEPTANCE TESTS
+
+B01. An exported backup cannot be read as ordinary plaintext.
+B02. Wrong backup password, tampering, truncation and unsupported versions are rejected without changing the active vault.
+B03. Huge/malformed KDF parameters and oversized inputs are bounded before expensive allocation.
+B04. A backup restores on a compatible fresh installation with only its backup password and the new destination setup.
+B05. Failed/cancelled merge/replace leaves old data intact; successful restore preserves expected records.
+B06. Export/restore respects current real/decoy scope.
+
+U01. The first distributed APK already contains the updater.
+U02. No-update, equal-version and lower-version manifests do not offer a normal update.
+U03. A valid higher version shows accurate notes and real progress.
+U04. Offline, malformed, unavailable and incompatible manifests are handled without blocking vault use.
+U05. Interrupted downloads, insufficient space and cancellation recover safely.
+U06. Wrong checksum, wrong package, mismatched version and wrong signing identity are rejected.
+U07. A candidate with an apparent certificate field but an invalid APK signature is rejected.
+U08. Android installation permission and confirmation flow work; cancellation leaves the old app usable.
+U09. Install release 1.0.0, create synthetic real and decoy data, then update to release 1.0.1 using the app's own updater without uninstalling.
+U10. After that update, verify both passwords, both vaults, notes, credentials, folder/tag/trash data and applicable settings still work.
+U11. Explicit schema migrations preserve the approved key hierarchy and encrypted data.
+U12. A remote forceUpdate/minimum-support flag does not deny offline access/export in this release.
+
+Run unit/integration/UI/migration tests appropriate to these behaviours. Device-bound Keystore, biometrics, installation, OEM clipboard and storage-provider behaviour need physical-device validation where possible. If unavailable, mark them NOT TESTED and provide clear owner test instructions; do not report emulator checks as physical-device evidence.
+
+30. REQUIRED HANDOVER DELIVERABLES
+
+Provide as supported by the actual environment:
+1. Complete native Android source project, privately retained, with Gradle wrapper and pinned dependency/build versions.
+2. Exportable project ZIP when direct repository export is unavailable.
+3. Signed release APK only if it was actually built and signed with the approved identity.
+4. The APK's real SHA-256, versionName/versionCode, application ID and signing certificate fingerprint.
+5. Verified private source repository details, or an honest pending import/push status.
+6. Verified public update repository and permanent raw JSON URL, or clearly labelled pending setup.
+7. Final valid update.json generated from actual release outputs.
+8. Architecture and threat-model notes, encryption boundary, key lifecycle and decoy limitations.
+9. Backup format documentation and compatibility policy.
+10. Test report with evidence, failures, untested items and known limitations.
+11. First-release/future-update instructions, including preserving data and the same signing identity.
+12. A beginner-friendly handover explaining only the actions the owner actually needs to perform.
+
+Never include the release private key or its password in the project archive, APK, public repository or ordinary handover document. Handle owner key backup separately and securely.
+
+If you cannot build/sign/publish from your environment, deliver every feasible source/configuration artifact and give exact continuation steps. Do not fabricate a downloadable APK, repository action, deployment URL or test result.
+
+31. HOW TO COMMUNICATE AND CONTINUE
+
+Start with a short explanation of the planned result and what is already known. Ask only essential missing questions in small batches. Do not repeatedly ask for features, developer name or offline behaviour already specified here.
+
+Explain an owner action through a concrete instruction and expected result: which screen to open, which option to choose, which non-secret value to provide and what successful completion looks like. Do not bury a beginner in unexplained Gradle/security terminology.
+
+Proceed with reversible implementation and tests under the existing task authorisation. Respect explicit repository/publication permissions; do not turn private code public or publish an unapproved binary. Never ask the owner to paste account passwords, personal access tokens, master passwords, backup passwords or signing secrets into chat.
+
+If blocked by a tool limitation, state it precisely and preserve the work. Do not silently weaken the security design, omit a required primary tool or pretend a preview is a finished secure release.
+
+Use a private progress/requirements checklist in the project so work can resume reliably across AI sessions. Record implementation status, actual file paths, dependency versions and pending tests without recording secrets.
+
+32. REFERENCES AND IMPLEMENTATION VERIFICATION
+
+Owner-provided planning inputs:
+- PRIVATE_VAULT_Project_Brief.pdf.
+- Free_Android_OTA_Update_Beginner_Guide_and_AI_Prompt.pdf.
+- PRIVATE_VAULT_OTA_Black_and_White_Beginner_Guide.pdf.
+- The owner's latest notes/password-generator/offline-checker/decoy/credits/design requirements.
+
+Primary references to recheck during implementation and release:
+Google AI Studio native Android support and limitations:
+https://ai.google.dev/gemini-api/docs/aistudio-android
+Android cryptographic facilities:
+https://developer.android.com/privacy-and-security/cryptography
+Android Keystore:
+https://developer.android.com/privacy-and-security/keystore
+Android biometric authentication:
+https://developer.android.com/identity/sign-in/biometric-auth
+Argon2 reference and test vectors:
+https://www.rfc-editor.org/rfc/rfc9106
+Mobile application security verification:
+https://mas.owasp.org/MASVS/
+Android application update identity:
+https://developer.android.com/google/play/app-updates
+Android application signing:
+https://developer.android.com/studio/publish/app-signing
+GitHub release hosting:
+https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases
+Android distribution/developer verification:
+https://developer.android.com/developer-verification
+
+These references support implementation research. They do not certify this app. Verify current SDK behaviour, library compatibility and distribution requirements for the intended audience before release. Do not copy outdated policy dates or fees from the PDFs as permanent facts.
+
+FINAL BUILD DIRECTIVE
+
+Build PRIVATE VAULT around the four requested tools, genuinely encrypted local storage, an isolated fake-password vault and a premium smooth Android experience. Keep user data offline, keep source private, and use only the separate public repository for OTA metadata and APK assets. Protect the signing key, preserve both vaults across updates and prove completed work with honest evidence. Complete the application in reviewable stages without replacing requested functionality with a demo.
+
+AI IMPLEMENTATION BRIEF - END
