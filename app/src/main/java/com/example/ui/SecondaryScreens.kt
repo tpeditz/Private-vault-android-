@@ -1,14 +1,13 @@
 package com.example.ui
 
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,26 +18,26 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Fingerprint
-import androidx.compose.material.icons.filled.LockReset
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Restore
-import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SystemUpdate
-import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.VerifiedUser
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -63,329 +62,147 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.BuildConfig
 import com.example.data.AppPreferencesRepository
+import com.example.data.OtaReminderPolicy
 import com.example.data.PortableBackupEngine
+import com.example.data.ThemePreference
+import com.example.data.VaultAppPreferences
 import com.example.ota.OtaUpdateManager
-import com.example.security.BiometricKeystoreManager
 import com.example.security.CryptoEngine
-import com.example.security.VaultSessionManager
-import com.example.ui.theme.AppThemeMode
-import com.example.ui.theme.JetBrainsMonoFontFamily
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
-// =============================================================================================
-// 1. THREE-OPTION OTA UPDATE PROMPT DIALOG (Update Now | Update Later | Remind Me Later)
-// =============================================================================================
-
-@Composable
-fun OtaThreeOptionUpdateDialog(
-    manifest: OtaUpdateManager.OtaManifest,
-    advisoryWarning: String?,
-    onUpdateNow: () -> Unit,
-    onUpdateLater: () -> Unit,
-    onRemindMeLater: (OtaDeferralOption) -> Unit
-) {
-    var showReminderPicker by remember { mutableStateOf(false) }
-    var selectedDeferral by remember { mutableStateOf(OtaDeferralOption.TOMORROW) }
-
-    AlertDialog(
-        onDismissRequest = onUpdateLater,
-        icon = {
-            Icon(
-                imageVector = Icons.Filled.SystemUpdate,
-                contentDescription = "Update Available",
-                tint = MaterialTheme.colorScheme.primary
-            )
-        },
-        title = {
-            Text(
-                text = if (!showReminderPicker) {
-                    "Update Available: v${manifest.versionName}"
-                } else {
-                    "Remind Me Later"
-                },
-                modifier = Modifier.testTag("ota_dialog_title")
-            )
-        },
-        text = {
-            if (!showReminderPicker) {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        text = "Installed: v${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE}) → Latest: v${manifest.versionName} (code ${manifest.versionCode})",
-                        style = MaterialTheme.typography.labelMedium,
-                        fontFamily = JetBrainsMonoFontFamily,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-
-                    if (advisoryWarning != null) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.secondaryContainer,
-                            shape = MaterialTheme.shapes.extraSmall
-                        ) {
-                            Text(
-                                text = advisoryWarning,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                modifier = Modifier.padding(8.dp)
-                            )
-                        }
-                    }
-
-                    Text(
-                        text = "Release Notes:",
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = manifest.releaseNotes.ifBlank { "Security and stability improvements." },
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(10.dp)
-                        )
-                    }
-
-                    Text(
-                        text = "No download starts unless you choose Update Now. Your Real and Decoy vaults remain intact and accessible offline.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            } else {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "When should PRIVATE VAULT remind you about v${manifest.versionName}?",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    OtaDeferralOption.entries.forEach { option ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp)
-                        ) {
-                            RadioButton(
-                                selected = selectedDeferral == option,
-                                onClick = { selectedDeferral = option },
-                                modifier = Modifier.testTag("ota_remind_radio_${option.name.lowercase()}")
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column {
-                                Text(
-                                    text = option.label,
-                                    style = MaterialTheme.typography.titleSmall
-                                )
-                                Text(
-                                    text = option.description,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            if (!showReminderPicker) {
-                Button(
-                    onClick = onUpdateNow,
-                    modifier = Modifier.testTag("ota_update_now_button")
-                ) {
-                    Icon(imageVector = Icons.Filled.CloudDownload, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Update Now")
-                }
-            } else {
-                Button(
-                    onClick = { onRemindMeLater(selectedDeferral) },
-                    modifier = Modifier.testTag("ota_confirm_reminder_button")
-                ) {
-                    Icon(imageVector = Icons.Filled.Schedule, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Save Reminder")
-                }
-            }
-        },
-        dismissButton = {
-            if (!showReminderPicker) {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TextButton(
-                        onClick = { showReminderPicker = true },
-                        modifier = Modifier.testTag("ota_remind_me_later_button")
-                    ) {
-                        Text("Remind Me Later")
-                    }
-                    OutlinedButton(
-                        onClick = onUpdateLater,
-                        modifier = Modifier.testTag("ota_update_later_button")
-                    ) {
-                        Text("Update Later")
-                    }
-                }
-            } else {
-                TextButton(onClick = { showReminderPicker = false }) {
-                    Text("Back")
-                }
-            }
-        }
-    )
-}
-
-// =============================================================================================
-// 2. ENCRYPTED PORTABLE BACKUP & RESTORE SCREEN (Section 17)
-// =============================================================================================
+// ============================================================================================
+// 1. Encrypted Backup & Restore Screen (.pvault) — Fixes U01, U02, N02, R10, R16
+// ============================================================================================
 
 @Composable
 fun BackupAndRestoreScreen(
     uiState: VaultUiState,
     viewModel: VaultViewModel,
+    onLaunchCreateBackupDocument: (String) -> Unit,
+    onLaunchOpenRestoreDocument: () -> Unit,
     onBack: () -> Unit
 ) {
-    val context = LocalContext.current
-    var exportPassword by remember { mutableStateOf("") }
-    var confirmExportPassword by remember { mutableStateOf("") }
-    var selectedScope by remember { mutableStateOf(PortableBackupEngine.ExportScope.ALL) }
+    BackHandler { onBack() }
 
-    var restorePassword by remember { mutableStateOf("") }
-    var selectedRestoreUri by remember { mutableStateOf<Uri?>(null) }
-    var selectedRestoreMode by remember { mutableStateOf(PortableBackupEngine.RestoreMode.MERGE_KEEP_NEWEST) }
+    var exportPassword by rememberSaveable { mutableStateOf("") }
+    var confirmExportPassword by rememberSaveable { mutableStateOf("") }
 
-    val createDocumentLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
-    ) { uri: Uri? ->
-        val outStream = uri?.let { context.contentResolver.openOutputStream(it) }
-        viewModel.writePendingBackupToStream(outStream)
+    var restorePassword by rememberSaveable { mutableStateOf("") }
+    var restoreMode by rememberSaveable {
+        mutableStateOf(PortableBackupEngine.RestoreMode.MERGE_KEEP_NEWEST)
     }
-
-    val openDocumentLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        selectedRestoreUri = uri
-    }
-
-    BackHandler(onBack = onBack)
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-            }
-            Text(
-                text = "Encrypted Manual Backup & Restore",
-                style = MaterialTheme.typography.headlineMedium
-            )
-        }
+        SecondaryHeader(
+            title = "Encrypted Backup & Restore (.pvault)",
+            onBack = onBack
+        )
 
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
-            shape = MaterialTheme.shapes.small,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                text = "Vault-Scoped Portable Format (.pvault): Exports only the currently unlocked vault session using a fresh 128-bit salt, Argon2id key derivation, and AES-256-GCM authenticated encryption. Backup passwords can differ from your live master password. Changing your master password later does not alter previously exported backup files.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(12.dp)
-            )
-        }
+        Text(
+            text = "Backups export ONLY the currently unlocked vault slot. Every .pvault file is independently encrypted with Argon2id + AES-256-GCM and authenticated in memory before any restore touches SQLite.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
 
-        if (uiState.backupStatusMessage != null) {
-            Surface(
-                color = MaterialTheme.colorScheme.primaryContainer,
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = uiState.backupStatusMessage,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(12.dp)
+        // N02 Fix: Explicit Integrity Warning if any corrupted record exists in the active slot
+        if (uiState.corruptedRecordCount > 0) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
                 )
-            }
-        }
-
-        if (uiState.backupErrorMessage != null) {
-            Surface(
-                color = MaterialTheme.colorScheme.errorContainer,
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    text = uiState.backupErrorMessage,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(12.dp)
-                )
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            text = "Integrity Alert: ${uiState.corruptedRecordCount} Unreadable Record(s)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                    Text(
+                        text = "One or more encrypted records in this vault failed AES-256-GCM authentication. To prevent silent data loss, normal export and merge restore are blocked unless you explicitly enable Recovery Export below.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = uiState.allowRecoveryExportSkippingCorrupted,
+                            onCheckedChange = viewModel::setAllowRecoveryExportSkippingCorrupted
+                        )
+                        Text(
+                            text = "Enable Recovery Export (export intact records only)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
             }
         }
 
-        // Export Card
+        // Export Card (U01 Fix)
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(imageVector = Icons.Filled.Backup, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Text(text = "Export Encrypted Backup (.pvault)", style = MaterialTheme.typography.titleMedium)
-                }
-
-                PortableBackupEngine.ExportScope.entries.forEach { scope ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        RadioButton(
-                            selected = selectedScope == scope,
-                            onClick = { selectedScope = scope }
-                        )
-                        Text(text = scope.label, style = MaterialTheme.typography.bodyMedium)
-                    }
+                    Icon(
+                        Icons.Filled.SaveAlt,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Export Active Vault (${uiState.notes.size} notes, ${uiState.credentials.size} credentials)",
+                        style = MaterialTheme.typography.titleMedium
+                    )
                 }
 
                 OutlinedTextField(
                     value = exportPassword,
                     onValueChange = { exportPassword = it },
-                    label = { Text("Dedicated Backup Password (min 8 chars)") },
+                    label = { Text("Backup Encryption Password (min 8 chars)") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.None,
-                        autoCorrectEnabled = false,
-                        keyboardType = KeyboardType.Password
-                    ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("backup_export_password_input")
@@ -397,173 +214,178 @@ fun BackupAndRestoreScreen(
                     label = { Text("Confirm Backup Password") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.None,
-                        autoCorrectEnabled = false,
-                        keyboardType = KeyboardType.Password
-                    ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testTag("backup_confirm_export_password_input")
+                        .testTag("backup_export_confirm_password_input")
                 )
 
                 Button(
                     onClick = {
-                        val stamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())
-                        viewModel.prepareBackupForExport(
+                        viewModel.prepareBackupExport(
                             backupPassword = exportPassword,
-                            confirmBackupPassword = confirmExportPassword,
-                            scope = selectedScope,
-                            onReadyToPickDestination = {
+                            confirmPassword = confirmExportPassword,
+                            onReadyToLaunchCreateDocument = { suggestedName ->
                                 exportPassword = ""
                                 confirmExportPassword = ""
-                                createDocumentLauncher.launch("private_vault_backup_$stamp.pvault")
+                                onLaunchCreateBackupDocument(suggestedName)
                             }
                         )
                     },
-                    enabled = !uiState.isBackupOperationInProgress && exportPassword.length >= 8,
+                    enabled = !uiState.isBusy && exportPassword.length >= 8 && confirmExportPassword.length >= 8,
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("backup_export_button")
                 ) {
-                    Text("Encrypt & Choose Export Location")
+                    if (uiState.isBusy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Encrypting .pvault Backup…")
+                    } else {
+                        Icon(Icons.Filled.SaveAlt, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Export Encrypted .pvault")
+                    }
+                }
+
+                if (uiState.stagedBackupMetadata != null) {
+                    OutlinedButton(
+                        onClick = {
+                            onLaunchCreateBackupDocument(uiState.stagedBackupMetadata.suggestedFileName)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Re-open Save As Dialog (${uiState.stagedBackupMetadata.suggestedFileName})")
+                    }
                 }
             }
         }
 
-        // Restore Card
+        // Restore Card (U02 Fix)
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(imageVector = Icons.Filled.Restore, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Text(text = "Restore Encrypted Backup", style = MaterialTheme.typography.titleMedium)
-                }
-
-                OutlinedButton(
-                    onClick = {
-                        viewModel.beginRestoreFileSelection()
-                        openDocumentLauncher.launch(arrayOf("*/*"))
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("backup_select_restore_file_button")
-                ) {
+                    Icon(
+                        Icons.Filled.Restore,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary
+                    )
                     Text(
-                        if (selectedRestoreUri != null) {
-                            "Selected File: ${selectedRestoreUri?.lastPathSegment ?: "backup.pvault"}"
-                        } else {
-                            "1. Select .pvault Backup File"
-                        }
+                        text = "Restore from .pvault Backup",
+                        style = MaterialTheme.typography.titleMedium
                     )
                 }
 
                 OutlinedTextField(
                     value = restorePassword,
                     onValueChange = { restorePassword = it },
-                    label = { Text("2. Enter Backup File Password") },
+                    label = { Text("Backup Decryption Password") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.None,
-                        autoCorrectEnabled = false,
-                        keyboardType = KeyboardType.Password
-                    ),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("backup_restore_password_input")
                 )
 
-                Button(
-                    onClick = {
-                        val uri = selectedRestoreUri ?: return@Button
-                        val stream = context.contentResolver.openInputStream(uri)
-                        viewModel.verifyBackupForRestorePreview(stream, restorePassword)
-                        restorePassword = ""
-                    },
-                    enabled = selectedRestoreUri != null && restorePassword.isNotEmpty() && !uiState.isBackupOperationInProgress,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("backup_verify_preview_button")
+                Text(
+                    text = "Conflict Resolution Policy:",
+                    style = MaterialTheme.typography.labelMedium
+                )
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Verify & Preview Backup Contents")
+                    RadioButton(
+                        selected = restoreMode == PortableBackupEngine.RestoreMode.MERGE_KEEP_NEWEST,
+                        onClick = {
+                            restoreMode = PortableBackupEngine.RestoreMode.MERGE_KEEP_NEWEST
+                        }
+                    )
+                    Text(
+                        text = "Merge with active vault (keep newest updated record)",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
 
-                // Verified Restore Preview Box
-                val preview = uiState.verifiedBackupPreview
-                if (preview != null) {
-                    HorizontalDivider()
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = MaterialTheme.shapes.medium,
-                        modifier = Modifier.fillMaxWidth()
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    RadioButton(
+                        selected = restoreMode == PortableBackupEngine.RestoreMode.REPLACE_ACTIVE_VAULT,
+                        onClick = {
+                            restoreMode = PortableBackupEngine.RestoreMode.REPLACE_ACTIVE_VAULT
+                        }
+                    )
+                    Text(
+                        text = "Replace all records in active vault slot",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        viewModel.beginRestoreFileSelection {
+                            onLaunchOpenRestoreDocument()
+                        }
+                    },
+                    enabled = !uiState.isBusy,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("backup_select_file_button")
+                ) {
+                    Icon(Icons.Filled.FolderOpen, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (uiState.selectedRestoreFileName != null) {
+                            "Selected: ${uiState.selectedRestoreFileName}"
+                        } else {
+                            "Choose .pvault File"
+                        }
+                    )
+                }
+
+                if (uiState.selectedRestoreUriString != null) {
+                    Button(
+                        onClick = {
+                            val submittedPass = restorePassword
+                            restorePassword = ""
+                            viewModel.verifyAndRestoreSelectedUri(
+                                backupPassword = submittedPass,
+                                restoreMode = restoreMode
+                            )
+                        },
+                        enabled = !uiState.isBusy && restorePassword.isNotBlank(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("backup_restore_button")
                     ) {
-                        Column(
-                            modifier = Modifier.padding(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Text(
-                                text = "Authenticated Backup Preview",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.primary
+                        if (uiState.isBusy) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
                             )
-                            Text(
-                                text = "• Private Notes: ${preview.notesCount}\n" +
-                                    "• Saved Credentials: ${preview.credentialsCount}\n" +
-                                    "• Folders: ${preview.foldersCount}\n" +
-                                    "• Scope: ${preview.exportScope.label}",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-
-                            PortableBackupEngine.RestoreMode.entries.forEach { mode ->
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.fillMaxWidth()
-                                ) {
-                                    RadioButton(
-                                        selected = selectedRestoreMode == mode,
-                                        onClick = { selectedRestoreMode = mode }
-                                    )
-                                    Column {
-                                        Text(text = mode.label, style = MaterialTheme.typography.titleSmall)
-                                        Text(
-                                            text = mode.description,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                            }
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                OutlinedButton(
-                                    onClick = viewModel::cancelRestorePreview,
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Text("Cancel")
-                                }
-                                Button(
-                                    onClick = {
-                                        viewModel.confirmRestoreFromPreview(selectedRestoreMode)
-                                    },
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("backup_confirm_restore_button")
-                                ) {
-                                    Text("Confirm Restore")
-                                }
-                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Verifying & Restoring .pvault…")
+                        } else {
+                            Icon(Icons.Filled.Restore, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Verify & Restore Now")
                         }
                     }
                 }
@@ -572,741 +394,1011 @@ fun BackupAndRestoreScreen(
     }
 }
 
-// =============================================================================================
-// 3. SECURITY, DECOY VAULT, BIOMETRICS & KDF BENCHMARK SCREEN (Sections 11–16)
-// =============================================================================================
+// ============================================================================================
+// 2. Security, Active-Vault Password & Plausible Deniability Policy Screen (N05, R02, R07)
+// ============================================================================================
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SecurityAndDecoySettingsScreen(
     uiState: VaultUiState,
-    settingsState: AppPreferencesRepository.AppSettingsState,
-    sessionState: VaultSessionManager.SessionState,
+    preferences: VaultAppPreferences,
     viewModel: VaultViewModel,
-    onRequestBiometricEnrollmentPrompt: () -> Unit,
+    onRequestBiometricEnrollment: () -> Unit,
     onBack: () -> Unit
 ) {
-    val isRealVaultSession = (sessionState as? VaultSessionManager.SessionState.Unlocked)?.canManageVaultSecurity == true
-    val bioHardwareStatus = remember { viewModel.biometricKeystoreManager.checkBiometricAvailability() }
+    BackHandler { onBack() }
 
-    var currMasterPass by remember { mutableStateOf("") }
-    var newMasterPass by remember { mutableStateOf("") }
-    var confirmNewMasterPass by remember { mutableStateOf("") }
+    // R02 Fix: Active-vault password rotation state (works identically in Real and Decoy sessions)
+    var currentVaultPass by rememberSaveable { mutableStateOf("") }
+    var newVaultPass by rememberSaveable { mutableStateOf("") }
+    var confirmNewVaultPass by rememberSaveable { mutableStateOf("") }
 
-    var realPassForDecoy by remember { mutableStateOf("") }
-    var newDecoyPass by remember { mutableStateOf("") }
-    var confirmNewDecoyPass by remember { mutableStateOf("") }
-    var seedSampleDecoy by remember { mutableStateOf(true) }
+    // R02 & N05 Fix: Password-gated Plausible Deniability Policy Sheet state
+    var showPolicyGateDialog by rememberSaveable { mutableStateOf(false) }
+    var gatePasswordInput by rememberSaveable { mutableStateOf("") }
 
-    BackHandler(onBack = onBack)
+    // Decoy Provisioning / Rotation / Destructive Reset state
+    var realPassForDecoy by rememberSaveable { mutableStateOf("") }
+    var currentDecoyPass by rememberSaveable { mutableStateOf("") }
+    var decoyPass by rememberSaveable { mutableStateOf("") }
+    var confirmDecoyPass by rememberSaveable { mutableStateOf("") }
+    var seedDecoyData by rememberSaveable { mutableStateOf(true) }
+    var confirmDestructiveReset by rememberSaveable { mutableStateOf(false) }
+
+    if (showPolicyGateDialog && !uiState.isDecoyPolicySheetUnlocked) {
+        AlertDialog(
+            onDismissRequest = {
+                showPolicyGateDialog = false
+                gatePasswordInput = ""
+            },
+            icon = { Icon(Icons.Filled.Security, contentDescription = null) },
+            title = { Text("Verify Master Password") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Enter your primary Master Password to access dual-envelope Plausible Deniability Policy settings.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedTextField(
+                        value = gatePasswordInput,
+                        onValueChange = { gatePasswordInput = it },
+                        label = { Text("Master Password") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("decoy_gate_password_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val submitted = gatePasswordInput
+                        gatePasswordInput = ""
+                        showPolicyGateDialog = false
+                        viewModel.unlockDecoyPolicySheet(submitted)
+                    },
+                    enabled = gatePasswordInput.isNotBlank() && !uiState.isBusy,
+                    modifier = Modifier.testTag("decoy_gate_confirm_button")
+                ) {
+                    Text("Verify")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showPolicyGateDialog = false
+                        gatePasswordInput = ""
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-            }
-            Text(
-                text = "Security, Privacy & Preferences",
-                style = MaterialTheme.typography.headlineMedium
-            )
-        }
+        SecondaryHeader(
+            title = "Security & Vault Settings",
+            onBack = onBack
+        )
 
-        if (uiState.securityStatusMessage != null) {
-            Surface(
-                color = MaterialTheme.colorScheme.primaryContainer,
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = uiState.securityStatusMessage,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(12.dp)
-                )
-            }
-        }
-
-        if (uiState.securityErrorMessage != null) {
-            Surface(
-                color = MaterialTheme.colorScheme.errorContainer,
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = uiState.securityErrorMessage,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(12.dp)
-                )
-            }
-        }
-
-        // Theme, Auto-Lock, Clipboard & Screenshot Policy
+        // Auto-Lock, Screenshot Protection & Theme Preferences
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text(text = "App Appearance & Session Locking", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    text = "Locking, Screen Security & Clipboard",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
 
-                Text(text = "Theme Mode", style = MaterialTheme.typography.labelLarge)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AppThemeMode.entries.forEach { mode ->
-                        FilterChip(
-                            selected = settingsState.themeMode == mode,
-                            onClick = { viewModel.setThemeMode(mode) },
-                            label = { Text(mode.name) }
-                        )
-                    }
-                }
+                Text(
+                    text = "Auto-Lock Timeout on Background:",
+                    style = MaterialTheme.typography.labelMedium
+                )
 
-                HorizontalDivider()
-
-                Text(text = "Auto-Lock Timeout on Background", style = MaterialTheme.typography.labelLarge)
                 val timeoutOptions = listOf(
                     0L to "Immediate",
-                    30_000L to "30 sec",
-                    60_000L to "1 min",
-                    300_000L to "5 min"
+                    30_000L to "30s",
+                    60_000L to "1m",
+                    300_000L to "5m"
                 )
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     timeoutOptions.forEach { (ms, label) ->
                         FilterChip(
-                            selected = settingsState.autoLockTimeoutMs == ms,
+                            selected = preferences.autoLockTimeoutMs == ms,
                             onClick = { viewModel.setAutoLockTimeoutMs(ms) },
                             label = { Text(label) }
                         )
                     }
                 }
 
-                HorizontalDivider()
-
-                Text(text = "Sensitive Clipboard Auto-Clear Timer", style = MaterialTheme.typography.labelLarge)
-                val clipOptions = listOf(15, 30, 60)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    clipOptions.forEach { sec ->
-                        FilterChip(
-                            selected = settingsState.clipboardClearSeconds == sec,
-                            onClick = { viewModel.setClipboardClearSeconds(sec) },
-                            label = { Text("${sec}s") }
-                        )
-                    }
-                }
-
-                HorizontalDivider()
-
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(text = "Block Screenshots & Screen Recording (FLAG_SECURE)", style = MaterialTheme.typography.titleSmall)
+                        Text("Lock Immediately When Screen Turns Off")
                         Text(
-                            text = "Prevents screenshots and hides vault previews in Android Recents.",
+                            text = "Wipes in-memory DEK as soon as the display powers down.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     Switch(
-                        checked = settingsState.blockScreenshots,
+                        checked = preferences.lockOnScreenOff,
+                        onCheckedChange = viewModel::setLockOnScreenOff
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Block Screenshots & Recents Preview (FLAG_SECURE)")
+                        Text(
+                            text = "Prevents screenshots, screen recording, and task-switcher snapshots.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = preferences.blockScreenshots,
                         onCheckedChange = viewModel::setBlockScreenshots
                     )
+                }
+
+                Text(
+                    text = "Sensitive Clipboard Auto-Clear Timer:",
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(15, 30, 60).forEach { sec ->
+                        FilterChip(
+                            selected = preferences.clipboardClearTtlSeconds == sec,
+                            onClick = { viewModel.setClipboardClearTtlSeconds(sec) },
+                            label = { Text("${sec}s") }
+                        )
+                    }
+                }
+
+                Text(
+                    text = "Theme Appearance:",
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ThemePreference.entries.forEach { theme ->
+                        FilterChip(
+                            selected = preferences.themePreference == theme,
+                            onClick = { viewModel.setThemePreference(theme) },
+                            label = { Text(theme.name.replace('_', ' ')) }
+                        )
+                    }
                 }
             }
         }
 
-        // Argon2id KDF Telemetry & On-Device Benchmark Card (Refinement #2)
+        // R02 Fix: Generic Active-Vault Password Rotation Card (works in both Real and Decoy vaults!)
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(imageVector = Icons.Filled.Speed, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Icon(
+                        Icons.Filled.Lock,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
                     Text(
-                        text = "Argon2id KDF Parameters & 2-Slot Benchmark",
+                        text = "Change Vault Password",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                }
+                Text(
+                    text = "Re-wraps the active vault's 256-bit Data Encryption Key (DEK) with a fresh 16-byte Argon2id salt and 12-byte GCM nonce without re-encrypting every record.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                OutlinedTextField(
+                    value = currentVaultPass,
+                    onValueChange = { currentVaultPass = it },
+                    label = { Text("Current Vault Password") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("change_vault_current_password_input")
+                )
+                OutlinedTextField(
+                    value = newVaultPass,
+                    onValueChange = { newVaultPass = it },
+                    label = { Text("New Vault Password (min 8 chars)") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("change_vault_new_password_input")
+                )
+                OutlinedTextField(
+                    value = confirmNewVaultPass,
+                    onValueChange = { confirmNewVaultPass = it },
+                    label = { Text("Confirm New Vault Password") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("change_vault_confirm_password_input")
+                )
+
+                Button(
+                    onClick = {
+                        viewModel.changeActiveVaultPassword(
+                            currentPassword = currentVaultPass,
+                            newPassword = newVaultPass,
+                            confirmNewPassword = confirmNewVaultPass
+                        )
+                        currentVaultPass = ""
+                        newVaultPass = ""
+                        confirmNewVaultPass = ""
+                    },
+                    enabled = !uiState.isBusy && currentVaultPass.isNotBlank() && newVaultPass.length >= 8,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("change_vault_password_button")
+                ) {
+                    Text("Update Vault Password")
+                }
+            }
+        }
+
+        // Biometric Quick-Unlock Card (Neutral copy across sessions — R02)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Fingerprint,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Biometric Quick-Unlock",
                         style = MaterialTheme.typography.titleMedium
                     )
                 }
 
-                val bench = settingsState.lastKdfBenchmark
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = MaterialTheme.shapes.small,
+                if (uiState.isDecoyModeEnabled) {
+                    Text(
+                        text = "Biometric quick-unlock is disabled while multi-envelope policy is active so an observer cannot infer additional password-only vaults.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                } else {
+                    Text(
+                        text = "Wraps the vault DEK using a biometric-authenticated AES-256-GCM key in Android Keystore.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Button(
+                            onClick = onRequestBiometricEnrollment,
+                            enabled = !uiState.isBiometricEnrolled && !uiState.isBusy,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(if (uiState.isBiometricEnrolled) "Biometrics Enabled" else "Enable Biometrics")
+                        }
+                        if (uiState.isBiometricEnrolled) {
+                            OutlinedButton(
+                                onClick = viewModel::disableBiometricUnlock,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Disable")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // R02 & N05 Fix: Password-Gated Plausible Deniability Policy Card
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f)
                     ) {
-                        if (bench != null) {
+                        Icon(
+                            Icons.Filled.Security,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary
+                        )
+                        Text(
+                            text = "Advanced Multi-Envelope Policy",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+                    if (uiState.isDecoyPolicySheetUnlocked) {
+                        TextButton(onClick = viewModel::closeDecoyPolicySheet) {
+                            Text("Lock Panel")
+                        }
+                    }
+                }
+
+                if (!uiState.isDecoyPolicySheetUnlocked) {
+                    Text(
+                        text = "Configure or rotate secondary key envelope policies. Requires Master Password verification.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedButton(
+                        onClick = { showPolicyGateDialog = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("open_decoy_policy_gate_button")
+                    ) {
+                        Icon(Icons.Filled.Lock, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Verify Master Password to Configure")
+                    }
+                } else {
+                    // Unlocked Decoy Policy Management Sheet (only reachable in Real Vault)
+                    Text(
+                        text = if (uiState.isDecoyModeEnabled) {
+                            "Status: Decoy Vault is ACTIVE (Slot 1 configured). You can rotate the Decoy Password while preserving all decoy records, or perform a destructive reset."
+                        } else {
+                            "Status: Decoy Vault is NOT configured (Slot 1 holds an unconfigured dummy envelope)."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary,
+                        fontWeight = FontWeight.SemiBold
+                    )
+
+                    OutlinedTextField(
+                        value = realPassForDecoy,
+                        onValueChange = { realPassForDecoy = it },
+                        label = { Text("Confirm Primary Master Password") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("decoy_real_master_password_input")
+                    )
+
+                    if (!uiState.isDecoyModeEnabled) {
+                        // Flow 1: First-Time Decoy Provisioning
+                        HorizontalDivider()
+                        Text(
+                            text = "Provision New Decoy Vault",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+
+                        OutlinedTextField(
+                            value = decoyPass,
+                            onValueChange = { decoyPass = it },
+                            label = { Text("Decoy Password (min 8 chars)") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("decoy_new_password_input")
+                        )
+
+                        OutlinedTextField(
+                            value = confirmDecoyPass,
+                            onValueChange = { confirmDecoyPass = it },
+                            label = { Text("Confirm Decoy Password") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("decoy_confirm_password_input")
+                        )
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = seedDecoyData,
+                                onCheckedChange = { seedDecoyData = it }
+                            )
                             Text(
-                                text = "STATUS: MEASURED ON DEVICE",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = JetBrainsMonoFontFamily,
+                                text = "Seed plausible sample notes & credentials in Decoy Vault",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                viewModel.configureDecoyVault(
+                                    realMasterPassword = realPassForDecoy,
+                                    decoyPassword = decoyPass,
+                                    confirmDecoyPassword = confirmDecoyPass,
+                                    seedPlausibleData = seedDecoyData,
+                                    allowDestructiveReset = false
+                                )
+                                realPassForDecoy = ""
+                                decoyPass = ""
+                                confirmDecoyPass = ""
+                            },
+                            enabled = !uiState.isBusy && realPassForDecoy.isNotBlank() && decoyPass.length >= 8,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("provision_decoy_button")
+                        ) {
+                            Text("Enable Decoy Vault")
+                        }
+                    } else {
+                        // Flow 2 (N05 Fix): Non-Destructive Decoy Password Rotation
+                        HorizontalDivider()
+                        Text(
+                            text = "Change Decoy Password (Preserves Existing Decoy Records)",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Re-wraps the existing Decoy DEK so all notes, passwords, and folders inside the Decoy Vault remain intact.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        OutlinedTextField(
+                            value = currentDecoyPass,
+                            onValueChange = { currentDecoyPass = it },
+                            label = { Text("Current Decoy Password") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("decoy_current_password_input")
+                        )
+                        OutlinedTextField(
+                            value = decoyPass,
+                            onValueChange = { decoyPass = it },
+                            label = { Text("New Decoy Password (min 8 chars)") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("decoy_new_password_input")
+                        )
+                        OutlinedTextField(
+                            value = confirmDecoyPass,
+                            onValueChange = { confirmDecoyPass = it },
+                            label = { Text("Confirm New Decoy Password") },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("decoy_confirm_password_input")
+                        )
+
+                        Button(
+                            onClick = {
+                                viewModel.rotateDecoyPasswordPreservingData(
+                                    realMasterPassword = realPassForDecoy,
+                                    currentDecoyPassword = currentDecoyPass,
+                                    newDecoyPassword = decoyPass,
+                                    confirmNewDecoyPassword = confirmDecoyPass
+                                )
+                                realPassForDecoy = ""
+                                currentDecoyPass = ""
+                                decoyPass = ""
+                                confirmDecoyPass = ""
+                            },
+                            enabled = !uiState.isBusy &&
+                                realPassForDecoy.isNotBlank() &&
+                                currentDecoyPass.isNotBlank() &&
+                                decoyPass.length >= 8,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("rotate_decoy_password_button")
+                        ) {
+                            Text("Rotate Decoy Password (Keep Data)")
+                        }
+
+                        // Flow 3 (N05 Fix): Explicit Destructive Reset & Wipe Decoy Vault
+                        HorizontalDivider()
+                        Text(
+                            text = "Destructive Reset or Disable Decoy Vault",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = confirmDestructiveReset,
+                                onCheckedChange = { confirmDestructiveReset = it },
+                                modifier = Modifier.testTag("decoy_destructive_reset_checkbox")
+                            )
+                            Text(
+                                text = "I understand that resetting or disabling the Decoy Vault permanently deletes all existing Decoy Vault records.",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = seedDecoyData,
+                                onCheckedChange = { seedDecoyData = it }
+                            )
+                            Text(
+                                text = "Seed fresh sample records on reset",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    viewModel.configureDecoyVault(
+                                        realMasterPassword = realPassForDecoy,
+                                        decoyPassword = decoyPass,
+                                        confirmDecoyPassword = confirmDecoyPass,
+                                        seedPlausibleData = seedDecoyData,
+                                        allowDestructiveReset = true
+                                    )
+                                    realPassForDecoy = ""
+                                    currentDecoyPass = ""
+                                    decoyPass = ""
+                                    confirmDecoyPass = ""
+                                    confirmDestructiveReset = false
+                                },
+                                enabled = !uiState.isBusy &&
+                                    confirmDestructiveReset &&
+                                    realPassForDecoy.isNotBlank() &&
+                                    decoyPass.length >= 8,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("reset_wipe_decoy_button")
+                            ) {
+                                Text("Reset & Wipe Decoy")
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    viewModel.disableDecoyVault(realPassForDecoy)
+                                    realPassForDecoy = ""
+                                    confirmDestructiveReset = false
+                                },
+                                enabled = !uiState.isBusy &&
+                                    confirmDestructiveReset &&
+                                    realPassForDecoy.isNotBlank(),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.error
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("disable_decoy_button")
+                            ) {
+                                Text("Disable Decoy")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Device Argon2id KDF Benchmark & Telemetry Card (R07: manual-only, no exact timestamp)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Speed,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Argon2id v1.3 KDF Parameters & Device Benchmark",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                }
+
+                val defaultMem = CryptoEngine.selectDefaultMemoryKb()
+                val defaultIter = CryptoEngine.selectDefaultIterations()
+                val statusLabel = if (preferences.lastBenchmarkSingleSlotMs > 0L) {
+                    "MEASURED ON DEVICE (${preferences.lastBenchmarkDevice})"
+                } else {
+                    "PROPOSED DEFAULT (Run Benchmark Below to Measure on Device)"
+                }
+
+                Text(
+                    text = "Parameter Status: $statusLabel",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.secondary
+                )
+                Text(
+                    text = "• Algorithm: Argon2id v1.3 (org.bouncycastle:bcprov-jdk18on:1.80)\n" +
+                        "• Memory per Slot: ${defaultMem / 1024} MiB ($defaultMem KB)\n" +
+                        "• Iterations (t): $defaultIter • Parallelism (p): ${CryptoEngine.PROPOSED_STANDARD_PARALLELISM}",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace
+                )
+
+                if (preferences.lastBenchmarkSingleSlotMs > 0L) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Recorded Device Telemetry:",
+                                style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.primary
                             )
                             Text(
-                                text = "Device: ${bench.deviceModel} (API ${bench.androidSdkInt})\n" +
-                                    "KDF: Argon2id v1.3 (BouncyCastle 1.80)\n" +
-                                    "Parameters: ${bench.memoryKbPerSlot / 1024} MiB/slot, ${bench.iterations} iterations, ${bench.parallelism} lanes\n" +
-                                    "Single-Slot Time: ${bench.singleSlotDurationMs} ms\n" +
-                                    "Two-Slot Unlock Time (Slot 0 + Slot 1): ${bench.twoSlotUnlockDurationMs} ms\n" +
-                                    "JVM Heap: ${bench.usedHeapMbAfterRun} MiB used / ${bench.maxHeapMb} MiB max",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = JetBrainsMonoFontFamily
-                            )
-                        } else {
-                            Text(
-                                text = "STATUS: PROPOSED DEFAULT (Until Measured)\n" +
-                                    "Proposed Profile: ${CryptoEngine.selectDefaultMemoryKb() / 1024} MiB/slot, ${CryptoEngine.selectDefaultIterations()} iterations, 2 lanes",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontFamily = JetBrainsMonoFontFamily
+                                text = "Device: ${preferences.lastBenchmarkDevice}\n" +
+                                    "Single-Slot Derivation: ${preferences.lastBenchmarkSingleSlotMs} ms\n" +
+                                    "Two-Slot Unlock Path (Slot 0 + Slot 1): ${preferences.lastBenchmarkTwoSlotMs} ms\n" +
+                                    "Heap Usage: ${preferences.lastBenchmarkUsedHeapMb} MB / ${preferences.lastBenchmarkMaxHeapMb} MB max",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace
                             )
                         }
                     }
                 }
 
                 OutlinedButton(
-                    onClick = viewModel::runOnDeviceKdfBenchmark,
-                    enabled = !uiState.isRunningKdfBenchmark,
+                    onClick = viewModel::runDeviceKdfBenchmark,
+                    enabled = !uiState.isBusy,
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("run_kdf_benchmark_button")
                 ) {
-                    if (uiState.isRunningKdfBenchmark) {
-                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Measuring 2-Slot Argon2id...")
-                    } else {
-                        Text("Measure Two-Vault Argon2id Benchmark Now")
-                    }
-                }
-            }
-        }
-
-        // Real-Vault-Only Security Controls (Master Password Rotation, Biometric Policy, Decoy Config)
-        // Decoy sessions do not allow changing Real credentials (S10)
-        if (isRealVaultSession) {
-            // Biometric Convenience (When Decoy is Disabled - Section 15)
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(imageVector = Icons.Filled.Fingerprint, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                        Text(text = "Hardware Biometric Unlock Policy", style = MaterialTheme.typography.titleMedium)
-                    }
-
-                    if (uiState.isDecoyConfiguredInRealSession) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            shape = MaterialTheme.shapes.small,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                text = "Decoy Policy Active: Because Decoy Mode is enabled, biometric unlock for the Real Vault is automatically disabled so a fingerprint prompt cannot reveal or jump into the Real Vault.",
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(10.dp)
-                            )
-                        }
-                    } else {
-                        Text(
-                            text = "Hardware Status: ${bioHardwareStatus.name}. When enabled, Android Keystore binds an AES-256-GCM wrapping key to strong biometric authentication.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
-                        if (uiState.isBiometricEnrolledForRealVault) {
-                            OutlinedButton(
-                                onClick = viewModel::disableBiometricUnlock,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text("Disable Biometric Unlock & Delete Keystore Wrapper")
-                            }
-                        } else {
-                            Button(
-                                onClick = onRequestBiometricEnrollmentPrompt,
-                                enabled = bioHardwareStatus == BiometricKeystoreManager.BiometricHardwareStatus.AVAILABLE,
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text("Enable Hardware Biometric Unlock")
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Master Password Change (Section 12, S04)
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(imageVector = Icons.Filled.LockReset, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                        Text(text = "Change Real Master Password", style = MaterialTheme.typography.titleMedium)
-                    }
-
-                    OutlinedTextField(
-                        value = currMasterPass,
-                        onValueChange = { currMasterPass = it },
-                        label = { Text("Current Master Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = newMasterPass,
-                        onValueChange = { newMasterPass = it },
-                        label = { Text("New Master Password (min 8 chars)") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = confirmNewMasterPass,
-                        onValueChange = { confirmNewMasterPass = it },
-                        label = { Text("Confirm New Master Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Button(
-                        onClick = {
-                            viewModel.rotateRealMasterPassword(currMasterPass, newMasterPass, confirmNewMasterPass)
-                            currMasterPass = ""
-                            newMasterPass = ""
-                            confirmNewMasterPass = ""
-                        },
-                        enabled = currMasterPass.isNotEmpty() && newMasterPass.length >= 8,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Atomically Re-Wrap Real Vault Key")
-                    }
-                }
-            }
-
-            // Decoy Vault Configuration (Section 14)
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(imageVector = Icons.Filled.Shield, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                        Text(
-                            text = if (uiState.isDecoyConfiguredInRealSession) {
-                                "Decoy Vault Configuration (Active)"
-                            } else {
-                                "Configure Isolated Decoy Vault"
-                            },
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                    }
-
-                    Text(
-                        text = "Configure or update a separate decoy password that opens an isolated secondary vault (Slot 1). Note: Enabling Decoy Mode automatically disables biometric unlock on the Real Vault.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    OutlinedTextField(
-                        value = realPassForDecoy,
-                        onValueChange = { realPassForDecoy = it },
-                        label = { Text("Authorize with Current Real Master Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    OutlinedTextField(
-                        value = newDecoyPass,
-                        onValueChange = { newDecoyPass = it },
-                        label = { Text("Decoy Vault Password (min 8 chars)") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    OutlinedTextField(
-                        value = confirmNewDecoyPass,
-                        onValueChange = { confirmNewDecoyPass = it },
-                        label = { Text("Confirm Decoy Vault Password") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(
-                            checked = seedSampleDecoy,
-                            onCheckedChange = { seedSampleDecoy = it }
-                        )
-                        Text(
-                            text = "Seed harmless fictitious notes & accounts (example.org)",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        if (uiState.isDecoyConfiguredInRealSession) {
-                            OutlinedButton(
-                                onClick = {
-                                    viewModel.disableDecoyVault(realPassForDecoy)
-                                    realPassForDecoy = ""
-                                },
-                                enabled = realPassForDecoy.isNotEmpty(),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text("Disable Decoy")
-                            }
-                        }
-                        Button(
-                            onClick = {
-                                viewModel.configureDecoyVault(
-                                    realPassword = realPassForDecoy,
-                                    decoyPassword = newDecoyPass,
-                                    confirmDecoyPassword = confirmNewDecoyPass,
-                                    seedSampleData = seedSampleDecoy
-                                )
-                                realPassForDecoy = ""
-                                newDecoyPass = ""
-                                confirmNewDecoyPass = ""
-                            },
-                            enabled = realPassForDecoy.isNotEmpty() && newDecoyPass.length >= 8,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Save Decoy Vault")
-                        }
-                    }
+                    Text("Run 2-Slot Argon2id Benchmark Now")
                 }
             }
         }
     }
 }
 
-// =============================================================================================
-// 4. OTA UPDATES SCREEN & DEBUG SIMULATOR (Sections 20, 21, 22)
-// =============================================================================================
+// ============================================================================================
+// 3. OTA Updates Screen & 3-Option Update Prompt Dialog
+// ============================================================================================
 
 @Composable
 fun OtaUpdatesScreen(
-    settingsState: AppPreferencesRepository.AppSettingsState,
-    otaState: OtaUpdateManager.OtaUiState,
+    otaState: OtaUpdateManager.OtaState,
+    preferences: VaultAppPreferences,
     viewModel: VaultViewModel,
-    onLaunchInstallerIntent: (Intent) -> Unit,
     onBack: () -> Unit
 ) {
-    var manifestUrlInput by remember(settingsState.customOtaManifestUrl) {
-        mutableStateOf(settingsState.customOtaManifestUrl)
+    BackHandler { onBack() }
+    val context = LocalContext.current
+    var manifestUrlInput by remember(preferences.otaManifestUrl) {
+        mutableStateOf(preferences.otaManifestUrl)
     }
-    val installedSignerHex = remember { viewModel.otaUpdateManager.getInstalledSignerFingerprintHex() }
 
-    BackHandler(onBack = onBack)
+    val installedVersionName = remember(context) { OtaUpdateManager.getInstalledVersionName(context) }
+    val installedVersionCode = remember(context) { OtaUpdateManager.getInstalledVersionCode(context) }
+    val installedSignerDigests = remember(context) {
+        OtaUpdateManager.getInstalledSignerSha256Digests(context)
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-            }
-            Text(
-                text = "OTA Application Updates",
-                style = MaterialTheme.typography.headlineMedium
-            )
-        }
+        SecondaryHeader(
+            title = "Updates (OTA)",
+            onBack = onBack
+        )
 
-        // Installed Identity Card
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(text = "Installed Build & Trust Anchor", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    text = "Package ID: ${BuildConfig.APPLICATION_ID}\n" +
-                        "Installed Version: ${BuildConfig.VERSION_NAME} (versionCode ${BuildConfig.VERSION_CODE})\n" +
-                        "Public OTA Repo: https://github.com/tpeditz/Private-vault-updates\n" +
-                        "Trusted Installed Signer SHA-256:\n${installedSignerHex.take(32)}...",
+                    text = "Installed Build & Trusted Signer",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = "Version: $installedVersionName (versionCode $installedVersionCode)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "Trusted Signer SHA-256:\n${installedSignerDigests.firstOrNull() ?: "Unavailable"}",
                     style = MaterialTheme.typography.labelSmall,
-                    fontFamily = JetBrainsMonoFontFamily,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "Every OTA candidate APK is verified with SHA-256 + Android apksig ApkVerifier + installed signer certificate match + package archive metadata inspection before installation.",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(text = "Automatic Launch Update Checks", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            text = "Checks GitHub update.json over HTTPS on launch. Never sends vault data.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = settingsState.autoCheckUpdatesOnLaunch,
-                        onCheckedChange = viewModel::setAutoCheckUpdatesOnLaunch
-                    )
-                }
-
-                val rem = settingsState.otaReminderState
-                if (rem.deferredVersionCode > BuildConfig.VERSION_CODE && rem.reminderType != AppPreferencesRepository.OtaReminderType.NONE) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.secondaryContainer,
-                        shape = MaterialTheme.shapes.extraSmall,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = "Active Reminder Deferral for vCode ${rem.deferredVersionCode}: ${rem.reminderType.name}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                            modifier = Modifier.padding(8.dp)
-                        )
-                    }
-                }
-
                 Button(
-                    onClick = viewModel::checkForUpdatesNow,
+                    onClick = viewModel::checkForOtaUpdatesManual,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testTag("ota_manual_check_button")
+                        .testTag("ota_check_now_button")
                 ) {
-                    Icon(imageVector = Icons.Filled.SystemUpdate, contentDescription = null)
+                    Icon(Icons.Filled.SystemUpdate, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Check for Updates Now")
+                }
+
+                if (BuildConfig.DEBUG) {
+                    OutlinedButton(
+                        onClick = viewModel::triggerDebugOtaSimulation,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("ota_simulate_debug_button")
+                    ) {
+                        Text("Debug Simulator: Preview 3-Option Update Prompt")
+                    }
                 }
             }
         }
 
         // Current OTA Status Card
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(text = "Update Status", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    text = "Update Status",
+                    style = MaterialTheme.typography.titleMedium
+                )
 
                 when (otaState) {
-                    is OtaUpdateManager.OtaUiState.Idle -> {
+                    is OtaUpdateManager.OtaState.Idle -> {
                         Text(
-                            text = "Tap 'Check for Updates Now' to query the public update manifest.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            text = "Idle. Tap 'Check for Updates Now' to query the public release manifest.",
+                            style = MaterialTheme.typography.bodySmall
                         )
                     }
-                    is OtaUpdateManager.OtaUiState.CheckingManifest -> {
+
+                    is OtaUpdateManager.OtaState.Checking -> {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                            Text("Fetching https://raw.githubusercontent.com/tpeditz/Private-vault-updates/main/update.json...")
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                            Text("Checking HTTPS update manifest…")
                         }
                     }
-                    is OtaUpdateManager.OtaUiState.UpToDate -> {
+
+                    is OtaUpdateManager.OtaState.UpToDate -> {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(imageVector = Icons.Filled.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Icon(
+                                Icons.Filled.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
                             Text(
-                                text = "You are on the latest version (${otaState.installedVersionName}, code ${otaState.installedVersionCode}).",
-                                style = MaterialTheme.typography.bodyMedium
+                                "You are running the latest version (${otaState.currentVersionName})."
                             )
                         }
                     }
-                    is OtaUpdateManager.OtaUiState.UpdateAvailable -> {
-                        val m = otaState.manifest
+
+                    is OtaUpdateManager.OtaState.UpdateAvailable -> {
                         Text(
-                            text = "New Version Available: v${m.versionName} (code ${m.versionCode})",
+                            text = "Update Available: v${otaState.manifest.versionName} (code ${otaState.manifest.versionCode})",
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.primary
                         )
                         Text(
-                            text = m.releaseNotes,
+                            text = otaState.manifest.releaseNotes,
                             style = MaterialTheme.typography.bodySmall
                         )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        Button(
+                            onClick = { viewModel.onOtaUpdateNowSelected(otaState.manifest) },
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Button(
-                                onClick = { viewModel.chooseUpdateNow(m) },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text("Update Now")
-                            }
-                            OutlinedButton(
-                                onClick = {
-                                    viewModel.chooseRemindMeLater(m, OtaDeferralOption.TOMORROW)
-                                },
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text("Remind Tomorrow")
-                            }
+                            Icon(Icons.Filled.CloudDownload, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Update Now (Download & Verify)")
                         }
                     }
-                    is OtaUpdateManager.OtaUiState.Downloading -> {
-                        Text(
-                            text = "Downloading v${otaState.manifest.versionName} (${(otaState.progressFraction * 100).toInt()}%)...",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
+
+                    is OtaUpdateManager.OtaState.Downloading -> {
+                        val fraction = if (otaState.totalBytes > 0L) {
+                            (otaState.bytesDownloaded.toFloat() / otaState.totalBytes.toFloat()).coerceIn(0f, 1f)
+                        } else {
+                            0f
+                        }
+                        Text("Downloading v${otaState.manifest.versionName}…")
                         LinearProgressIndicator(
-                            progress = { otaState.progressFraction },
+                            progress = { fraction },
                             modifier = Modifier.fillMaxWidth()
                         )
-                        OutlinedButton(
-                            onClick = viewModel::cancelActiveOtaDownload,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("Cancel Download")
-                        }
+                        Text(
+                            text = "${otaState.bytesDownloaded / 1024} KB / ${otaState.totalBytes / 1024} KB",
+                            style = MaterialTheme.typography.labelSmall
+                        )
                     }
-                    is OtaUpdateManager.OtaUiState.VerifyingSignature -> {
+
+                    is OtaUpdateManager.OtaState.Verifying -> {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                            Text("Verifying SHA-256 & Android apksig ApkVerifier Signer Certificate...")
+                            CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                            Text("Verifying SHA-256 & apksig signer certificate…")
                         }
                     }
-                    is OtaUpdateManager.OtaUiState.ReadyToInstall -> {
-                        val c = otaState.verifiedCandidate
-                        Surface(
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            shape = MaterialTheme.shapes.small,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Text(
-                                    text = "APK Verified with Android apksig ApkVerifier",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                                Text(
-                                    text = "SHA-256: ${c.actualSha256Hex.take(24)}...\n" +
-                                        "Verified Signer Matches Installed Key: YES",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = JetBrainsMonoFontFamily,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                            }
-                        }
-                        if (!viewModel.otaUpdateManager.canRequestPackageInstalls()) {
-                            Text(
-                                text = "Android requires 'Install unknown apps' permission for PRIVATE VAULT to hand off the verified update APK to the system installer.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+
+                    is OtaUpdateManager.OtaState.ReadyToInstall -> {
+                        Text(
+                            text = "Verified v${otaState.manifest.versionName} Ready to Install",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.secondary
+                        )
+                        Text(
+                            text = "Verified Signer SHA-256:\n${otaState.signerCertificateSha256}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace
+                        )
                         Button(
                             onClick = {
-                                val intent = viewModel.prepareAndBuildInstallIntent(c)
-                                onLaunchInstallerIntent(intent)
+                                context.startActivity(
+                                    viewModel.otaUpdateManager.buildInstallVerifiedApkIntent(
+                                        otaState.verifiedApkFile
+                                    )
+                                )
                             },
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text("Lock Vault & Confirm Android Installation")
+                            Text("Confirm Installation in Android")
                         }
                     }
-                    is OtaUpdateManager.OtaUiState.Error -> {
-                        Surface(
-                            color = if (otaState.isOfflineOrUnpublished) {
-                                MaterialTheme.colorScheme.surfaceVariant
-                            } else {
-                                MaterialTheme.colorScheme.errorContainer
+
+                    is OtaUpdateManager.OtaState.NeedsUnknownSourcesPermission -> {
+                        Text(
+                            text = "APK Verified! Android requires 'Install unknown apps' permission for PRIVATE VAULT to launch the package installer.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                        Button(
+                            onClick = {
+                                context.startActivity(
+                                    viewModel.otaUpdateManager.buildManageUnknownAppSourcesIntent()
+                                )
                             },
-                            shape = MaterialTheme.shapes.small,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Column(
-                                modifier = Modifier.padding(12.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            Icon(Icons.Filled.Build, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Grant Install Permission in Settings")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                if (viewModel.otaUpdateManager.canRequestPackageInstalls()) {
+                                    context.startActivity(
+                                        viewModel.otaUpdateManager.buildInstallVerifiedApkIntent(
+                                            otaState.verifiedApkFile
+                                        )
+                                    )
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Proceed to Install Verified APK")
+                        }
+                    }
+
+                    is OtaUpdateManager.OtaState.Error -> {
+                        Text(
+                            text = otaState.title,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Text(
+                            text = otaState.detail,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        if (otaState.recoverableManifest != null) {
+                            OutlinedButton(
+                                onClick = {
+                                    viewModel.onOtaUpdateNowSelected(otaState.recoverableManifest)
+                                }
                             ) {
-                                Text(
-                                    text = otaState.title,
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = if (otaState.isOfflineOrUnpublished) {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    } else {
-                                        MaterialTheme.colorScheme.onErrorContainer
-                                    }
-                                )
-                                Text(
-                                    text = otaState.message,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (otaState.isOfflineOrUnpublished) {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    } else {
-                                        MaterialTheme.colorScheme.onErrorContainer
-                                    }
-                                )
+                                Text("Retry Download & Verification")
                             }
                         }
                     }
@@ -1314,173 +1406,259 @@ fun OtaUpdatesScreen(
             }
         }
 
-        // Manifest Endpoint Configuration
+        // Public Manifest Endpoint Configuration (Editable only in Debug builds — R04)
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(text = "Public Manifest Endpoint", style = MaterialTheme.typography.titleMedium)
-                OutlinedTextField(
-                    value = manifestUrlInput,
-                    onValueChange = { manifestUrlInput = it },
-                    label = { Text("GitHub HTTPS update.json URL") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                Text(
+                    text = "Public Release Endpoint",
+                    style = MaterialTheme.typography.titleMedium
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            manifestUrlInput = OtaUpdateManager.DEFAULT_MANIFEST_URL
-                            viewModel.setCustomOtaManifestUrl(OtaUpdateManager.DEFAULT_MANIFEST_URL)
-                        },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Reset to Default")
-                    }
-                    Button(
-                        onClick = { viewModel.setCustomOtaManifestUrl(manifestUrlInput) },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Save Endpoint")
-                    }
-                }
-            }
-        }
+                Text(
+                    text = "Public Update Repository: ${AppPreferencesRepository.PUBLIC_OTA_REPO_URL}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
-        // Debug-Only OTA Test Simulator (Strictly gated behind BuildConfig.DEBUG per Confirmed Decision 4)
-        if (BuildConfig.DEBUG) {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
-                ),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text(
-                        text = "Debug / Test Build Only: OTA Manifest Simulator",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.primary
+                if (BuildConfig.DEBUG) {
+                    OutlinedTextField(
+                        value = manifestUrlInput,
+                        onValueChange = { manifestUrlInput = it },
+                        label = { Text("HTTPS update.json Manifest URL (Debug Override)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
                     )
+                    OutlinedButton(
+                        onClick = { viewModel.updateOtaManifestUrl(manifestUrlInput) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Save Manifest Endpoint")
+                    }
+                } else {
                     Text(
-                        text = "This panel is compiled ONLY in debug/test builds (BuildConfig.DEBUG == true) to test the 3-option Update Dialog (Update Now / Update Later / Remind Me Later) before publishing to GitHub.",
-                        style = MaterialTheme.typography.bodySmall,
+                        text = "Manifest Endpoint:\n${AppPreferencesRepository.DEFAULT_OTA_MANIFEST_URL}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                val sampleJson = """
-                                    {
-                                      "schemaVersion": 1,
-                                      "packageName": "${BuildConfig.APPLICATION_ID}",
-                                      "versionName": "1.0.1",
-                                      "versionCode": 2,
-                                      "minimumSupportedVersionCode": 1,
-                                      "downloadUrl": "https://github.com/tpeditz/Private-vault-updates/releases/download/v1.0.1/private-vault-v1.0.1.apk",
-                                      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-                                      "signingCertificateSha256": "${installedSignerHex.ifBlank { "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }}",
-                                      "releaseNotes": "• Verified preservation of both Real and Decoy encrypted vaults\n• Improved Argon2id benchmark reporting",
-                                      "forceUpdate": false,
-                                      "publishedAt": "2026-11-05T12:00:00Z"
-                                    }
-                                """.trimIndent()
-                                viewModel.triggerDebugOtaSimulation(sampleJson)
-                            },
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("debug_simulate_update_available_button")
-                        ) {
-                            Text("Simulate v1.0.1 Dialog")
-                        }
-
-                        OutlinedButton(
-                            onClick = {
-                                val downgradeJson = """
-                                    {
-                                      "schemaVersion": 1,
-                                      "packageName": "${BuildConfig.APPLICATION_ID}",
-                                      "versionName": "1.0.0",
-                                      "versionCode": 1,
-                                      "minimumSupportedVersionCode": 1,
-                                      "downloadUrl": "https://github.com/tpeditz/Private-vault-updates/releases/download/v1.0.0/private-vault-v1.0.0.apk",
-                                      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-                                      "signingCertificateSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-                                      "releaseNotes": "Same version test",
-                                      "forceUpdate": false,
-                                      "publishedAt": "2026-11-04T12:00:00Z"
-                                    }
-                                """.trimIndent()
-                                viewModel.triggerDebugOtaSimulation(downgradeJson)
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Simulate Equal v1.0.0")
-                        }
-                    }
                 }
             }
         }
     }
 }
 
-// =============================================================================================
-// 5. ABOUT & DEVELOPER CREDITS SCREEN (Section 24 - Exact Tp Editz Credits)
-// =============================================================================================
+/**
+ * Mandatory 3-option OTA Update Dialog:
+ * - **Update Now:** Downloads and verifies the update, then asks the user to confirm installation.
+ * - **Update Later:** Closes the dialog and continues using the app.
+ * - **Remind Me Later:** Lets the user choose Next app launch, Tomorrow, or In 3 days.
+ */
+@Composable
+fun OtaThreeOptionUpdateDialog(
+    manifest: OtaUpdateManager.UpdateManifest,
+    onUpdateNow: () -> Unit,
+    onUpdateLater: () -> Unit,
+    onRemindMeLater: (OtaReminderPolicy) -> Unit
+) {
+    var showReminderSubChoices by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onUpdateLater,
+        icon = {
+            Icon(
+                Icons.Filled.SystemUpdate,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary
+            )
+        },
+        title = {
+            Text(
+                text = "Update Available: v${manifest.versionName}",
+                style = MaterialTheme.typography.titleLarge
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "A new signed release of PRIVATE VAULT is available. Your encrypted Real and Decoy vaults are preserved across updates.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = "Release Notes:",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = manifest.releaseNotes,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+
+                if (!showReminderSubChoices) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onUpdateNow,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ota_dialog_update_now_button")
+                        ) {
+                            Icon(Icons.Filled.CloudDownload, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Update Now")
+                        }
+
+                        OutlinedButton(
+                            onClick = onUpdateLater,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ota_dialog_update_later_button")
+                        ) {
+                            Text("Update Later")
+                        }
+
+                        TextButton(
+                            onClick = { showReminderSubChoices = true },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ota_dialog_remind_me_later_button")
+                        ) {
+                            Text("Remind Me Later…")
+                        }
+                    }
+                } else {
+                    Text(
+                        text = "When should PRIVATE VAULT remind you?",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { onRemindMeLater(OtaReminderPolicy.NEXT_APP_LAUNCH) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ota_remind_next_launch_button")
+                        ) {
+                            Text("Next App Launch")
+                        }
+                        OutlinedButton(
+                            onClick = { onRemindMeLater(OtaReminderPolicy.TOMORROW) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ota_remind_tomorrow_button")
+                        ) {
+                            Text("Tomorrow (24 Hours)")
+                        }
+                        OutlinedButton(
+                            onClick = { onRemindMeLater(OtaReminderPolicy.IN_THREE_DAYS) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ota_remind_three_days_button")
+                        ) {
+                            Text("In 3 Days")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {}
+    )
+}
+
+// ============================================================================================
+// 4. About & Developer Credits Screen (Tp Editz — Telegram + Instagram U04)
+// ============================================================================================
 
 @Composable
 fun AboutVaultScreen(
     viewModel: VaultViewModel,
-    onNavigateToUpdates: () -> Unit,
     onBack: () -> Unit
 ) {
+    BackHandler { onBack() }
     val context = LocalContext.current
-    var showOpenTelegramDialog by remember { mutableStateOf(false) }
+    var pendingExternalDestination by remember { mutableStateOf<Pair<String, String>?>(null) }
 
-    BackHandler(onBack = onBack)
+    val openDestinationPair = pendingExternalDestination
+    if (openDestinationPair != null) {
+        val (platformName, targetUrl) = openDestinationPair
+        AlertDialog(
+            onDismissRequest = { pendingExternalDestination = null },
+            icon = { Icon(Icons.Filled.OpenInBrowser, contentDescription = null) },
+            title = { Text("Open External $platformName Profile?") },
+            text = {
+                Text(
+                    "For your security, PRIVATE VAULT will lock your active vault session before opening $targetUrl in an external app."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingExternalDestination = null
+                        viewModel.lockVaultNow("Vault locked before opening external link.")
+                        try {
+                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(intent)
+                        } catch (_: ActivityNotFoundException) {
+                            viewModel.setErrorBanner("No browser or app installed to open $targetUrl.")
+                        } catch (e: Exception) {
+                            viewModel.setErrorBanner("Unable to open link: ${e.message}")
+                        }
+                    },
+                    modifier = Modifier.testTag("confirm_external_open_button")
+                ) {
+                    Text("Lock Vault & Open")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingExternalDestination = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            IconButton(onClick = onBack) {
-                Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-            }
-            Text(
-                text = "About PRIVATE VAULT",
-                style = MaterialTheme.typography.headlineMedium
-            )
-        }
+        SecondaryHeader(
+            title = "About & Credits",
+            onBack = onBack
+        )
 
-        // Exact Required Developer Credits Card (Section 24, F16)
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("about_credits_card")
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
                 modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -1495,34 +1673,30 @@ fun AboutVaultScreen(
                     Column {
                         Text(
                             text = "PRIVATE VAULT",
-                            style = MaterialTheme.typography.headlineLarge,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.testTag("about_app_title")
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Developed by Tp Editz",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.testTag("about_developer_name")
+                            text = "Version ${OtaUpdateManager.getInstalledVersionName(context)} • Offline Encrypted Security Suite",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
 
                 HorizontalDivider()
 
+                // Developer Credits Block (Telegram + Instagram U04)
+                Text(
+                    text = "Developed by Tp Editz",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
                 Text(
                     text = "Telegram: @Tp_Editz",
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontFamily = JetBrainsMonoFontFamily,
-                    modifier = Modifier.testTag("about_telegram_handle")
-                )
-
-                Text(
-                    text = "Version: ${BuildConfig.VERSION_NAME} (versionCode ${BuildConfig.VERSION_CODE})",
                     style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = JetBrainsMonoFontFamily,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.testTag("about_version_text")
+                    fontFamily = FontFamily.Monospace
                 )
 
                 Row(
@@ -1531,124 +1705,145 @@ fun AboutVaultScreen(
                 ) {
                     OutlinedButton(
                         onClick = {
-                            viewModel.copySecretToClipboard("Developer Telegram", "@Tp_Editz")
+                            viewModel.copyPublicContactHandle("Telegram ID", "@Tp_Editz")
                         },
                         modifier = Modifier
                             .weight(1f)
-                            .testTag("about_copy_telegram_button")
+                            .testTag("copy_telegram_id_button")
                     ) {
-                        Icon(imageVector = Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Copy @Tp_Editz")
+                        Text("Copy Telegram ID")
                     }
 
                     Button(
-                        onClick = { showOpenTelegramDialog = true },
+                        onClick = {
+                            pendingExternalDestination = "Telegram" to "https://t.me/Tp_Editz"
+                        },
                         modifier = Modifier
                             .weight(1f)
-                            .testTag("about_open_telegram_button")
+                            .testTag("open_telegram_button")
                     ) {
-                        Icon(imageVector = Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Filled.OpenInBrowser, contentDescription = null)
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Open Telegram")
                     }
                 }
 
-                OutlinedButton(
-                    onClick = onNavigateToUpdates,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(imageVector = Icons.Filled.SystemUpdate, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Check for Updates")
-                }
-            }
-        }
+                Spacer(modifier = Modifier.height(4.dp))
 
-        // Concise Privacy & Threat Model Statement (Section 11, 14, 19, 24)
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(imageVector = Icons.Outlined.VerifiedUser, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Text(text = "Privacy Statement & Security Boundary", style = MaterialTheme.typography.titleMedium)
-                }
+                // U04 Fix: Instagram Developer Credit Row
                 Text(
-                    text = "• 100% Offline Vault Operations: All notes, saved passwords, folders, tags, timestamps, password generation, and strength evaluations run locally on your device without analytics, cloud sync, or external API calls.\n" +
-                        "• Cryptographic Architecture: Master and backup passwords derive 256-bit keys via Argon2id (RFC 9106). Vault envelopes and records are encrypted with AES-256-GCM using fresh 96-bit nonces and Associated Authenticated Data (AAD).\n" +
-                        "• Residual Metadata & Threat Limits: While record titles, bodies, credentials, timestamps, and flags are encrypted inside AES-256-GCM blobs, an attacker with raw filesystem access can still observe record counts per slot, approximate ciphertext sizes, and SQLite file modification times. An unlocked compromised/rooted OS, untrusted keyboard, or physical observation can bypass app-layer controls.\n" +
-                        "• Network Boundary: Internet access is used exclusively to fetch public update metadata and signed release APKs from https://github.com/tpeditz/Private-vault-updates over HTTPS. Connecting to GitHub exposes standard HTTPS connection metadata (IP address and request timing) to GitHub.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    text = "Instagram: @tp_ediitz",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace
                 )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.copyPublicContactHandle("Instagram ID", "@tp_ediitz")
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("copy_instagram_id_button")
+                    ) {
+                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Copy Instagram ID")
+                    }
+
+                    Button(
+                        onClick = {
+                            pendingExternalDestination = "Instagram" to "https://www.instagram.com/tp_ediitz/"
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("open_instagram_button")
+                    ) {
+                        Icon(Icons.Filled.OpenInBrowser, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Open Instagram")
+                    }
+                }
             }
         }
 
-        // Open-Source Third-Party Licenses Summary
+        // Security Architecture & Honest Plausible Deniability Limitations Disclosure
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(imageVector = Icons.Outlined.Info, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                    Text(text = "Third-Party Open Source Libraries", style = MaterialTheme.typography.titleMedium)
+                    Icon(
+                        Icons.Filled.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary
+                    )
+                    Text(
+                        text = "Cryptographic Specification & Decoy Limitations",
+                        style = MaterialTheme.typography.titleMedium
+                    )
                 }
+
                 Text(
-                    text = "• BouncyCastle Crypto APIs (bcprov-jdk18on 1.80) — MIT-style License (Argon2id RFC 9106)\n" +
-                        "• Android Open Source Project Jetpack (Compose, Room, Biometric, DataStore) — Apache License 2.0\n" +
-                        "• Android Tools APK Signer / Verifier (com.android.tools.build:apksig) — Apache License 2.0\n" +
-                        "• Square OkHttp — Apache License 2.0\n" +
-                        "• Bundled Fonts: Space Grotesk, Plus Jakarta Sans, JetBrains Mono — SIL Open Font License 1.1",
+                    text = "• Key Derivation: Argon2id v1.3 (RFC 9106) via BouncyCastle (bcprov-jdk18on:1.80)\n" +
+                        "• Encryption: AES-256-GCM with 96-bit CSPRNG nonces and 128-bit authentication tags\n" +
+                        "• Unified Key Envelopes: Both Slot 0 and Slot 1 rows always exist in vault_envelopes (72-byte wrapped payload) and are evaluated on every password unlock attempt\n" +
+                        "• Composite SQLite Primary Key: encrypted_records enforces PRIMARY KEY(vault_slot, record_id) with strict AAD slot binding",
+                    style = MaterialTheme.typography.bodySmall
+                )
+
+                HorizontalDivider()
+
+                Text(
+                    text = "Plausible Deniability Scope & Forensic Limitations:",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+                Text(
+                    text = "1. Casual Coercion Resistance: Entering your Decoy Password unlocks an isolated second vault with zero UI indicators of a primary vault.\n" +
+                        "2. Root / Raw SQLite Inspection: While both key envelopes are always present and structurally identical, a forensic examiner with root access to `/data/data/com.tpeditz.privatevault/databases/` can observe the count and ciphertext byte lengths of rows in `encrypted_records` per `vault_slot`.\n" +
+                        "3. Biometric Trade-Off: Enrolling Android Keystore biometrics binds a hardware key to Slot 0; therefore, PRIVATE VAULT automatically disables biometric quick-unlock whenever Decoy Mode is active.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
     }
+}
 
-    if (showOpenTelegramDialog) {
-        AlertDialog(
-            onDismissRequest = { showOpenTelegramDialog = false },
-            title = { Text("Open External Link?") },
-            text = {
-                Text("Open https://t.me/Tp_Editz in your external browser or Telegram app? No vault data is ever transmitted.")
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showOpenTelegramDialog = false
-                        try {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/Tp_Editz")).apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            context.startActivity(intent)
-                        } catch (_: Exception) {
-                        }
-                    }
-                ) {
-                    Text("Open Link")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showOpenTelegramDialog = false }) {
-                    Text("Cancel")
-                }
-            }
+@Composable
+private fun SecondaryHeader(
+    title: String,
+    onBack: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier.testTag("secondary_back_button")
+        ) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+        }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold
         )
     }
 }

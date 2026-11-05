@@ -1,7 +1,5 @@
 package com.example.ui
 
-import android.content.Intent
-import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -9,14 +7,11 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -24,233 +19,223 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Archive
-import androidx.compose.material.icons.filled.AutoFixHigh
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.RestoreFromTrash
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.Key
-import androidx.compose.material.icons.outlined.StarOutline
-import androidx.compose.material.icons.outlined.Unarchive
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.outlined.PushPin
+import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.data.CredentialRecord
 import com.example.data.CustomCredentialField
-import com.example.data.VaultRecordPayload
+import com.example.data.FolderScope
+import com.example.data.VaultFolder
 import com.example.security.OfflinePasswordStrengthEstimator
-import com.example.security.PasswordGeneratorEngine
-import com.example.ui.theme.JetBrainsMonoFontFamily
-import com.example.ui.theme.StatusFair
-import com.example.ui.theme.StatusStrong
-import com.example.ui.theme.StatusVeryStrong
-import com.example.ui.theme.StatusVeryWeak
-import com.example.ui.theme.StatusWeak
 import java.util.Locale
-import java.util.UUID
+
+private val CREDENTIAL_CATEGORIES = listOf("All", "Logins", "Banking", "Email", "Social", "Work", "Wi-Fi", "Crypto")
 
 @Composable
 fun PasswordsTabScreen(
     uiState: VaultUiState,
     viewModel: VaultViewModel
 ) {
-    var editingCredential by remember { mutableStateOf<VaultRecordPayload.CredentialRecord?>(null) }
-    var credentialPendingPermanentDelete by remember { mutableStateOf<VaultRecordPayload.CredentialRecord?>(null) }
+    var showManageFoldersDialog by remember { mutableStateOf(false) }
 
-    // If the user tapped "Save to Passwords" in the Generator tab, open the new credential editor
-    LaunchedEffect(uiState.prefilledGeneratorPasswordForNewCredential) {
-        val prefilled = uiState.prefilledGeneratorPasswordForNewCredential
-        if (!prefilled.isNullOrEmpty()) {
-            val now = System.currentTimeMillis()
-            editingCredential = VaultRecordPayload.CredentialRecord(
-                id = UUID.randomUUID().toString(),
-                serviceName = "",
-                accountLabel = "Personal",
-                password = prefilled,
-                folderName = if (uiState.selectedCredentialFolder == "All") "General" else uiState.selectedCredentialFolder,
-                createdAtEpochMs = now,
-                updatedAtEpochMs = now
-            )
-            viewModel.clearPrefilledGeneratorPassword()
-        }
-    }
-
-    if (editingCredential != null) {
-        CredentialEditorView(
-            initialCredential = editingCredential!!,
-            availableFolders = uiState.folders.map { it.name }.ifEmpty { listOf("General", "Personal", "Work") },
-            evaluateStrength = { pwd, id ->
-                viewModel.evaluatePasswordStrengthInActiveVault(pwd, id)
-            },
-            onSave = { updated ->
-                viewModel.saveCredential(updated) {
-                    editingCredential = null
+    val activeDraft = uiState.activeCredentialDraft
+    if (activeDraft != null) {
+        val credFolders = remember(uiState.folders) {
+            uiState.folders.filter { it.scope == FolderScope.CREDENTIALS }
+                .ifEmpty {
+                    listOf(
+                        VaultFolder(
+                            id = VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID,
+                            name = VaultFolder.DEFAULT_FOLDER_NAME,
+                            scope = FolderScope.CREDENTIALS
+                        )
+                    )
                 }
+        }
+        val otherVaultPasswords = remember(uiState.credentials, activeDraft.credentialId) {
+            uiState.credentials.filter { it.id != activeDraft.credentialId }.map { it.password }
+        }
+        CredentialEditorView(
+            draft = activeDraft,
+            availableFolders = credFolders,
+            existingVaultPasswords = otherVaultPasswords,
+            onUpdateDraft = viewModel::updateActiveCredentialDraft,
+            onSave = viewModel::commitActiveCredentialDraft,
+            onDelete = if (activeDraft.isEditingExisting) {
+                { viewModel.deleteCredential(activeDraft.credentialId) }
+            } else {
+                null
             },
-            onDuplicate = { cred ->
-                viewModel.duplicateCredential(cred)
-                editingCredential = null
-            },
-            onMoveToTrash = { cred ->
-                viewModel.moveCredentialToTrash(cred)
-                editingCredential = null
-            },
-            onClose = { editingCredential = null }
+            onCopySecret = viewModel::copySecretToClipboard,
+            onClose = viewModel::closeCredentialDraft
         )
         return
     }
 
-    val folderNames = remember(uiState.folders) {
-        listOf("All") + uiState.folders.map { it.name }.distinct()
-    }
-
-    // Active-vault password reuse map: password -> count of non-trashed credentials in THIS vault
-    val reuseCountByPassword = remember(uiState.credentials) {
-        uiState.credentials
-            .filter { !it.isTrashed && it.password.isNotEmpty() }
-            .groupingBy { it.password }
-            .eachCount()
+    val credFolders = remember(uiState.folders) {
+        uiState.folders.filter { it.scope == FolderScope.CREDENTIALS }
+            .sortedWith(compareBy<VaultFolder> { !VaultFolder.isDefaultGeneralName(it.name) }.thenBy { it.name.lowercase() })
     }
 
     val filteredCredentials = remember(
         uiState.credentials,
-        uiState.credentialSearchQuery,
-        uiState.selectedCredentialFolder,
-        uiState.credentialFilterMode
+        uiState.credentialsSearchQuery,
+        uiState.selectedCredentialCategory,
+        uiState.selectedCredentialFolderId,
+        uiState.credentialsSortOrder,
+        uiState.credentialsFavoritesOnly
     ) {
-        val q = uiState.credentialSearchQuery.trim().lowercase(Locale.ROOT)
-        uiState.credentials
-            .filter { cred ->
-                when (uiState.credentialFilterMode) {
-                    CredentialFilterMode.ACTIVE -> !cred.isTrashed && !cred.isArchived
-                    CredentialFilterMode.FAVORITES -> !cred.isTrashed && cred.isFavorite
-                    CredentialFilterMode.ARCHIVED -> !cred.isTrashed && cred.isArchived
-                    CredentialFilterMode.TRASH -> cred.isTrashed
-                }
+        val q = uiState.credentialsSearchQuery.trim().lowercase(Locale.US)
+        val filtered = uiState.credentials.filter { cred ->
+            val matchesQuery = if (q.isEmpty()) {
+                true
+            } else {
+                cred.serviceName.lowercase(Locale.US).contains(q) ||
+                    cred.username.lowercase(Locale.US).contains(q) ||
+                    cred.websiteUrl.lowercase(Locale.US).contains(q) ||
+                    cred.category.lowercase(Locale.US).contains(q) ||
+                    cred.folderName.lowercase(Locale.US).contains(q) ||
+                    cred.tags.any { it.lowercase(Locale.US).contains(q) }
             }
-            .filter { cred ->
-                uiState.selectedCredentialFolder == "All" ||
-                    cred.folderName.equals(uiState.selectedCredentialFolder, ignoreCase = true)
-            }
-            .filter { cred ->
-                // Search service name, account label, username, email, and folder/tags WITHOUT exposing password values (Section 08)
-                if (q.isEmpty()) true
-                else {
-                    cred.serviceName.lowercase(Locale.ROOT).contains(q) ||
-                        cred.accountLabel.lowercase(Locale.ROOT).contains(q) ||
-                        cred.username.lowercase(Locale.ROOT).contains(q) ||
-                        cred.email.lowercase(Locale.ROOT).contains(q) ||
-                        cred.folderName.lowercase(Locale.ROOT).contains(q) ||
-                        cred.tags.any { it.lowercase(Locale.ROOT).contains(q) }
-                }
-            }
-            .sortedWith(
-                compareByDescending<VaultRecordPayload.CredentialRecord> { it.isFavorite }
-                    .thenBy { it.serviceName.lowercase(Locale.ROOT) }
-                    .thenBy { it.accountLabel.lowercase(Locale.ROOT) }
-            )
+            val matchesCat = uiState.selectedCredentialCategory == "All" ||
+                cred.category.equals(uiState.selectedCredentialCategory, ignoreCase = true)
+            val matchesFolder = uiState.selectedCredentialFolderId == null ||
+                cred.folderId == uiState.selectedCredentialFolderId
+            val matchesFav = !uiState.credentialsFavoritesOnly || cred.isFavorite
+            matchesQuery && matchesCat && matchesFolder && matchesFav
+        }
+
+        // R18 Fix: Sort pinned credentials first, then by selected sort order
+        val comparator = when (uiState.credentialsSortOrder) {
+            SortOrder.UPDATED_DESC -> compareByDescending<CredentialRecord> { it.isPinned }
+                .thenByDescending { it.isFavorite }
+                .thenByDescending { it.updatedAtEpochMs }
+            SortOrder.CREATED_DESC -> compareByDescending<CredentialRecord> { it.isPinned }
+                .thenByDescending { it.isFavorite }
+                .thenByDescending { it.createdAtEpochMs }
+            SortOrder.ALPHABETICAL -> compareByDescending<CredentialRecord> { it.isPinned }
+                .thenByDescending { it.isFavorite }
+                .thenBy { it.serviceName.lowercase(Locale.US) }
+        }
+        filtered.sortedWith(comparator)
     }
 
+    if (showManageFoldersDialog) {
+        FolderManagementDialog(
+            scopeLabel = "Credential",
+            folders = credFolders,
+            onCreateFolder = { name -> viewModel.createFolder(name, FolderScope.CREDENTIALS) },
+            onRenameFolder = { folderId, newName -> viewModel.renameFolder(folderId, newName) },
+            onDeleteFolder = { folderId -> viewModel.deleteFolder(folderId) },
+            onDismiss = { showManageFoldersDialog = false }
+        )
+    }
+
+    // U03 Fix: Nested Scaffold uses zero contentWindowInsets so outer Scaffold's consumed insets
+    // are not applied twice when the keyboard opens!
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        containerColor = MaterialTheme.colorScheme.background,
         floatingActionButton = {
             FloatingActionButton(
-                onClick = {
-                    val now = System.currentTimeMillis()
-                    editingCredential = VaultRecordPayload.CredentialRecord(
-                        id = UUID.randomUUID().toString(),
-                        serviceName = "",
-                        accountLabel = "Personal",
-                        password = "",
-                        folderName = if (uiState.selectedCredentialFolder == "All") "General" else uiState.selectedCredentialFolder,
-                        createdAtEpochMs = now,
-                        updatedAtEpochMs = now
-                    )
-                },
+                onClick = { viewModel.openNewCredentialDraft() },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.testTag("create_credential_fab")
+                modifier = Modifier.testTag("add_credential_fab")
             ) {
-                Icon(imageVector = Icons.Filled.Add, contentDescription = "Add Saved Password")
+                Icon(Icons.Filled.Add, contentDescription = "Add Encrypted Credential")
             }
         }
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp),
+                .imePadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             OutlinedTextField(
-                value = uiState.credentialSearchQuery,
-                onValueChange = viewModel::updateCredentialSearchQuery,
-                placeholder = { Text("Search service, label, username, or email...") },
+                value = uiState.credentialsSearchQuery,
+                onValueChange = viewModel::setCredentialsSearchQuery,
+                placeholder = { Text("Search services, usernames, URLs, tags…") },
                 singleLine = true,
-                leadingIcon = {
-                    Icon(imageVector = Icons.Filled.Search, contentDescription = "Search credentials")
-                },
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 trailingIcon = {
-                    if (uiState.credentialSearchQuery.isNotEmpty()) {
-                        IconButton(onClick = { viewModel.updateCredentialSearchQuery("") }) {
-                            Icon(imageVector = Icons.Filled.Close, contentDescription = "Clear search")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(
+                            onClick = {
+                                viewModel.setCredentialsFavoritesOnly(!uiState.credentialsFavoritesOnly)
+                            }
+                        ) {
+                            Icon(
+                                imageVector = if (uiState.credentialsFavoritesOnly) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                                contentDescription = "Toggle Favorites Filter",
+                                tint = if (uiState.credentialsFavoritesOnly) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(
+                            onClick = { showManageFoldersDialog = true },
+                            modifier = Modifier.testTag("manage_credential_folders_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.CreateNewFolder,
+                                contentDescription = "Manage Credential Folders"
+                            )
                         }
                     }
                 },
+                shape = RoundedCornerShape(14.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 8.dp)
-                    .testTag("passwords_search_input")
+                    .testTag("credentials_search_input")
             )
 
             Row(
@@ -259,11 +244,11 @@ fun PasswordsTabScreen(
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                CredentialFilterMode.entries.forEach { mode ->
+                CREDENTIAL_CATEGORIES.forEach { category ->
                     FilterChip(
-                        selected = uiState.credentialFilterMode == mode,
-                        onClick = { viewModel.updateCredentialFilterMode(mode) },
-                        label = { Text(mode.label) }
+                        selected = uiState.selectedCredentialCategory == category,
+                        onClick = { viewModel.setSelectedCredentialCategory(category) },
+                        label = { Text(category) }
                     )
                 }
             }
@@ -274,42 +259,55 @@ fun PasswordsTabScreen(
                     .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                folderNames.forEach { folder ->
-                    AssistChip(
-                        onClick = { viewModel.updateSelectedCredentialFolder(folder) },
-                        label = {
-                            Text(
-                                text = folder,
-                                fontWeight = if (uiState.selectedCredentialFolder == folder) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
+                FilterChip(
+                    selected = uiState.selectedCredentialFolderId == null,
+                    onClick = { viewModel.setSelectedCredentialFolderId(null) },
+                    label = { Text("Folder: All") },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Filled.Folder,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                )
+                credFolders.forEach { folder ->
+                    FilterChip(
+                        selected = uiState.selectedCredentialFolderId == folder.id,
+                        onClick = { viewModel.setSelectedCredentialFolderId(folder.id) },
+                        label = { Text(folder.name) }
                     )
                 }
+                AssistChip(
+                    onClick = {
+                        val nextOrder = when (uiState.credentialsSortOrder) {
+                            SortOrder.UPDATED_DESC -> SortOrder.CREATED_DESC
+                            SortOrder.CREATED_DESC -> SortOrder.ALPHABETICAL
+                            SortOrder.ALPHABETICAL -> SortOrder.UPDATED_DESC
+                        }
+                        viewModel.setCredentialsSortOrder(nextOrder)
+                    },
+                    label = { Text("Sort: ${uiState.credentialsSortOrder.label}") }
+                )
             }
 
             if (filteredCredentials.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .weight(1f),
+                        .padding(32.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Key,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(48.dp)
-                        )
                         Text(
-                            text = "No saved passwords in ${uiState.credentialFilterMode.label}",
+                            text = "No matching credentials",
                             style = MaterialTheme.typography.titleMedium
                         )
                         Text(
-                            text = "Tap + to store an encrypted credential or multiple accounts per service.",
+                            text = "Tap the + button to add an encrypted login, banking credential, or API key.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -319,221 +317,135 @@ fun PasswordsTabScreen(
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxSize()
-                        .weight(1f),
-                    contentPadding = PaddingValues(bottom = 88.dp),
+                        .testTag("credentials_list"),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(filteredCredentials, key = { it.id }) { cred ->
-                        val isReused = (reuseCountByPassword[cred.password] ?: 0) > 1
-                        val strength = remember(cred.password, isReused) {
-                            viewModel.evaluatePasswordStrengthInActiveVault(cred.password, cred.id)
-                        }
-                        CredentialListCard(
+                        CredentialItemCard(
                             credential = cred,
-                            strengthReport = strength,
-                            isReusedInActiveVault = isReused,
-                            onEdit = { editingCredential = cred },
+                            onClick = { viewModel.openExistingCredentialDraft(cred) },
                             onCopyUsername = {
-                                val userOrEmail = cred.username.ifBlank { cred.email }
-                                viewModel.copySecretToClipboard("Username", userOrEmail)
+                                viewModel.copySecretToClipboard(
+                                    "${cred.serviceName} Username",
+                                    cred.username
+                                )
                             },
                             onCopyPassword = {
-                                viewModel.copySecretToClipboard("Password", cred.password)
+                                viewModel.copySecretToClipboard(
+                                    "${cred.serviceName} Password",
+                                    cred.password
+                                )
                             },
-                            onToggleFavorite = {
-                                viewModel.saveCredential(cred.copy(isFavorite = !cred.isFavorite))
-                            },
-                            onToggleArchive = {
-                                viewModel.saveCredential(cred.copy(isArchived = !cred.isArchived))
-                            },
-                            onRestoreFromTrash = {
-                                viewModel.restoreCredentialFromTrash(cred)
-                            },
-                            onDeletePermanently = {
-                                credentialPendingPermanentDelete = cred
-                            }
+                            onTogglePin = { viewModel.toggleCredentialPin(cred) },
+                            onToggleFavorite = { viewModel.toggleCredentialFavorite(cred) }
                         )
                     }
                 }
             }
         }
     }
-
-    if (credentialPendingPermanentDelete != null) {
-        val target = credentialPendingPermanentDelete!!
-        AlertDialog(
-            onDismissRequest = { credentialPendingPermanentDelete = null },
-            title = { Text("Permanently Delete Credential?") },
-            text = {
-                Text(
-                    "Permanently delete \"${target.serviceName} (${target.accountLabel})\" from this encrypted vault? This cannot be undone."
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.deleteRecordPermanently(target.id)
-                        credentialPendingPermanentDelete = null
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Delete Permanently")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { credentialPendingPermanentDelete = null }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun CredentialListCard(
-    credential: VaultRecordPayload.CredentialRecord,
-    strengthReport: OfflinePasswordStrengthEstimator.StrengthReport,
-    isReusedInActiveVault: Boolean,
-    onEdit: () -> Unit,
+private fun CredentialItemCard(
+    credential: CredentialRecord,
+    onClick: () -> Unit,
     onCopyUsername: () -> Unit,
     onCopyPassword: () -> Unit,
-    onToggleFavorite: () -> Unit,
-    onToggleArchive: () -> Unit,
-    onRestoreFromTrash: () -> Unit,
-    onDeletePermanently: () -> Unit
+    onTogglePin: () -> Unit,
+    onToggleFavorite: () -> Unit
 ) {
-    var isPasswordRevealed by remember(credential.id) { mutableStateOf(false) }
-    var showExternalBrowserConfirm by remember { mutableStateOf(false) }
-    val context = LocalContext.current
-
-    val initials = remember(credential.serviceName) {
-        credential.serviceName
-            .trim()
-            .split(" ")
-            .filter { it.isNotEmpty() }
-            .take(2)
-            .joinToString("") { it.first().uppercase() }
-            .ifEmpty { "PV" }
-    }
-
-    val badgeColor = when (strengthReport.rating) {
-        OfflinePasswordStrengthEstimator.StrengthRating.VERY_WEAK -> StatusVeryWeak
-        OfflinePasswordStrengthEstimator.StrengthRating.WEAK -> StatusWeak
-        OfflinePasswordStrengthEstimator.StrengthRating.FAIR -> StatusFair
-        OfflinePasswordStrengthEstimator.StrengthRating.STRONG -> StatusStrong
-        OfflinePasswordStrengthEstimator.StrengthRating.VERY_STRONG -> StatusVeryStrong
-    }
+    var revealPassword by remember { mutableStateOf(false) }
 
     Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onEdit)
-            .testTag("credential_card_${credential.id}")
+            .clickable(onClick = onClick)
+            .testTag("credential_card_${credential.id}"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        )
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                // Local monogram icon (never fetches online favicons per Section 08)
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f)
                 ) {
-                    Text(
-                        text = initials,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.size(38.dp)
                     ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Filled.Key,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = credential.serviceName,
                             style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        Surface(
-                            color = MaterialTheme.colorScheme.secondaryContainer,
-                            shape = MaterialTheme.shapes.extraSmall
-                        ) {
+                        if (credential.username.isNotBlank()) {
                             Text(
-                                text = credential.accountLabel,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                text = credential.username,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
-                    }
-
-                    val primaryIdentity = credential.username.ifBlank { credential.email }
-                    if (primaryIdentity.isNotBlank()) {
-                        Text(
-                            text = primaryIdentity,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
                     }
                 }
 
-                if (!credential.isTrashed) {
-                    Row {
-                        IconButton(onClick = onToggleFavorite, modifier = Modifier.size(36.dp)) {
-                            Icon(
-                                imageVector = if (credential.isFavorite) Icons.Filled.Star else Icons.Outlined.StarOutline,
-                                contentDescription = if (credential.isFavorite) "Remove favorite" else "Mark favorite",
-                                tint = if (credential.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        IconButton(onClick = onToggleArchive, modifier = Modifier.size(36.dp)) {
-                            Icon(
-                                imageVector = if (credential.isArchived) Icons.Outlined.Unarchive else Icons.Filled.Archive,
-                                contentDescription = if (credential.isArchived) "Unarchive" else "Archive",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onTogglePin,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (credential.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
+                            contentDescription = if (credential.isPinned) "Unpin Credential" else "Pin Credential",
+                            tint = if (credential.isPinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
-                } else {
-                    Row {
-                        IconButton(onClick = onRestoreFromTrash) {
-                            Icon(
-                                imageVector = Icons.Filled.RestoreFromTrash,
-                                contentDescription = "Restore credential",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                        IconButton(onClick = onDeletePermanently) {
-                            Icon(
-                                imageVector = Icons.Filled.DeleteForever,
-                                contentDescription = "Delete credential permanently",
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                        }
+                    IconButton(
+                        onClick = onToggleFavorite,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (credential.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                            contentDescription = "Favorite Credential",
+                            tint = if (credential.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
                 }
             }
 
-            // Masked / Revealed Password Row with Accessible Announcements (Section 06 & 08)
+            // Masked/Revealed Password Row with quick copy actions
             Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                shape = RoundedCornerShape(10.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
@@ -544,232 +456,124 @@ private fun CredentialListCard(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = if (isPasswordRevealed) credential.password else "••••••••••••••••",
+                        text = if (revealPassword) credential.password else "••••••••••••",
                         style = MaterialTheme.typography.bodyMedium,
-                        fontFamily = JetBrainsMonoFontFamily,
-                        modifier = Modifier
-                            .weight(1f)
-                            .semantics {
-                                // Do not read secret value automatically unless user deliberately revealed it
-                                contentDescription = if (isPasswordRevealed) {
-                                    "Password revealed"
-                                } else {
-                                    "Password masked"
-                                }
-                            }
-                            .testTag("credential_password_display_${credential.id}")
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
                     )
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(
-                            onClick = { isPasswordRevealed = !isPasswordRevealed },
-                            modifier = Modifier
-                                .semantics {
-                                    contentDescription = if (isPasswordRevealed) {
-                                        "Password currently revealed. Tap to mask password."
-                                    } else {
-                                        "Password currently masked. Tap to reveal password."
-                                    }
-                                }
-                                .testTag("credential_reveal_button_${credential.id}")
+                            onClick = { revealPassword = !revealPassword },
+                            modifier = Modifier.size(36.dp)
                         ) {
                             Icon(
-                                imageVector = if (isPasswordRevealed) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                contentDescription = null
+                                imageVector = if (revealPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (revealPassword) "Hide password" else "Reveal password",
+                                modifier = Modifier.size(18.dp)
                             )
                         }
-
-                        if (credential.username.isNotBlank() || credential.email.isNotBlank()) {
-                            TextButton(
+                        if (credential.username.isNotBlank()) {
+                            IconButton(
                                 onClick = onCopyUsername,
-                                modifier = Modifier.testTag("copy_username_button_${credential.id}")
+                                modifier = Modifier.size(36.dp)
                             ) {
-                                Text("Copy ID")
+                                Icon(
+                                    imageVector = Icons.Filled.ContentCopy,
+                                    contentDescription = "Copy Username",
+                                    modifier = Modifier.size(18.dp)
+                                )
                             }
                         }
-
-                        TextButton(
+                        IconButton(
                             onClick = onCopyPassword,
-                            modifier = Modifier.testTag("copy_password_button_${credential.id}")
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("copy_password_${credential.id}")
                         ) {
                             Icon(
-                                imageVector = Icons.Filled.ContentCopy,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
+                                imageVector = Icons.Filled.Key,
+                                contentDescription = "Copy Password",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp)
                             )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Copy Pass")
                         }
                     }
                 }
             }
 
-            // Strength & Local Reuse Badges
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.fillMaxWidth()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(
-                    color = badgeColor.copy(alpha = 0.18f),
-                    shape = MaterialTheme.shapes.extraSmall
-                ) {
-                    Text(
-                        text = "Strength: ${strengthReport.rating.label}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = badgeColor,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
-                }
-
-                if (isReusedInActiveVault) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Surface(
-                        color = StatusWeak.copy(alpha = 0.2f),
-                        shape = MaterialTheme.shapes.extraSmall
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(6.dp)
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Warning,
-                                contentDescription = "Reused password warning",
-                                tint = StatusWeak,
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Text(
-                                text = "Reused in this vault",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = StatusWeak
-                            )
-                        }
+                        Text(
+                            text = credential.category,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = credential.folderName,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
                     }
                 }
 
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = MaterialTheme.shapes.extraSmall
-                ) {
-                    Text(
-                        text = credential.folderName,
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
-                }
-
                 if (credential.websiteUrl.isNotBlank()) {
-                    AssistChip(
-                        onClick = { showExternalBrowserConfirm = true },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp)
-                            )
-                        },
-                        label = { Text("Open URL") },
-                        modifier = Modifier.height(26.dp)
+                    Text(
+                        text = credential.websiteUrl,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
         }
     }
-
-    if (showExternalBrowserConfirm) {
-        AlertDialog(
-            onDismissRequest = { showExternalBrowserConfirm = false },
-            title = { Text("Open Website in External Browser?") },
-            text = {
-                Text(
-                    "Open \"${credential.websiteUrl}\" in your device's external web browser? PRIVATE VAULT never attaches your username or password to the URL."
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showExternalBrowserConfirm = false
-                        val rawUrl = credential.websiteUrl.trim()
-                        val safeUrl = if (rawUrl.startsWith("https://") || rawUrl.startsWith("http://")) {
-                            rawUrl
-                        } else {
-                            "https://$rawUrl"
-                        }
-                        try {
-                            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(safeUrl)).apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            context.startActivity(intent)
-                        } catch (_: Exception) {
-                        }
-                    }
-                ) {
-                    Text("Open Externally")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showExternalBrowserConfirm = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CredentialEditorView(
-    initialCredential: VaultRecordPayload.CredentialRecord,
-    availableFolders: List<String>,
-    evaluateStrength: (String, String) -> OfflinePasswordStrengthEstimator.StrengthReport,
-    onSave: (VaultRecordPayload.CredentialRecord) -> Unit,
-    onDuplicate: (VaultRecordPayload.CredentialRecord) -> Unit,
-    onMoveToTrash: (VaultRecordPayload.CredentialRecord) -> Unit,
+    draft: CredentialEditorDraftState,
+    availableFolders: List<VaultFolder>,
+    existingVaultPasswords: Collection<String>,
+    onUpdateDraft: ((CredentialEditorDraftState) -> CredentialEditorDraftState) -> Unit,
+    onSave: () -> Unit,
+    onDelete: (() -> Unit)?,
+    onCopySecret: (String, String) -> Unit,
     onClose: () -> Unit
 ) {
-    var serviceName by remember(initialCredential.id) { mutableStateOf(initialCredential.serviceName) }
-    var accountLabel by remember(initialCredential.id) { mutableStateOf(initialCredential.accountLabel) }
-    var username by remember(initialCredential.id) { mutableStateOf(initialCredential.username) }
-    var email by remember(initialCredential.id) { mutableStateOf(initialCredential.email) }
-    var password by remember(initialCredential.id) { mutableStateOf(initialCredential.password) }
+    BackHandler {
+        onClose()
+    }
+
     var showPassword by remember { mutableStateOf(false) }
-    var websiteUrl by remember(initialCredential.id) { mutableStateOf(initialCredential.websiteUrl) }
-    var folderName by remember(initialCredential.id) { mutableStateOf(initialCredential.folderName) }
-    var tagsText by remember(initialCredential.id) { mutableStateOf(initialCredential.tags.joinToString(", ")) }
-    var privateNotes by remember(initialCredential.id) { mutableStateOf(initialCredential.privateNotes) }
-    var customFields by remember(initialCredential.id) { mutableStateOf(initialCredential.customFields) }
-    var newCustomLabel by remember { mutableStateOf("") }
-    var newCustomValue by remember { mutableStateOf("") }
-    var validationError by remember { mutableStateOf<String?>(null) }
+    val revealedCustomFieldIds = remember { mutableStateMapOf<String, Boolean>() }
 
-    val strengthReport = remember(password) {
-        evaluateStrength(password, initialCredential.id)
+    // R19 Fix: Include existingVaultPasswords in remember keys so reuse warnings update live
+    val strengthReport = remember(draft.password, existingVaultPasswords) {
+        OfflinePasswordStrengthEstimator.evaluate(draft.password, existingVaultPasswords)
     }
 
-    fun buildCurrentRecord(): VaultRecordPayload.CredentialRecord {
-        val parsedTags = tagsText.split(",")
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .distinct()
-        return initialCredential.copy(
-            serviceName = serviceName.trim(),
-            accountLabel = accountLabel.trim().ifBlank { "Personal" },
-            username = username.trim(),
-            email = email.trim(),
-            password = password,
-            websiteUrl = websiteUrl.trim(),
-            folderName = folderName,
-            tags = parsedTags,
-            privateNotes = privateNotes,
-            customFields = customFields
-        )
-    }
-
-    BackHandler(onBack = onClose)
-
+    // U03 Fix: Single scrollable Column with single imePadding() and dark background
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
@@ -777,60 +581,77 @@ private fun CredentialEditorView(
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            IconButton(onClick = onClose) {
-                Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to passwords")
+            IconButton(
+                onClick = onClose,
+                modifier = Modifier.testTag("credential_editor_back_button")
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
             }
-            Text(
-                text = if (initialCredential.serviceName.isBlank()) "New Saved Credential" else "Edit Credential",
-                style = MaterialTheme.typography.titleLarge
-            )
-            Row {
-                if (initialCredential.serviceName.isNotBlank()) {
-                    IconButton(onClick = { onDuplicate(buildCurrentRecord()) }) {
-                        Icon(imageVector = Icons.Filled.ContentCopy, contentDescription = "Duplicate credential")
-                    }
-                    IconButton(onClick = { onMoveToTrash(buildCurrentRecord()) }) {
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                IconButton(onClick = { onUpdateDraft { it.copy(isPinned = !it.isPinned) } }) {
+                    Icon(
+                        imageVector = if (draft.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
+                        contentDescription = "Pin Credential",
+                        tint = if (draft.isPinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                IconButton(onClick = { onUpdateDraft { it.copy(isFavorite = !it.isFavorite) } }) {
+                    Icon(
+                        imageVector = if (draft.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                        contentDescription = "Favorite Credential",
+                        tint = if (draft.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (onDelete != null) {
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.testTag("credential_editor_delete_button")
+                    ) {
                         Icon(
                             imageVector = Icons.Filled.Delete,
-                            contentDescription = "Move credential to trash",
+                            contentDescription = "Delete Credential",
                             tint = MaterialTheme.colorScheme.error
                         )
                     }
                 }
+                Button(
+                    onClick = onSave,
+                    enabled = draft.serviceName.isNotBlank(),
+                    modifier = Modifier.testTag("credential_editor_save_button")
+                ) {
+                    Icon(Icons.Filled.Check, contentDescription = null)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Save")
+                }
             }
         }
 
-        // Important Local-Only Distinction Banner (Section 08 & 10)
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
-            shape = MaterialTheme.shapes.small,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(
-                modifier = Modifier.padding(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+        if (draft.editorError != null) {
+            Surface(
+                color = MaterialTheme.colorScheme.errorContainer,
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Icon(
-                    imageVector = Icons.Outlined.Info,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp)
-                )
                 Text(
-                    text = "Local Vault Record: Saving or replacing a password here updates your encrypted vault on this device only. Remember to also update the password on the actual service's website or app.",
+                    text = draft.editorError,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.padding(12.dp)
                 )
             }
         }
 
         OutlinedTextField(
-            value = serviceName,
-            onValueChange = { serviceName = it },
-            label = { Text("Service or App Name (e.g. GitHub, ProtonMail)") },
+            value = draft.serviceName,
+            onValueChange = { text -> onUpdateDraft { it.copy(serviceName = text, editorError = null) } },
+            label = { Text("Service / Title *") },
             singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
@@ -838,88 +659,55 @@ private fun CredentialEditorView(
         )
 
         OutlinedTextField(
-            value = accountLabel,
-            onValueChange = { accountLabel = it },
-            label = { Text("Account Label (e.g. Personal, Work, Secondary)") },
+            value = draft.username,
+            onValueChange = { text -> onUpdateDraft { it.copy(username = text) } },
+            label = { Text("Username / Email / Account ID") },
             singleLine = true,
+            trailingIcon = {
+                if (draft.username.isNotEmpty()) {
+                    IconButton(onClick = { onCopySecret("Username", draft.username) }) {
+                        Icon(Icons.Filled.ContentCopy, contentDescription = "Copy Username")
+                    }
+                }
+            },
             modifier = Modifier
                 .fillMaxWidth()
-                .testTag("credential_label_input")
+                .testTag("credential_username_input")
         )
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            OutlinedTextField(
-                value = username,
-                onValueChange = { username = it },
-                label = { Text("Username") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false
-                ),
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("credential_username_input")
-            )
-            OutlinedTextField(
-                value = email,
-                onValueChange = { email = it },
-                label = { Text("Email") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false,
-                    keyboardType = KeyboardType.Email
-                ),
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("credential_email_input")
-            )
-        }
-
         OutlinedTextField(
-            value = password,
-            onValueChange = { password = it },
-            label = { Text("Password *") },
+            value = draft.password,
+            onValueChange = { text -> onUpdateDraft { it.copy(password = text) } },
+            label = { Text("Password / Secret Key") },
             singleLine = true,
-            visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(
-                capitalization = KeyboardCapitalization.None,
-                autoCorrectEnabled = false,
-                keyboardType = KeyboardType.Password
-            ),
+            visualTransformation = if (showPassword) {
+                VisualTransformation.None
+            } else {
+                PasswordVisualTransformation()
+            },
             trailingIcon = {
-                Row {
-                    IconButton(
-                        onClick = { showPassword = !showPassword },
-                        modifier = Modifier.semantics {
-                            contentDescription = if (showPassword) "Hide password" else "Reveal password"
-                        }
-                    ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = { showPassword = !showPassword }) {
                         Icon(
                             imageVector = if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                            contentDescription = null
+                            contentDescription = if (showPassword) "Hide password" else "Show password"
                         )
                     }
                     IconButton(
                         onClick = {
-                            val generated = PasswordGeneratorEngine.generate(
-                                PasswordGeneratorEngine.GeneratorConfig(length = 20)
+                            val generated = OfflinePasswordStrengthEstimator.generatePassword(
+                                OfflinePasswordStrengthEstimator.GeneratorConfig(length = 20)
                             )
-                            if (generated is PasswordGeneratorEngine.GenerationResult.Success) {
-                                password = generated.password
-                                showPassword = true
-                            }
+                            onUpdateDraft { it.copy(password = generated) }
                         },
-                        modifier = Modifier.testTag("credential_inline_generate_button")
+                        modifier = Modifier.testTag("credential_generate_password_button")
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.AutoFixHigh,
-                            contentDescription = "Generate strong 20-character random password"
-                        )
+                        Icon(Icons.Filled.Refresh, contentDescription = "Generate Strong Password")
+                    }
+                    if (draft.password.isNotEmpty()) {
+                        IconButton(onClick = { onCopySecret("Password", draft.password) }) {
+                            Icon(Icons.Filled.ContentCopy, contentDescription = "Copy Password")
+                        }
                     }
                 }
             },
@@ -928,200 +716,234 @@ private fun CredentialEditorView(
                 .testTag("credential_password_input")
         )
 
-        if (password.isNotEmpty()) {
-            val barColor = when (strengthReport.rating) {
-                OfflinePasswordStrengthEstimator.StrengthRating.VERY_WEAK -> StatusVeryWeak
-                OfflinePasswordStrengthEstimator.StrengthRating.WEAK -> StatusWeak
-                OfflinePasswordStrengthEstimator.StrengthRating.FAIR -> StatusFair
-                OfflinePasswordStrengthEstimator.StrengthRating.STRONG -> StatusStrong
-                OfflinePasswordStrengthEstimator.StrengthRating.VERY_STRONG -> StatusVeryStrong
+        if (draft.password.isNotEmpty()) {
+            PasswordStrengthInlineBar(report = strengthReport)
+        }
+
+        OutlinedTextField(
+            value = draft.websiteUrl,
+            onValueChange = { text -> onUpdateDraft { it.copy(websiteUrl = text) } },
+            label = { Text("Website / URI (optional)") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("credential_url_input")
+        )
+
+        // Category Selector
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            CREDENTIAL_CATEGORIES.filter { it != "All" }.forEach { cat ->
+                FilterChip(
+                    selected = draft.category.equals(cat, ignoreCase = true),
+                    onClick = { onUpdateDraft { it.copy(category = cat) } },
+                    label = { Text(cat) }
+                )
             }
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
-                modifier = Modifier.fillMaxWidth()
+        }
+
+        if (availableFolders.isNotEmpty()) {
+            Text(
+                text = "Folder",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Column(
-                    modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "Local Strength: ${strengthReport.rating.label}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = barColor
-                        )
-                        Text(
-                            text = "~${strengthReport.effectiveEntropyBits.toInt()} bits",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = JetBrainsMonoFontFamily
-                        )
-                    }
-                    LinearProgressIndicator(
-                        progress = { (strengthReport.scoreOutOf100 / 100f).coerceIn(0.05f, 1f) },
-                        color = barColor,
-                        modifier = Modifier.fillMaxWidth()
+                availableFolders.forEach { folder ->
+                    FilterChip(
+                        selected = draft.folderId == folder.id,
+                        onClick = {
+                            onUpdateDraft {
+                                it.copy(folderId = folder.id, folderName = folder.name)
+                            }
+                        },
+                        label = { Text(folder.name) }
                     )
-                    if (strengthReport.reusedServiceNames.isNotEmpty()) {
-                        Text(
-                            text = "Reuse Warning: Also used by ${strengthReport.reusedServiceNames.joinToString(", ")} in this vault.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = StatusWeak
-                        )
-                    }
                 }
             }
         }
 
         OutlinedTextField(
-            value = websiteUrl,
-            onValueChange = { websiteUrl = it },
-            label = { Text("Website or App URL (optional)") },
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(
-                capitalization = KeyboardCapitalization.None,
-                autoCorrectEnabled = false,
-                keyboardType = KeyboardType.Uri
-            ),
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Text(text = "Folder", style = MaterialTheme.typography.labelLarge)
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            availableFolders.forEach { folder ->
-                FilterChip(
-                    selected = folderName == folder,
-                    onClick = { folderName = folder },
-                    label = { Text(folder) }
-                )
-            }
-        }
-
-        OutlinedTextField(
-            value = tagsText,
-            onValueChange = { tagsText = it },
+            value = draft.tagsText,
+            onValueChange = { text -> onUpdateDraft { it.copy(tagsText = text) } },
             label = { Text("Tags (comma separated)") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
 
         OutlinedTextField(
-            value = privateNotes,
-            onValueChange = { privateNotes = it },
-            label = { Text("Private Notes (encrypted)") },
+            value = draft.notes,
+            onValueChange = { text -> onUpdateDraft { it.copy(notes = text) } },
+            label = { Text("Encrypted Notes / Recovery Codes") },
             minLines = 3,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("credential_notes_input")
         )
 
-        // Custom Text Fields Section
+        // N08 Fix: Custom Fields Section with exact value preservation and secret masking
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
-                modifier = Modifier.padding(12.dp),
+                modifier = Modifier.padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(text = "Custom Text Fields", style = MaterialTheme.typography.titleSmall)
-                customFields.forEachIndexed { idx, field ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = "${field.label}: ${field.value}",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.weight(1f)
-                        )
-                        IconButton(
-                            onClick = {
-                                customFields = customFields.toMutableList().also { it.removeAt(idx) }
-                            }
-                        ) {
-                            Icon(imageVector = Icons.Filled.Close, contentDescription = "Remove custom field")
-                        }
-                    }
-                }
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedTextField(
-                        value = newCustomLabel,
-                        onValueChange = { newCustomLabel = it },
-                        placeholder = { Text("Field Label") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    OutlinedTextField(
-                        value = newCustomValue,
-                        onValueChange = { newCustomValue = it },
-                        placeholder = { Text("Value") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Button(
-                        onClick = {
-                            if (newCustomLabel.isNotBlank() && newCustomValue.isNotBlank()) {
-                                customFields = customFields + CustomCredentialField(
-                                    id = UUID.randomUUID().toString(),
-                                    label = newCustomLabel.trim(),
-                                    value = newCustomValue.trim()
-                                )
-                                newCustomLabel = ""
-                                newCustomValue = ""
-                            }
-                        }
-                    ) {
-                        Text("Add")
-                    }
-                }
-            }
-        }
+                Text(
+                    text = "Custom Fields (PINs, Security Questions, API Tokens)",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
 
-        if (validationError != null) {
-            Text(
-                text = validationError!!,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall
-            )
-        }
-
-        HorizontalDivider()
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            OutlinedButton(
-                onClick = onClose,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("Cancel")
-            }
-            Button(
-                onClick = {
-                    if (serviceName.isBlank()) {
-                        validationError = "Please enter a service or app name."
-                    } else if (password.isEmpty()) {
-                        validationError = "Please enter or generate a password."
+                draft.customFields.forEach { field ->
+                    val isRevealed = revealedCustomFieldIds[field.id] == true
+                    val displayValue = if (field.isSecret && !isRevealed) {
+                        "••••••••••••"
                     } else {
-                        onSave(buildCurrentRecord())
+                        field.value
                     }
-                },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("credential_editor_save_button")
-            ) {
-                Icon(imageVector = Icons.Filled.Key, contentDescription = null)
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Save Encrypted")
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (field.isSecret) "${field.label} (Secret)" else field.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = displayValue,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (field.isSecret) {
+                                IconButton(
+                                    onClick = {
+                                        revealedCustomFieldIds[field.id] = !isRevealed
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = if (isRevealed) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                        contentDescription = if (isRevealed) "Hide ${field.label}" else "Reveal ${field.label}"
+                                    )
+                                }
+                            }
+                            IconButton(onClick = { onCopySecret(field.label, field.value) }) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = "Copy ${field.label}")
+                            }
+                            IconButton(
+                                onClick = {
+                                    onUpdateDraft { state ->
+                                        state.copy(
+                                            customFields = state.customFields.filterNot { it.id == field.id }
+                                        )
+                                    }
+                                }
+                            ) {
+                                Icon(Icons.Filled.Delete, contentDescription = "Delete Custom Field")
+                            }
+                        }
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = draft.pendingCustomLabel,
+                            onValueChange = { text ->
+                                onUpdateDraft { it.copy(pendingCustomLabel = text, editorError = null) }
+                            },
+                            label = { Text("Label") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("custom_field_label_input")
+                        )
+                        OutlinedTextField(
+                            value = draft.pendingCustomValue,
+                            onValueChange = { text ->
+                                // N08 Fix: Preserve exact custom field value without trimming
+                                onUpdateDraft { it.copy(pendingCustomValue = text, editorError = null) }
+                            },
+                            label = { Text("Exact Value") },
+                            singleLine = true,
+                            visualTransformation = if (draft.pendingCustomIsSecret) {
+                                PasswordVisualTransformation()
+                            } else {
+                                VisualTransformation.None
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("custom_field_value_input")
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = draft.pendingCustomIsSecret,
+                                onCheckedChange = { checked ->
+                                    onUpdateDraft { it.copy(pendingCustomIsSecret = checked) }
+                                },
+                                modifier = Modifier.testTag("custom_field_secret_checkbox")
+                            )
+                            Text(
+                                text = "Secret field (mask value by default)",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                if (draft.pendingCustomLabel.isNotBlank() && draft.pendingCustomValue.isNotEmpty()) {
+                                    onUpdateDraft { state ->
+                                        state.copy(
+                                            customFields = state.customFields + CustomCredentialField(
+                                                label = state.pendingCustomLabel.trim(),
+                                                // N08 Fix: Do NOT call .trim() on secret custom value!
+                                                value = state.pendingCustomValue,
+                                                isSecret = state.pendingCustomIsSecret
+                                            ),
+                                            pendingCustomLabel = "",
+                                            pendingCustomValue = "",
+                                            editorError = null
+                                        )
+                                    }
+                                }
+                            },
+                            enabled = draft.pendingCustomLabel.isNotBlank() && draft.pendingCustomValue.isNotEmpty(),
+                            modifier = Modifier.testTag("custom_field_add_button")
+                        ) {
+                            Text("Add Field")
+                        }
+                    }
+                }
             }
         }
     }

@@ -1,1121 +1,1588 @@
 package com.example.data
 
-import com.example.security.BiometricKeystoreManager
+import com.example.security.BiometricKeyEnvelopeHelper
 import com.example.security.CryptoEngine
 import com.example.security.VaultSessionManager
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.io.InputStream
-import java.io.OutputStream
 import java.util.Arrays
 import java.util.UUID
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 
 /**
- * Vault-scoped encrypted repository enforcing session capabilities, two-slot unlock evaluation,
- * atomic key re-wrapping, Decoy Vault provisioning, and portable encrypted backups.
+ * Primary repository coordinating encrypted SQLite persistence, two-slot (Real + Decoy) key
+ * envelopes, authenticated record CRUD, folder lifecycle, and portable `.pvault` backups.
  *
- * Security Rules:
- * - Every read/write of user records requires an active `VaultSessionManager.SessionState.Unlocked`
- *   token and verifies `sessionManager.requireActiveSession(sessionId)` before and after async work.
- * - Unlocking ALWAYS evaluates Argon2id on both `Slot 0` and `Slot 1` before returning, recording
- *   the measured two-slot latency in `KdfBenchmarkResult`.
+ * Security Invariants:
+ * - Both Slot 0 (Real) and Slot 1 (Decoy) envelopes are ALWAYS evaluated during `unlockWithPassword`
+ *   so failed and successful unlocks execute two Argon2id derivations and two AES-GCM unwraps (`S02`).
+ * - Single-flight `kdfMutex` (`N03`, `R03`) prevents concurrent Argon2id derivations from racing
+ *   or exhausting heap memory.
+ * - Every unlock attempt validates `expectedAuthGeneration` at the atomic session-open boundary so
+ *   a lock/screen-off event while Argon2id is running cannot reopen the vault (`N03`).
+ * - Decoy Mode policy state is stored inside Slot 0's authenticated inner envelope (`decoyPolicyFlag`)
+ *   so an active empty decoy vault (0 records) remains recognized as active and continues to
+ *   prohibit biometric enrollment (`R01`).
+ * - Record decryption distinguishes valid records from corrupted/unreadable records (`N02`) so
+ *   backup export and merge restore never silently drop or delete corrupted ciphertext.
  */
 class VaultRepository(
     private val vaultDao: VaultDao,
-    private val sessionManager: VaultSessionManager,
-    private val biometricManager: BiometricKeystoreManager? = null,
+    val sessionManager: VaultSessionManager = VaultSessionManager(),
     private val defaultKdfParamsProvider: () -> CryptoEngine.KdfParams = { CryptoEngine.KdfParams() }
 ) {
+
+    private val kdfMutex = Mutex()
 
     sealed interface UnlockResult {
         data class Success(
             val session: VaultSessionManager.SessionState.Unlocked,
-            val benchmark: CryptoEngine.KdfBenchmarkResult
+            val kdfDurationMs: Long
         ) : UnlockResult
 
         data class InvalidCredentials(
-            val failedAttempts: Int,
-            val backoffDelayMs: Long,
-            val benchmark: CryptoEngine.KdfBenchmarkResult? = null
+            val kdfDurationMs: Long
         ) : UnlockResult
 
-        data class Error(val message: String) : UnlockResult
+        data object CancelledByLock : UnlockResult
     }
 
-    @Volatile
-    private var consecutiveFailedAttempts: Int = 0
+    data class DecryptedSlotSnapshot(
+        val items: List<VaultItem>,
+        val corruptedRecordIds: List<String>
+    ) {
+        val hasCorruptedRecords: Boolean get() = corruptedRecordIds.isNotEmpty()
+    }
+
+    class VaultRecordIntegrityException(
+        val corruptedRecordIds: List<String>,
+        message: String = "Detected ${corruptedRecordIds.size} unreadable or corrupted encrypted record(s) in the active vault."
+    ) : IllegalStateException(message)
 
     /**
-     * Checks whether the initial Real + Decoy key envelopes have been created on disk.
+     * Checks whether the initial vault envelopes have been provisioned on disk.
      */
-    suspend fun isVaultInitialized(): Boolean = withContext(Dispatchers.IO) {
+    suspend fun isVaultProvisioned(): Boolean = withContext(Dispatchers.IO) {
         val envelopes = vaultDao.getAllEnvelopes()
         envelopes.any { it.slotId == VaultSessionManager.REAL_SLOT } &&
             envelopes.any { it.slotId == VaultSessionManager.DECOY_SLOT }
     }
 
     /**
-     * Checks whether Biometric Unlock is currently configured on Slot 0.
-     * Note: Biometric wrapper is automatically null whenever Decoy Mode is enabled.
+     * Checks whether biometric quick-unlock is currently enrolled on Slot 0 AND permitted.
+     * Note: Biometric quick-unlock is automatically disabled whenever Decoy Mode is configured (`R01`).
      */
-    suspend fun isBiometricWrapperPresent(): Boolean = withContext(Dispatchers.IO) {
-        val realEnv = vaultDao.getEnvelopeBySlot(VaultSessionManager.REAL_SLOT)
-        realEnv?.biometricNonce != null && realEnv.biometricWrappedDek != null
+    suspend fun isBiometricUnlockEnrolled(): Boolean = withContext(Dispatchers.IO) {
+        val slot0 = vaultDao.getEnvelopeForSlot(VaultSessionManager.REAL_SLOT) ?: return@withContext false
+        slot0.biometricNonce != null &&
+            slot0.biometricWrappedDek != null &&
+            BiometricKeyEnvelopeHelper.hasHardwareKey()
     }
 
     /**
-     * First-time atomic initialization of Slot 0 (Real Vault) and Slot 1 (Decoy Vault or
-     * indistinguishable dummy slot).
+     * Evaluates whether Decoy Mode is currently active during an unlocked Real Vault session.
+     * R01 Fix: Uses the authenticated `isDecoyConfiguredInRealVault` flag from Slot 0's inner
+     * envelope rather than counting Slot 1 records, so an active empty Decoy Vault (0 records)
+     * remains accurately recognized as active!
+     */
+    suspend fun isDecoyModeEnabledForRealSession(sessionId: Long): Boolean = withContext(Dispatchers.IO) {
+        val session = sessionManager.requireActiveSession(sessionId)
+        if (!session.canManageVaultSecurity) return@withContext false
+        session.isDecoyConfiguredInRealVault
+    }
+
+    /**
+     * Provisions a brand-new vault with:
+     * - Slot 0 (Real Vault) encrypted under `realMasterPasswordChars`
+     * - Slot 1 (Decoy Vault) either encrypted as an active Decoy Vault under `optionalDecoyPasswordChars`
+     *   OR initialized with a structurally identical dummy envelope (`SLOT_ROLE_DUMMY`) so both rows
+     *   always exist on disk from day one.
+     * - Commits envelopes and initial records atomically inside a single `@Transaction` (`N06`).
      */
     suspend fun initializeNewVault(
-        realPasswordChars: CharArray,
-        decoyPasswordChars: CharArray? = null,
-        seedSampleDecoyData: Boolean = true
-    ): UnlockResult = withContext(Dispatchers.Default) {
-        require(realPasswordChars.size >= 8) {
-            "Master password must be at least 8 characters."
-        }
-        if (decoyPasswordChars != null) {
-            require(decoyPasswordChars.size >= 8) {
-                "Decoy password must be at least 8 characters."
+        realMasterPasswordChars: CharArray,
+        optionalDecoyPasswordChars: CharArray? = null,
+        seedSampleDataInRealVault: Boolean = true,
+        seedSampleDataInDecoyVault: Boolean = true
+    ): VaultSessionManager.SessionState.Unlocked = withContext(Dispatchers.Default) {
+        kdfMutex.withLock {
+            require(realMasterPasswordChars.size >= 8) {
+                "Master Password must be at least 8 characters."
             }
-            require(!realPasswordChars.contentEquals(decoyPasswordChars)) {
-                "Real and Decoy passwords must be different."
+            if (optionalDecoyPasswordChars != null && optionalDecoyPasswordChars.isNotEmpty()) {
+                require(optionalDecoyPasswordChars.size >= 8) {
+                    "Decoy Password must be at least 8 characters."
+                }
+                require(!realMasterPasswordChars.contentEquals(optionalDecoyPasswordChars)) {
+                    "Real Master Password and Decoy Password must be distinct."
+                }
             }
-        }
 
-        val now = System.currentTimeMillis()
-        val kdfParams = defaultKdfParamsProvider()
-        kdfParams.validateBounds()
+            val params = defaultKdfParamsProvider()
+            params.validateBounds()
+            val now = System.currentTimeMillis()
+            val hasDecoy = optionalDecoyPasswordChars != null && optionalDecoyPasswordChars.isNotEmpty()
 
-        val realDek = CryptoEngine.generateDek()
-        val decoyDek = CryptoEngine.generateDek()
-        val realSalt = CryptoEngine.generateSalt()
-        val decoySalt = CryptoEngine.generateSalt()
-        val realNonce = CryptoEngine.generateNonce()
-        val decoyNonce = CryptoEngine.generateNonce()
+            // 1. Build Slot 0 (Real Vault) envelope
+            val salt0 = CryptoEngine.generateSalt()
+            val nonce0 = CryptoEngine.generateNonce()
+            val dek0 = CryptoEngine.generateDek()
+            val kek0 = CryptoEngine.deriveKeyArgon2id(realMasterPasswordChars, salt0, params)
 
-        // If decoy password is not provided, derive Slot 1's wrapping key from a random throwaway secret
-        val dummyPasswordChars = UUID.randomUUID().toString().toCharArray()
-        val slot1Password = decoyPasswordChars ?: dummyPasswordChars
-        val slot1RoleFlag = if (decoyPasswordChars != null) {
-            CryptoEngine.SLOT_ROLE_ACTIVE
-        } else {
-            CryptoEngine.SLOT_ROLE_DUMMY
-        }
+            // 2. Build Slot 1 (Decoy or Dummy) envelope
+            val salt1 = CryptoEngine.generateSalt()
+            val nonce1 = CryptoEngine.generateNonce()
+            val dek1 = CryptoEngine.generateDek()
 
-        val startSlot0 = System.nanoTime()
-        val realKek = CryptoEngine.deriveKeyArgon2id(realPasswordChars, realSalt, kdfParams)
-        val slot0Ms = ((System.nanoTime() - startSlot0) / 1_000_000L).coerceAtLeast(1L)
+            val dummySecretChars = ByteArray(16).let { rnd ->
+                CryptoEngine.randomBytes(16).copyInto(rnd)
+                CharArray(16) { idx -> ((rnd[idx].toInt() and 0x7F) + 33).toChar() }
+            }
+            var kek1: ByteArray? = null
 
-        val startSlot1 = System.nanoTime()
-        val decoyKek = CryptoEngine.deriveKeyArgon2id(slot1Password, decoySalt, kdfParams)
-        val slot1Ms = ((System.nanoTime() - startSlot1) / 1_000_000L).coerceAtLeast(1L)
-
-        try {
-            val realWrapped = CryptoEngine.wrapEnvelopePayload(
-                kekBytes = realKek,
-                nonce = realNonce,
-                slotId = VaultSessionManager.REAL_SLOT,
-                envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
-                params = kdfParams,
-                payload = CryptoEngine.UnwrappedEnvelopePayload(
+            try {
+                val payload0 = CryptoEngine.UnwrappedEnvelopePayload(
                     slotRoleFlag = CryptoEngine.SLOT_ROLE_ACTIVE,
+                    decoyPolicyFlag = if (hasDecoy) CryptoEngine.DECOY_POLICY_ENABLED else CryptoEngine.DECOY_POLICY_DISABLED,
                     createdAtEpochMs = now,
                     rotatedAtEpochMs = now,
-                    dekBytes = realDek
+                    dekBytes = dek0
                 )
-            )
+                val wrapped0 = CryptoEngine.wrapEnvelopePayload(
+                    kekBytes = kek0,
+                    nonce = nonce0,
+                    slotId = VaultSessionManager.REAL_SLOT,
+                    envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
+                    params = params,
+                    payload = payload0
+                )
 
-            val decoyWrapped = CryptoEngine.wrapEnvelopePayload(
-                kekBytes = decoyKek,
-                nonce = decoyNonce,
-                slotId = VaultSessionManager.DECOY_SLOT,
-                envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
-                params = kdfParams,
-                payload = CryptoEngine.UnwrappedEnvelopePayload(
-                    slotRoleFlag = slot1RoleFlag,
+                val envelope0 = VaultEnvelopeEntity(
+                    slotId = VaultSessionManager.REAL_SLOT,
+                    envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
+                    kdfAlgorithm = params.algorithm,
+                    kdfSalt = salt0,
+                    kdfMemoryKb = params.memoryKb,
+                    kdfIterations = params.iterations,
+                    kdfParallelism = params.parallelism,
+                    envelopeNonce = nonce0,
+                    wrappedPayloadCiphertext = wrapped0,
+                    biometricNonce = null,
+                    biometricWrappedDek = null
+                )
+
+                kek1 = if (hasDecoy) {
+                    CryptoEngine.deriveKeyArgon2id(optionalDecoyPasswordChars!!, salt1, params)
+                } else {
+                    CryptoEngine.deriveKeyArgon2id(dummySecretChars, salt1, params)
+                }
+
+                val payload1 = CryptoEngine.UnwrappedEnvelopePayload(
+                    slotRoleFlag = if (hasDecoy) CryptoEngine.SLOT_ROLE_ACTIVE else CryptoEngine.SLOT_ROLE_DUMMY,
+                    decoyPolicyFlag = CryptoEngine.DECOY_POLICY_DISABLED,
                     createdAtEpochMs = now,
                     rotatedAtEpochMs = now,
-                    dekBytes = decoyDek
+                    dekBytes = dek1
                 )
-            )
+                val wrapped1 = CryptoEngine.wrapEnvelopePayload(
+                    kekBytes = kek1,
+                    nonce = nonce1,
+                    slotId = VaultSessionManager.DECOY_SLOT,
+                    envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
+                    params = params,
+                    payload = payload1
+                )
 
-            val slot0Entity = VaultEnvelopeEntity(
-                slotId = VaultSessionManager.REAL_SLOT,
-                envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
-                kdfAlgorithm = kdfParams.algorithm,
-                kdfMemoryKb = kdfParams.memoryKb,
-                kdfIterations = kdfParams.iterations,
-                kdfParallelism = kdfParams.parallelism,
-                kdfSalt = realSalt,
-                wrapNonce = realNonce,
-                wrappedPayloadCiphertext = realWrapped,
-                biometricNonce = null,
-                biometricWrappedDek = null
-            )
+                val envelope1 = VaultEnvelopeEntity(
+                    slotId = VaultSessionManager.DECOY_SLOT,
+                    envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
+                    kdfAlgorithm = params.algorithm,
+                    kdfSalt = salt1,
+                    kdfMemoryKb = params.memoryKb,
+                    kdfIterations = params.iterations,
+                    kdfParallelism = params.parallelism,
+                    envelopeNonce = nonce1,
+                    wrappedPayloadCiphertext = wrapped1,
+                    biometricNonce = null,
+                    biometricWrappedDek = null
+                )
 
-            val slot1Entity = VaultEnvelopeEntity(
-                slotId = VaultSessionManager.DECOY_SLOT,
-                envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
-                kdfAlgorithm = kdfParams.algorithm,
-                kdfMemoryKb = kdfParams.memoryKb,
-                kdfIterations = kdfParams.iterations,
-                kdfParallelism = kdfParams.parallelism,
-                kdfSalt = decoySalt,
-                wrapNonce = decoyNonce,
-                wrappedPayloadCiphertext = decoyWrapped,
-                biometricNonce = null,
-                biometricWrappedDek = null
-            )
-
-            withContext(Dispatchers.IO) {
-                vaultDao.upsertEnvelopes(listOf(slot0Entity, slot1Entity))
-                // Seed default folders for Real Vault
-                val defaultFolders = createDefaultFoldersForSlot(VaultSessionManager.REAL_SLOT, realDek, now)
-                vaultDao.upsertEncryptedRecords(defaultFolders)
-
-                if (decoyPasswordChars != null) {
-                    val decoyFolders = createDefaultFoldersForSlot(VaultSessionManager.DECOY_SLOT, decoyDek, now)
-                    vaultDao.upsertEncryptedRecords(decoyFolders)
-                    if (seedSampleDecoyData) {
-                        val sampleDecoyEntities = createFictitiousDecoyRecords(decoyDek, now)
-                        vaultDao.upsertEncryptedRecords(sampleDecoyEntities)
+                val initialEntities = mutableListOf<EncryptedRecordEntity>()
+                buildDefaultStarterFolders().forEach { folder ->
+                    initialEntities.add(encryptItemForSlot(VaultSessionManager.REAL_SLOT, dek0, folder))
+                }
+                if (seedSampleDataInRealVault) {
+                    buildStarterRealVaultRecords(now).forEach { item ->
+                        initialEntities.add(encryptItemForSlot(VaultSessionManager.REAL_SLOT, dek0, item))
                     }
                 }
-            }
-
-            if (decoyPasswordChars != null) {
-                biometricManager?.deleteBiometricKey()
-            }
-
-            consecutiveFailedAttempts = 0
-            val session = sessionManager.openSession(VaultSessionManager.REAL_SLOT, realDek)
-            val runtime = Runtime.getRuntime()
-            val benchmark = CryptoEngine.KdfBenchmarkResult(
-                deviceModel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim(),
-                androidSdkInt = android.os.Build.VERSION.SDK_INT,
-                memoryKbPerSlot = kdfParams.memoryKb,
-                iterations = kdfParams.iterations,
-                parallelism = kdfParams.parallelism,
-                singleSlotDurationMs = slot0Ms,
-                twoSlotUnlockDurationMs = slot0Ms + slot1Ms,
-                maxHeapMb = runtime.maxMemory() / (1024 * 1024),
-                usedHeapMbAfterRun = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
-            )
-            UnlockResult.Success(session, benchmark)
-        } finally {
-            Arrays.fill(realDek, 0.toByte())
-            Arrays.fill(decoyDek, 0.toByte())
-            Arrays.fill(realKek, 0.toByte())
-            Arrays.fill(decoyKek, 0.toByte())
-            Arrays.fill(dummyPasswordChars, '\u0000')
-        }
-    }
-
-    /**
-     * Unlocks either Slot 0 (Real) or Slot 1 (Decoy) by evaluating Argon2id on BOTH envelopes
-     * before returning, ensuring comparable computational cost and recording two-slot benchmark telemetry.
-     */
-    suspend fun unlockWithPassword(passwordChars: CharArray): UnlockResult = withContext(Dispatchers.Default) {
-        val envelopes = withContext(Dispatchers.IO) { vaultDao.getAllEnvelopes() }
-        val env0 = envelopes.firstOrNull { it.slotId == VaultSessionManager.REAL_SLOT }
-        val env1 = envelopes.firstOrNull { it.slotId == VaultSessionManager.DECOY_SLOT }
-
-        if (env0 == null || env1 == null) {
-            return@withContext UnlockResult.Error("Vault envelopes are missing or not initialized.")
-        }
-
-        val params0 = CryptoEngine.KdfParams(
-            algorithm = env0.kdfAlgorithm,
-            memoryKb = env0.kdfMemoryKb,
-            iterations = env0.kdfIterations,
-            parallelism = env0.kdfParallelism
-        )
-        val params1 = CryptoEngine.KdfParams(
-            algorithm = env1.kdfAlgorithm,
-            memoryKb = env1.kdfMemoryKb,
-            iterations = env1.kdfIterations,
-            parallelism = env1.kdfParallelism
-        )
-
-        try {
-            params0.validateBounds()
-            params1.validateBounds()
-        } catch (e: Exception) {
-            return@withContext UnlockResult.Error("Envelope KDF parameters failed safety bounds: ${e.message}")
-        }
-
-        val start0 = System.nanoTime()
-        val kek0 = CryptoEngine.deriveKeyArgon2id(passwordChars, env0.kdfSalt, params0)
-        val unwrapped0 = CryptoEngine.unwrapEnvelopePayloadOrNull(
-            kekBytes = kek0,
-            nonce = env0.wrapNonce,
-            slotId = env0.slotId,
-            envelopeVersion = env0.envelopeVersion,
-            params = params0,
-            wrappedCiphertext = env0.wrappedPayloadCiphertext
-        )
-        val duration0Ms = ((System.nanoTime() - start0) / 1_000_000L).coerceAtLeast(1L)
-
-        val start1 = System.nanoTime()
-        val kek1 = CryptoEngine.deriveKeyArgon2id(passwordChars, env1.kdfSalt, params1)
-        val unwrapped1 = CryptoEngine.unwrapEnvelopePayloadOrNull(
-            kekBytes = kek1,
-            nonce = env1.wrapNonce,
-            slotId = env1.slotId,
-            envelopeVersion = env1.envelopeVersion,
-            params = params1,
-            wrappedCiphertext = env1.wrappedPayloadCiphertext
-        )
-        val duration1Ms = ((System.nanoTime() - start1) / 1_000_000L).coerceAtLeast(1L)
-
-        val runtime = Runtime.getRuntime()
-        val benchmark = CryptoEngine.KdfBenchmarkResult(
-            deviceModel = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}".trim(),
-            androidSdkInt = android.os.Build.VERSION.SDK_INT,
-            memoryKbPerSlot = params0.memoryKb,
-            iterations = params0.iterations,
-            parallelism = params0.parallelism,
-            singleSlotDurationMs = duration0Ms,
-            twoSlotUnlockDurationMs = duration0Ms + duration1Ms,
-            maxHeapMb = runtime.maxMemory() / (1024 * 1024),
-            usedHeapMbAfterRun = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
-        )
-
-        try {
-            return@withContext when {
-                unwrapped0 != null && unwrapped0.isActiveVault -> {
-                    consecutiveFailedAttempts = 0
-                    val session = sessionManager.openSession(VaultSessionManager.REAL_SLOT, unwrapped0.dekBytes)
-                    UnlockResult.Success(session, benchmark)
+                if (hasDecoy) {
+                    buildDefaultStarterFolders().forEach { folder ->
+                        initialEntities.add(encryptItemForSlot(VaultSessionManager.DECOY_SLOT, dek1, folder))
+                    }
+                    if (seedSampleDataInDecoyVault) {
+                        buildPlausibleDecoyVaultRecords(now).forEach { item ->
+                            initialEntities.add(encryptItemForSlot(VaultSessionManager.DECOY_SLOT, dek1, item))
+                        }
+                    }
                 }
 
-                unwrapped1 != null && unwrapped1.isActiveVault -> {
-                    consecutiveFailedAttempts = 0
-                    val session = sessionManager.openSession(VaultSessionManager.DECOY_SLOT, unwrapped1.dekBytes)
-                    UnlockResult.Success(session, benchmark)
-                }
-
-                else -> {
-                    consecutiveFailedAttempts += 1
-                    val backoffMs = computeBackoffDelayMs(consecutiveFailedAttempts)
-                    UnlockResult.InvalidCredentials(
-                        failedAttempts = consecutiveFailedAttempts,
-                        backoffDelayMs = backoffMs,
-                        benchmark = benchmark
+                withContext(Dispatchers.IO) {
+                    vaultDao.initializeVaultAtomically(
+                        envelopes = listOf(envelope0, envelope1),
+                        initialRecords = initialEntities
                     )
                 }
+
+                sessionManager.openSession(
+                    slotId = VaultSessionManager.REAL_SLOT,
+                    dekBytes = dek0,
+                    isDecoyConfiguredInRealVault = hasDecoy
+                )
+            } finally {
+                Arrays.fill(kek0, 0.toByte())
+                kek1?.let { Arrays.fill(it, 0.toByte()) }
+                Arrays.fill(dek0, 0.toByte())
+                Arrays.fill(dek1, 0.toByte())
+                Arrays.fill(dummySecretChars, '\u0000')
             }
-        } finally {
-            Arrays.fill(kek0, 0.toByte())
-            Arrays.fill(kek1, 0.toByte())
-            unwrapped0?.wipe()
-            unwrapped1?.wipe()
         }
     }
 
     /**
-     * Checks whether Decoy Mode is currently configured as an active vault.
-     * Callable ONLY from an authenticated Real Vault (Slot 0) session.
+     * Evaluates BOTH Slot 0 and Slot 1 key envelopes against `passwordChars`.
+     *
+     * Uniform Two-Slot Path (S02) + Lock-Race Prevention (N03) + Key Wiping (R05):
+     * - Serialized via `kdfMutex` so concurrent unlock calls cannot overlap (`R03`).
+     * - Always runs Argon2id + AES-GCM unwrap for Slot 0 AND Slot 1 before deciding the outcome.
+     * - Nested `try/finally` ensures `kek0`, `kek1`, `unwrapped0`, and `unwrapped1` are zeroed even
+     *   if the second derivation throws or is cancelled (`R05`).
+     * - If `expectedAuthGeneration` no longer matches `sessionManager.currentAuthRequestGeneration()`
+     *   (because a lock or screen-off event occurred while Argon2id was executing), the derived keys
+     *   are wiped and `UnlockResult.CancelledByLock` is returned with the vault remaining `Locked` (`N03`).
      */
-    suspend fun isDecoyModeEnabled(
-        sessionId: Long,
-        decoyCheckPasswordChars: CharArray? = null
-    ): Boolean = withContext(Dispatchers.IO) {
-        val session = sessionManager.requireActiveSession(sessionId)
-        require(session.canManageVaultSecurity) {
-            "Decoy configuration status is restricted to the primary security context."
-        }
-        val realEnv = vaultDao.getEnvelopeBySlot(VaultSessionManager.REAL_SLOT)
-        // Also inspect whether decoy slot has records or if biometric wrapper was disabled
-        val decoyRecordsCount = vaultDao.getEncryptedRecordsForSlot(VaultSessionManager.DECOY_SLOT).size
-        if (decoyCheckPasswordChars != null) {
-            val env1 = vaultDao.getEnvelopeBySlot(VaultSessionManager.DECOY_SLOT) ?: return@withContext false
-            val params1 = CryptoEngine.KdfParams(
-                env1.kdfAlgorithm,
-                env1.kdfMemoryKb,
-                env1.kdfIterations,
-                env1.kdfParallelism
-            )
-            val kek1 = CryptoEngine.deriveKeyArgon2id(decoyCheckPasswordChars, env1.kdfSalt, params1)
-            val unwrapped = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                kek1, env1.wrapNonce, env1.slotId, env1.envelopeVersion, params1, env1.wrappedPayloadCiphertext
-            )
-            Arrays.fill(kek1, 0.toByte())
-            val active = unwrapped?.isActiveVault == true
-            unwrapped?.wipe()
-            return@withContext active
-        }
-        return@withContext decoyRecordsCount > 0 && realEnv?.biometricWrappedDek == null
-    }
-
-    /**
-     * Rotates the Real Master Password atomically by re-wrapping the existing Slot 0 DEK
-     * without re-encrypting every record or touching Slot 1 (Section 12, S04).
-     */
-    suspend fun changeRealMasterPassword(
-        sessionId: Long,
-        currentRealPasswordChars: CharArray,
-        newRealPasswordChars: CharArray
-    ): Result<Unit> = withContext(Dispatchers.Default) {
-        try {
-            val session = sessionManager.requireActiveSession(sessionId)
-            require(session.canManageVaultSecurity) {
-                "Cannot modify master security envelope from this session."
-            }
-            require(newRealPasswordChars.size >= 8) {
-                "New master password must be at least 8 characters."
+    suspend fun unlockWithPassword(
+        passwordChars: CharArray,
+        expectedAuthGeneration: Long = sessionManager.currentAuthRequestGeneration()
+    ): UnlockResult = withContext(Dispatchers.Default) {
+        kdfMutex.withLock {
+            if (sessionManager.currentAuthRequestGeneration() != expectedAuthGeneration) {
+                return@withLock UnlockResult.CancelledByLock
             }
 
-            val env0 = withContext(Dispatchers.IO) {
-                vaultDao.getEnvelopeBySlot(VaultSessionManager.REAL_SLOT)
-            } ?: return@withContext Result.failure(IllegalStateException("Slot 0 envelope missing."))
+            val envelopes = withContext(Dispatchers.IO) { vaultDao.getAllEnvelopes() }
+            val env0 = envelopes.firstOrNull { it.slotId == VaultSessionManager.REAL_SLOT }
+            val env1 = envelopes.firstOrNull { it.slotId == VaultSessionManager.DECOY_SLOT }
 
-            val env1 = withContext(Dispatchers.IO) {
-                vaultDao.getEnvelopeBySlot(VaultSessionManager.DECOY_SLOT)
-            } ?: return@withContext Result.failure(IllegalStateException("Slot 1 envelope missing."))
+            if (env0 == null || env1 == null) {
+                return@withLock UnlockResult.InvalidCredentials(0L)
+            }
 
             val params0 = CryptoEngine.KdfParams(
-                env0.kdfAlgorithm,
-                env0.kdfMemoryKb,
-                env0.kdfIterations,
-                env0.kdfParallelism
+                algorithm = env0.kdfAlgorithm,
+                memoryKb = env0.kdfMemoryKb,
+                iterations = env0.kdfIterations,
+                parallelism = env0.kdfParallelism
             )
-            val currentKek = CryptoEngine.deriveKeyArgon2id(currentRealPasswordChars, env0.kdfSalt, params0)
-            val unwrapped0 = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                currentKek,
-                env0.wrapNonce,
-                env0.slotId,
-                env0.envelopeVersion,
-                params0,
-                env0.wrappedPayloadCiphertext
+            val params1 = CryptoEngine.KdfParams(
+                algorithm = env1.kdfAlgorithm,
+                memoryKb = env1.kdfMemoryKb,
+                iterations = env1.kdfIterations,
+                parallelism = env1.kdfParallelism
+            )
+            params0.validateBounds()
+            params1.validateBounds()
+
+            val startNs = System.nanoTime()
+            var kek0: ByteArray? = null
+            var kek1: ByteArray? = null
+            var unwrapped0: CryptoEngine.UnwrappedEnvelopePayload? = null
+            var unwrapped1: CryptoEngine.UnwrappedEnvelopePayload? = null
+
+            try {
+                kek0 = CryptoEngine.deriveKeyArgon2id(passwordChars, env0.kdfSalt, params0)
+                unwrapped0 = CryptoEngine.unwrapEnvelopePayloadOrNull(
+                    kekBytes = kek0,
+                    nonce = env0.envelopeNonce,
+                    slotId = VaultSessionManager.REAL_SLOT,
+                    envelopeVersion = env0.envelopeVersion,
+                    params = params0,
+                    wrappedCiphertext = env0.wrappedPayloadCiphertext
+                )
+
+                kek1 = CryptoEngine.deriveKeyArgon2id(passwordChars, env1.kdfSalt, params1)
+                unwrapped1 = CryptoEngine.unwrapEnvelopePayloadOrNull(
+                    kekBytes = kek1,
+                    nonce = env1.envelopeNonce,
+                    slotId = VaultSessionManager.DECOY_SLOT,
+                    envelopeVersion = env1.envelopeVersion,
+                    params = params1,
+                    wrappedCiphertext = env1.wrappedPayloadCiphertext
+                )
+
+                val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
+
+                return@withLock when {
+                    unwrapped0 != null && unwrapped0.isActiveVault -> {
+                        // Backward compatibility: if Slot 1 currently has records from a v1.0.0 DB
+                        // created before decoyPolicyFlag was written, treat Decoy Mode as enabled too.
+                        val legacyDecoyCount = if (!unwrapped0.isDecoyPolicyEnabled) {
+                            withContext(Dispatchers.IO) {
+                                vaultDao.countRecordsForSlot(VaultSessionManager.DECOY_SLOT)
+                            }
+                        } else {
+                            0
+                        }
+                        val decoyActive = unwrapped0.isDecoyPolicyEnabled || legacyDecoyCount > 0
+                        val opened = sessionManager.openSessionIfGenerationMatches(
+                            expectedAuthGeneration = expectedAuthGeneration,
+                            slotId = VaultSessionManager.REAL_SLOT,
+                            dekBytes = unwrapped0.dekBytes,
+                            isDecoyConfiguredInRealVault = decoyActive
+                        )
+                        if (opened != null) {
+                            UnlockResult.Success(opened, elapsedMs)
+                        } else {
+                            UnlockResult.CancelledByLock
+                        }
+                    }
+                    unwrapped1 != null && unwrapped1.isActiveVault -> {
+                        val opened = sessionManager.openSessionIfGenerationMatches(
+                            expectedAuthGeneration = expectedAuthGeneration,
+                            slotId = VaultSessionManager.DECOY_SLOT,
+                            dekBytes = unwrapped1.dekBytes,
+                            isDecoyConfiguredInRealVault = false
+                        )
+                        if (opened != null) {
+                            UnlockResult.Success(opened, elapsedMs)
+                        } else {
+                            UnlockResult.CancelledByLock
+                        }
+                    }
+                    else -> {
+                        UnlockResult.InvalidCredentials(elapsedMs)
+                    }
+                }
+            } finally {
+                kek0?.let { Arrays.fill(it, 0.toByte()) }
+                kek1?.let { Arrays.fill(it, 0.toByte()) }
+                unwrapped0?.wipe()
+                unwrapped1?.wipe()
+            }
+        }
+    }
+
+    /**
+     * Prepares an encryption cipher from Android Keystore for enrolling biometric quick-unlock.
+     * Note: Biometric quick-unlock is only allowed for Slot 0 when Decoy Mode is disabled (`R01`).
+     */
+    suspend fun getCipherForBiometricEnrollment(sessionId: Long): Cipher? = withContext(Dispatchers.IO) {
+        val session = sessionManager.requireActiveSession(sessionId)
+        require(session.canManageVaultSecurity) {
+            "Biometric settings are not available in this session."
+        }
+        require(!session.isDecoyConfiguredInRealVault) {
+            "Biometric quick-unlock is disabled while Decoy Mode is active to protect plausible deniability."
+        }
+        BiometricKeyEnvelopeHelper.getEncryptCipherForEnrollment()
+    }
+
+    /**
+     * Completes biometric enrollment after the user authenticates with `BiometricPrompt`.
+     */
+    suspend fun enrollBiometricWrapperWithAuthenticatedCipher(
+        sessionId: Long,
+        authenticatedCipher: Cipher
+    ) = withContext(Dispatchers.IO) {
+        val session = sessionManager.requireActiveSession(sessionId)
+        require(session.canManageVaultSecurity) { "Unauthorized session." }
+        require(!session.isDecoyConfiguredInRealVault) {
+            "Biometric quick-unlock cannot be enabled while Decoy Mode is active."
+        }
+        val env0 = vaultDao.getEnvelopeForSlot(VaultSessionManager.REAL_SLOT)
+            ?: throw IllegalStateException("Slot 0 envelope missing.")
+
+        val dekCopy = session.borrowDekCopy()
+        try {
+            val wrapped = BiometricKeyEnvelopeHelper.wrapDekWithAuthenticatedCipher(
+                authenticatedCipher = authenticatedCipher,
+                dekBytes = dekCopy
+            )
+            vaultDao.upsertEnvelope(
+                env0.copy(
+                    biometricNonce = wrapped.iv,
+                    biometricWrappedDek = wrapped.ciphertext
+                )
+            )
+        } finally {
+            Arrays.fill(dekCopy, 0.toByte())
+        }
+    }
+
+    /**
+     * Prepares the Android Keystore decryption cipher for biometric quick-unlock of Slot 0.
+     */
+    suspend fun getCipherForBiometricUnlock(): Cipher? = withContext(Dispatchers.IO) {
+        val env0 = vaultDao.getEnvelopeForSlot(VaultSessionManager.REAL_SLOT) ?: return@withContext null
+        val iv = env0.biometricNonce ?: return@withContext null
+        if (env0.biometricWrappedDek == null) return@withContext null
+        BiometricKeyEnvelopeHelper.getDecryptCipherForUnlock(iv)
+    }
+
+    /**
+     * Unlocks Slot 0 using an authenticated `BiometricPrompt` cipher, checking `expectedAuthGeneration` (`N03`).
+     */
+    suspend fun unlockWithBiometricCipher(
+        authenticatedCipher: Cipher,
+        expectedAuthGeneration: Long = sessionManager.currentAuthRequestGeneration()
+    ): VaultSessionManager.SessionState.Unlocked? = withContext(Dispatchers.IO) {
+        val env0 = vaultDao.getEnvelopeForSlot(VaultSessionManager.REAL_SLOT) ?: return@withContext null
+        val wrappedDek = env0.biometricWrappedDek ?: return@withContext null
+        val dekBytes = try {
+            BiometricKeyEnvelopeHelper.unwrapDekWithAuthenticatedCipher(
+                authenticatedCipher = authenticatedCipher,
+                ciphertext = wrappedDek
+            )
+        } catch (_: Exception) {
+            return@withContext null
+        }
+
+        try {
+            if (dekBytes.size != CryptoEngine.DEK_BYTES) return@withContext null
+            sessionManager.openSessionIfGenerationMatches(
+                expectedAuthGeneration = expectedAuthGeneration,
+                slotId = VaultSessionManager.REAL_SLOT,
+                dekBytes = dekBytes,
+                isDecoyConfiguredInRealVault = false
+            )
+        } finally {
+            Arrays.fill(dekBytes, 0.toByte())
+        }
+    }
+
+    suspend fun disableBiometricUnlock() = withContext(Dispatchers.IO) {
+        BiometricKeyEnvelopeHelper.deleteBiometricKey()
+        val env0 = vaultDao.getEnvelopeForSlot(VaultSessionManager.REAL_SLOT) ?: return@withContext
+        vaultDao.upsertEnvelope(
+            env0.copy(
+                biometricNonce = null,
+                biometricWrappedDek = null
+            )
+        )
+    }
+
+    /**
+     * R02 Fix: Rotates the password of the CURRENTLY ACTIVE vault slot (works in both Slot 0 Real
+     * and Slot 1 Decoy!) without revealing slot labels or touching any encrypted records.
+     * Enforces cross-slot password uniqueness by checking that `newPasswordChars` does not unwrap
+     * the other slot's envelope.
+     */
+    suspend fun changeActiveVaultPassword(
+        sessionId: Long,
+        currentPasswordChars: CharArray,
+        newPasswordChars: CharArray
+    ) = withContext(Dispatchers.Default) {
+        kdfMutex.withLock {
+            val session = sessionManager.requireActiveSession(sessionId)
+            require(newPasswordChars.size >= 8) {
+                "New password must be at least 8 characters."
+            }
+            require(!currentPasswordChars.contentEquals(newPasswordChars)) {
+                "New password must be different from the current password."
+            }
+
+            val activeSlotId = session.slotId
+            val otherSlotId = if (activeSlotId == VaultSessionManager.REAL_SLOT) {
+                VaultSessionManager.DECOY_SLOT
+            } else {
+                VaultSessionManager.REAL_SLOT
+            }
+
+            val activeEnv = withContext(Dispatchers.IO) {
+                vaultDao.getEnvelopeForSlot(activeSlotId)
+            } ?: throw IllegalStateException("Active vault envelope missing.")
+
+            val otherEnv = withContext(Dispatchers.IO) {
+                vaultDao.getEnvelopeForSlot(otherSlotId)
+            }
+
+            val currentParams = CryptoEngine.KdfParams(
+                algorithm = activeEnv.kdfAlgorithm,
+                memoryKb = activeEnv.kdfMemoryKb,
+                iterations = activeEnv.kdfIterations,
+                parallelism = activeEnv.kdfParallelism
+            )
+            val currentKek = CryptoEngine.deriveKeyArgon2id(currentPasswordChars, activeEnv.kdfSalt, currentParams)
+            val verifiedPayload = CryptoEngine.unwrapEnvelopePayloadOrNull(
+                kekBytes = currentKek,
+                nonce = activeEnv.envelopeNonce,
+                slotId = activeSlotId,
+                envelopeVersion = activeEnv.envelopeVersion,
+                params = currentParams,
+                wrappedCiphertext = activeEnv.wrappedPayloadCiphertext
             )
             Arrays.fill(currentKek, 0.toByte())
 
-            if (unwrapped0 == null || !unwrapped0.isActiveVault) {
-                unwrapped0?.wipe()
-                return@withContext Result.failure(SecurityException("Current master password is incorrect."))
+            if (verifiedPayload == null || !verifiedPayload.isActiveVault) {
+                verifiedPayload?.wipe()
+                throw IllegalArgumentException("Current password verification failed.")
             }
 
-            // Ensure new Real password does not collide with active Decoy password
-            val params1 = CryptoEngine.KdfParams(
-                env1.kdfAlgorithm,
-                env1.kdfMemoryKb,
-                env1.kdfIterations,
-                env1.kdfParallelism
-            )
-            val testDecoyKek = CryptoEngine.deriveKeyArgon2id(newRealPasswordChars, env1.kdfSalt, params1)
-            val decoyUnwrapped = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                testDecoyKek,
-                env1.wrapNonce,
-                env1.slotId,
-                env1.envelopeVersion,
-                params1,
-                env1.wrappedPayloadCiphertext
-            )
-            Arrays.fill(testDecoyKek, 0.toByte())
-            if (decoyUnwrapped != null && decoyUnwrapped.isActiveVault) {
-                decoyUnwrapped.wipe()
-                unwrapped0.wipe()
-                return@withContext Result.failure(
-                    IllegalArgumentException("New master password must differ from the decoy password.")
+            // Ensure newPasswordChars does not collide with the other slot's password
+            if (otherEnv != null) {
+                val otherParams = CryptoEngine.KdfParams(
+                    algorithm = otherEnv.kdfAlgorithm,
+                    memoryKb = otherEnv.kdfMemoryKb,
+                    iterations = otherEnv.kdfIterations,
+                    parallelism = otherEnv.kdfParallelism
                 )
+                val otherTestKek = CryptoEngine.deriveKeyArgon2id(newPasswordChars, otherEnv.kdfSalt, otherParams)
+                val otherUnwrapped = CryptoEngine.unwrapEnvelopePayloadOrNull(
+                    kekBytes = otherTestKek,
+                    nonce = otherEnv.envelopeNonce,
+                    slotId = otherSlotId,
+                    envelopeVersion = otherEnv.envelopeVersion,
+                    params = otherParams,
+                    wrappedCiphertext = otherEnv.wrappedPayloadCiphertext
+                )
+                Arrays.fill(otherTestKek, 0.toByte())
+                val collidesWithOtherSlot = otherUnwrapped != null && otherUnwrapped.isActiveVault
+                otherUnwrapped?.wipe()
+                require(!collidesWithOtherSlot) {
+                    "This password is not available. Please choose a different password."
+                }
             }
-            decoyUnwrapped?.wipe()
 
             val newSalt = CryptoEngine.generateSalt()
             val newNonce = CryptoEngine.generateNonce()
-            val newParams = defaultKdfParamsProvider()
-            val newKek = CryptoEngine.deriveKeyArgon2id(newRealPasswordChars, newSalt, newParams)
-
+            val newKek = CryptoEngine.deriveKeyArgon2id(newPasswordChars, newSalt, currentParams)
             try {
-                val now = System.currentTimeMillis()
-                val rewrappedCiphertext = CryptoEngine.wrapEnvelopePayload(
+                val updatedPayload = verifiedPayload.copy(
+                    rotatedAtEpochMs = System.currentTimeMillis()
+                )
+                val newWrapped = CryptoEngine.wrapEnvelopePayload(
                     kekBytes = newKek,
                     nonce = newNonce,
-                    slotId = VaultSessionManager.REAL_SLOT,
-                    envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
-                    params = newParams,
-                    payload = CryptoEngine.UnwrappedEnvelopePayload(
-                        slotRoleFlag = CryptoEngine.SLOT_ROLE_ACTIVE,
-                        createdAtEpochMs = unwrapped0.createdAtEpochMs,
-                        rotatedAtEpochMs = now,
-                        dekBytes = unwrapped0.dekBytes
-                    )
+                    slotId = activeSlotId,
+                    envelopeVersion = activeEnv.envelopeVersion,
+                    params = currentParams,
+                    payload = updatedPayload
                 )
-
-                val updatedEnv0 = env0.copy(
-                    envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
-                    kdfAlgorithm = newParams.algorithm,
-                    kdfMemoryKb = newParams.memoryKb,
-                    kdfIterations = newParams.iterations,
-                    kdfParallelism = newParams.parallelism,
-                    kdfSalt = newSalt,
-                    wrapNonce = newNonce,
-                    wrappedPayloadCiphertext = rewrappedCiphertext
-                )
-
-                sessionManager.requireActiveSession(sessionId)
                 withContext(Dispatchers.IO) {
-                    vaultDao.upsertEnvelope(updatedEnv0)
+                    vaultDao.upsertEnvelope(
+                        activeEnv.copy(
+                            kdfSalt = newSalt,
+                            envelopeNonce = newNonce,
+                            wrappedPayloadCiphertext = newWrapped
+                        )
+                    )
                 }
-                Result.success(Unit)
             } finally {
                 Arrays.fill(newKek, 0.toByte())
-                unwrapped0.wipe()
+                verifiedPayload.wipe()
             }
-        } catch (e: Exception) {
-            Result.failure(e)
         }
     }
 
     /**
-     * Configures or updates the Decoy Vault (Slot 1) from an authenticated Real Vault (Slot 0) session.
-     * Automatically disables and wipes any Real Vault biometric wrapper per Section 14 & 15 (S11).
+     * Backward-compatible alias for rotating the Real Master Password while Slot 0 is unlocked.
+     */
+    suspend fun rotateRealMasterPassword(
+        sessionId: Long,
+        currentPasswordChars: CharArray,
+        newPasswordChars: CharArray
+    ) {
+        val session = sessionManager.requireActiveSession(sessionId)
+        require(session.canManageVaultSecurity) {
+            "Master Password rotation is only permitted in the primary vault."
+        }
+        changeActiveVaultPassword(sessionId, currentPasswordChars, newPasswordChars)
+    }
+
+    /**
+     * Verifies the Real Master Password without modifying state (used to gate the hidden Decoy
+     * Policy Management sheet from Settings, `R02`).
+     */
+    suspend fun verifyRealMasterPasswordForSecurityGate(
+        sessionId: Long,
+        realMasterPasswordChars: CharArray
+    ): Boolean = withContext(Dispatchers.Default) {
+        kdfMutex.withLock {
+            val session = sessionManager.requireActiveSession(sessionId)
+            if (!session.canManageVaultSecurity) return@withLock false
+            val env0 = withContext(Dispatchers.IO) {
+                vaultDao.getEnvelopeForSlot(VaultSessionManager.REAL_SLOT)
+            } ?: return@withLock false
+
+            val params0 = CryptoEngine.KdfParams(
+                algorithm = env0.kdfAlgorithm,
+                memoryKb = env0.kdfMemoryKb,
+                iterations = env0.kdfIterations,
+                parallelism = env0.kdfParallelism
+            )
+            val kek0 = CryptoEngine.deriveKeyArgon2id(realMasterPasswordChars, env0.kdfSalt, params0)
+            try {
+                val unwrapped0 = CryptoEngine.unwrapEnvelopePayloadOrNull(
+                    kekBytes = kek0,
+                    nonce = env0.envelopeNonce,
+                    slotId = VaultSessionManager.REAL_SLOT,
+                    envelopeVersion = env0.envelopeVersion,
+                    params = params0,
+                    wrappedCiphertext = env0.wrappedPayloadCiphertext
+                )
+                val valid = unwrapped0 != null && unwrapped0.isActiveVault
+                unwrapped0?.wipe()
+                valid
+            } finally {
+                Arrays.fill(kek0, 0.toByte())
+            }
+        }
+    }
+
+    /**
+     * N05 Fix (Flow 1 — First-Time Provisioning OR Explicit Destructive Reset):
+     * Provisions or resets Slot 1 (Decoy Vault) with a brand-new DEK, updates Slot 0's inner
+     * envelope `decoyPolicyFlag = DECOY_POLICY_ENABLED`, clears biometric wrappers on Slot 0,
+     * and commits everything atomically (`N06`, `R01`).
+     *
+     * If Decoy Mode is already enabled on this vault, requires `allowDestructiveReset = true`
+     * so calling this method can never accidentally wipe existing decoy records (`N05`).
      */
     suspend fun configureDecoyVault(
         sessionId: Long,
         realMasterPasswordChars: CharArray,
-        newDecoyPasswordChars: CharArray,
-        seedSampleData: Boolean = true
-    ): Result<Unit> = withContext(Dispatchers.Default) {
-        try {
+        decoyPasswordChars: CharArray,
+        seedSampleData: Boolean = true,
+        allowDestructiveReset: Boolean = false
+    ) = withContext(Dispatchers.Default) {
+        kdfMutex.withLock {
             val session = sessionManager.requireActiveSession(sessionId)
             require(session.canManageVaultSecurity) {
-                "Decoy Vault configuration requires an authenticated Real Vault session."
+                "Decoy Vault configuration is only available in the primary vault."
             }
-            require(newDecoyPasswordChars.size >= 8) {
-                "Decoy password must be at least 8 characters."
+            if (session.isDecoyConfiguredInRealVault && !allowDestructiveReset) {
+                throw IllegalStateException(
+                    "Decoy Vault is already provisioned. Use Change Decoy Password to keep existing decoy records, or confirm Reset & Wipe Decoy Vault."
+                )
             }
-            require(!realMasterPasswordChars.contentEquals(newDecoyPasswordChars)) {
-                "Decoy password must be different from the Real master password."
+            require(decoyPasswordChars.size >= 8) {
+                "Decoy Password must be at least 8 characters."
+            }
+            require(!realMasterPasswordChars.contentEquals(decoyPasswordChars)) {
+                "Decoy Password must be different from your Real Master Password."
             }
 
-            // Verify Real Master Password first
             val env0 = withContext(Dispatchers.IO) {
-                vaultDao.getEnvelopeBySlot(VaultSessionManager.REAL_SLOT)
-            } ?: return@withContext Result.failure(IllegalStateException("Slot 0 missing."))
+                vaultDao.getEnvelopeForSlot(VaultSessionManager.REAL_SLOT)
+            } ?: throw IllegalStateException("Slot 0 envelope missing.")
 
             val params0 = CryptoEngine.KdfParams(
-                env0.kdfAlgorithm,
-                env0.kdfMemoryKb,
-                env0.kdfIterations,
-                env0.kdfParallelism
+                algorithm = env0.kdfAlgorithm,
+                memoryKb = env0.kdfMemoryKb,
+                iterations = env0.kdfIterations,
+                parallelism = env0.kdfParallelism
             )
-            val realKek = CryptoEngine.deriveKeyArgon2id(realMasterPasswordChars, env0.kdfSalt, params0)
+            val kek0 = CryptoEngine.deriveKeyArgon2id(realMasterPasswordChars, env0.kdfSalt, params0)
             val unwrapped0 = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                realKek,
-                env0.wrapNonce,
-                env0.slotId,
-                env0.envelopeVersion,
-                params0,
-                env0.wrappedPayloadCiphertext
+                kekBytes = kek0,
+                nonce = env0.envelopeNonce,
+                slotId = VaultSessionManager.REAL_SLOT,
+                envelopeVersion = env0.envelopeVersion,
+                params = params0,
+                wrappedCiphertext = env0.wrappedPayloadCiphertext
             )
-            Arrays.fill(realKek, 0.toByte())
             if (unwrapped0 == null || !unwrapped0.isActiveVault) {
+                Arrays.fill(kek0, 0.toByte())
                 unwrapped0?.wipe()
-                return@withContext Result.failure(SecurityException("Real master password verification failed."))
+                throw IllegalArgumentException("Real Master Password verification failed.")
             }
-            unwrapped0.wipe()
 
-            // Create fresh Decoy DEK and envelope for Slot 1
             val now = System.currentTimeMillis()
-            val decoyParams = defaultKdfParamsProvider()
-            val decoySalt = CryptoEngine.generateSalt()
-            val decoyNonce = CryptoEngine.generateNonce()
-            val decoyDek = CryptoEngine.generateDek()
-            val decoyKek = CryptoEngine.deriveKeyArgon2id(newDecoyPasswordChars, decoySalt, decoyParams)
+            val salt1 = CryptoEngine.generateSalt()
+            val nonce1 = CryptoEngine.generateNonce()
+            val dek1 = CryptoEngine.generateDek()
+            val kek1 = CryptoEngine.deriveKeyArgon2id(decoyPasswordChars, salt1, params0)
 
             try {
-                val wrappedDecoy = CryptoEngine.wrapEnvelopePayload(
-                    kekBytes = decoyKek,
-                    nonce = decoyNonce,
-                    slotId = VaultSessionManager.DECOY_SLOT,
-                    envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
-                    params = decoyParams,
-                    payload = CryptoEngine.UnwrappedEnvelopePayload(
-                        slotRoleFlag = CryptoEngine.SLOT_ROLE_ACTIVE,
-                        createdAtEpochMs = now,
-                        rotatedAtEpochMs = now,
-                        dekBytes = decoyDek
-                    )
+                // Re-wrap Slot 0 with decoyPolicyFlag = DECOY_POLICY_ENABLED and clear biometrics (R01)
+                BiometricKeyEnvelopeHelper.deleteBiometricKey()
+                val newNonce0 = CryptoEngine.generateNonce()
+                val updatedPayload0 = unwrapped0.copy(
+                    decoyPolicyFlag = CryptoEngine.DECOY_POLICY_ENABLED,
+                    rotatedAtEpochMs = now
                 )
-
-                val newSlot1 = VaultEnvelopeEntity(
-                    slotId = VaultSessionManager.DECOY_SLOT,
-                    envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
-                    kdfAlgorithm = decoyParams.algorithm,
-                    kdfMemoryKb = decoyParams.memoryKb,
-                    kdfIterations = decoyParams.iterations,
-                    kdfParallelism = decoyParams.parallelism,
-                    kdfSalt = decoySalt,
-                    wrapNonce = decoyNonce,
-                    wrappedPayloadCiphertext = wrappedDecoy,
+                val rewrapped0 = CryptoEngine.wrapEnvelopePayload(
+                    kekBytes = kek0,
+                    nonce = newNonce0,
+                    slotId = VaultSessionManager.REAL_SLOT,
+                    envelopeVersion = env0.envelopeVersion,
+                    params = params0,
+                    payload = updatedPayload0
+                )
+                val updatedEnv0 = env0.copy(
+                    envelopeNonce = newNonce0,
+                    wrappedPayloadCiphertext = rewrapped0,
                     biometricNonce = null,
                     biometricWrappedDek = null
                 )
 
-                // Disable biometric wrapper on Slot 0 whenever Decoy is enabled (S11)
-                val scrubbedSlot0 = env0.copy(
+                val payload1 = CryptoEngine.UnwrappedEnvelopePayload(
+                    slotRoleFlag = CryptoEngine.SLOT_ROLE_ACTIVE,
+                    decoyPolicyFlag = CryptoEngine.DECOY_POLICY_DISABLED,
+                    createdAtEpochMs = now,
+                    rotatedAtEpochMs = now,
+                    dekBytes = dek1
+                )
+                val wrapped1 = CryptoEngine.wrapEnvelopePayload(
+                    kekBytes = kek1,
+                    nonce = nonce1,
+                    slotId = VaultSessionManager.DECOY_SLOT,
+                    envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
+                    params = params0,
+                    payload = payload1
+                )
+                val updatedEnv1 = VaultEnvelopeEntity(
+                    slotId = VaultSessionManager.DECOY_SLOT,
+                    envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
+                    kdfAlgorithm = params0.algorithm,
+                    kdfSalt = salt1,
+                    kdfMemoryKb = params0.memoryKb,
+                    kdfIterations = params0.iterations,
+                    kdfParallelism = params0.parallelism,
+                    envelopeNonce = nonce1,
+                    wrappedPayloadCiphertext = wrapped1,
                     biometricNonce = null,
                     biometricWrappedDek = null
                 )
-                biometricManager?.deleteBiometricKey()
 
-                withContext(Dispatchers.IO) {
-                    vaultDao.upsertEnvelopes(listOf(scrubbedSlot0, newSlot1))
-                    vaultDao.deleteAllRecordsForSlot(VaultSessionManager.DECOY_SLOT)
-                    val decoyFolders = createDefaultFoldersForSlot(VaultSessionManager.DECOY_SLOT, decoyDek, now)
-                    vaultDao.upsertEncryptedRecords(decoyFolders)
-                    if (seedSampleData) {
-                        val samples = createFictitiousDecoyRecords(decoyDek, now)
-                        vaultDao.upsertEncryptedRecords(samples)
+                val seedEntities = mutableListOf<EncryptedRecordEntity>()
+                buildDefaultStarterFolders().forEach { folder ->
+                    seedEntities.add(encryptItemForSlot(VaultSessionManager.DECOY_SLOT, dek1, folder))
+                }
+                if (seedSampleData) {
+                    buildPlausibleDecoyVaultRecords(now).forEach { item ->
+                        seedEntities.add(encryptItemForSlot(VaultSessionManager.DECOY_SLOT, dek1, item))
                     }
                 }
-                Result.success(Unit)
+
+                withContext(Dispatchers.IO) {
+                    vaultDao.provisionOrResetDecoyAtomically(
+                        updatedRealEnvelope = updatedEnv0,
+                        updatedDecoyEnvelope = updatedEnv1,
+                        decoySlotId = VaultSessionManager.DECOY_SLOT,
+                        seedRecords = seedEntities
+                    )
+                }
+                sessionManager.updateRealVaultDecoyPolicyState(sessionId, isDecoyConfigured = true)
             } finally {
-                Arrays.fill(decoyDek, 0.toByte())
-                Arrays.fill(decoyKek, 0.toByte())
+                Arrays.fill(kek0, 0.toByte())
+                Arrays.fill(kek1, 0.toByte())
+                Arrays.fill(dek1, 0.toByte())
+                unwrapped0.wipe()
             }
-        } catch (e: Exception) {
-            Result.failure(e)
         }
     }
 
     /**
-     * Disables Decoy Mode from an authenticated Real Vault session by overwriting Slot 1 with a
-     * fresh unconfigured dummy envelope (`slotRoleFlag = 0x00`) and deleting Slot 1 records.
+     * N05 Fix (Flow 2 — Non-Destructive Decoy Password Rotation from Real Vault):
+     * Verifies the current Decoy Password, unwraps the existing Slot 1 DEK, and re-wraps that
+     * exact same Slot 1 DEK under `newDecoyPasswordChars` with a fresh salt and nonce so ALL
+     * existing Slot 1 decoy notes, credentials, and folders remain 100% intact!
+     */
+    suspend fun rotateDecoyPasswordPreservingRecords(
+        sessionId: Long,
+        realMasterPasswordChars: CharArray,
+        currentDecoyPasswordChars: CharArray,
+        newDecoyPasswordChars: CharArray
+    ) = withContext(Dispatchers.Default) {
+        kdfMutex.withLock {
+            val session = sessionManager.requireActiveSession(sessionId)
+            require(session.canManageVaultSecurity) {
+                "Decoy Vault management is only available in the primary vault."
+            }
+            require(newDecoyPasswordChars.size >= 8) {
+                "New Decoy Password must be at least 8 characters."
+            }
+            require(!realMasterPasswordChars.contentEquals(newDecoyPasswordChars)) {
+                "New Decoy Password must be different from your Real Master Password."
+            }
+            require(!currentDecoyPasswordChars.contentEquals(newDecoyPasswordChars)) {
+                "New Decoy Password must be different from the current Decoy Password."
+            }
+
+            val env0 = withContext(Dispatchers.IO) {
+                vaultDao.getEnvelopeForSlot(VaultSessionManager.REAL_SLOT)
+            } ?: throw IllegalStateException("Slot 0 envelope missing.")
+            val env1 = withContext(Dispatchers.IO) {
+                vaultDao.getEnvelopeForSlot(VaultSessionManager.DECOY_SLOT)
+            } ?: throw IllegalStateException("Slot 1 envelope missing.")
+
+            val params0 = CryptoEngine.KdfParams(
+                algorithm = env0.kdfAlgorithm,
+                memoryKb = env0.kdfMemoryKb,
+                iterations = env0.kdfIterations,
+                parallelism = env0.kdfParallelism
+            )
+            val params1 = CryptoEngine.KdfParams(
+                algorithm = env1.kdfAlgorithm,
+                memoryKb = env1.kdfMemoryKb,
+                iterations = env1.kdfIterations,
+                parallelism = env1.kdfParallelism
+            )
+
+            var kek0: ByteArray? = null
+            var currentKek1: ByteArray? = null
+            var newKek1: ByteArray? = null
+            var unwrapped0: CryptoEngine.UnwrappedEnvelopePayload? = null
+            var unwrapped1: CryptoEngine.UnwrappedEnvelopePayload? = null
+
+            try {
+                kek0 = CryptoEngine.deriveKeyArgon2id(realMasterPasswordChars, env0.kdfSalt, params0)
+                unwrapped0 = CryptoEngine.unwrapEnvelopePayloadOrNull(
+                    kekBytes = kek0,
+                    nonce = env0.envelopeNonce,
+                    slotId = VaultSessionManager.REAL_SLOT,
+                    envelopeVersion = env0.envelopeVersion,
+                    params = params0,
+                    wrappedCiphertext = env0.wrappedPayloadCiphertext
+                )
+                if (unwrapped0 == null || !unwrapped0.isActiveVault) {
+                    throw IllegalArgumentException("Real Master Password verification failed.")
+                }
+
+                currentKek1 = CryptoEngine.deriveKeyArgon2id(currentDecoyPasswordChars, env1.kdfSalt, params1)
+                unwrapped1 = CryptoEngine.unwrapEnvelopePayloadOrNull(
+                    kekBytes = currentKek1,
+                    nonce = env1.envelopeNonce,
+                    slotId = VaultSessionManager.DECOY_SLOT,
+                    envelopeVersion = env1.envelopeVersion,
+                    params = params1,
+                    wrappedCiphertext = env1.wrappedPayloadCiphertext
+                )
+                if (unwrapped1 == null || !unwrapped1.isActiveVault) {
+                    throw IllegalArgumentException("Current Decoy Password verification failed.")
+                }
+
+                val newSalt1 = CryptoEngine.generateSalt()
+                val newNonce1 = CryptoEngine.generateNonce()
+                newKek1 = CryptoEngine.deriveKeyArgon2id(newDecoyPasswordChars, newSalt1, params1)
+                val updatedPayload1 = unwrapped1.copy(
+                    rotatedAtEpochMs = System.currentTimeMillis()
+                )
+                val rewrapped1 = CryptoEngine.wrapEnvelopePayload(
+                    kekBytes = newKek1,
+                    nonce = newNonce1,
+                    slotId = VaultSessionManager.DECOY_SLOT,
+                    envelopeVersion = env1.envelopeVersion,
+                    params = params1,
+                    payload = updatedPayload1
+                )
+
+                withContext(Dispatchers.IO) {
+                    vaultDao.upsertEnvelope(
+                        env1.copy(
+                            kdfSalt = newSalt1,
+                            envelopeNonce = newNonce1,
+                            wrappedPayloadCiphertext = rewrapped1
+                        )
+                    )
+                }
+            } finally {
+                kek0?.let { Arrays.fill(it, 0.toByte()) }
+                currentKek1?.let { Arrays.fill(it, 0.toByte()) }
+                newKek1?.let { Arrays.fill(it, 0.toByte()) }
+                unwrapped0?.wipe()
+                unwrapped1?.wipe()
+            }
+        }
+    }
+
+    /**
+     * Disables Decoy Mode by replacing Slot 1 with a fresh unconfigured dummy envelope, setting
+     * `decoyPolicyFlag = DECOY_POLICY_DISABLED` in Slot 0, and deleting all Slot 1 records inside
+     * a single atomic `@Transaction` (`N06`, `R01`).
      */
     suspend fun disableDecoyVault(
         sessionId: Long,
         realMasterPasswordChars: CharArray
-    ): Result<Unit> = withContext(Dispatchers.Default) {
-        try {
+    ) = withContext(Dispatchers.Default) {
+        kdfMutex.withLock {
             val session = sessionManager.requireActiveSession(sessionId)
-            require(session.canManageVaultSecurity) {
-                "Disabling Decoy Mode requires an authenticated Real Vault session."
-            }
+            require(session.canManageVaultSecurity) { "Unauthorized session." }
 
             val env0 = withContext(Dispatchers.IO) {
-                vaultDao.getEnvelopeBySlot(VaultSessionManager.REAL_SLOT)
-            } ?: return@withContext Result.failure(IllegalStateException("Slot 0 missing."))
+                vaultDao.getEnvelopeForSlot(VaultSessionManager.REAL_SLOT)
+            } ?: throw IllegalStateException("Slot 0 envelope missing.")
 
             val params0 = CryptoEngine.KdfParams(
-                env0.kdfAlgorithm,
-                env0.kdfMemoryKb,
-                env0.kdfIterations,
-                env0.kdfParallelism
+                algorithm = env0.kdfAlgorithm,
+                memoryKb = env0.kdfMemoryKb,
+                iterations = env0.kdfIterations,
+                parallelism = env0.kdfParallelism
             )
-            val realKek = CryptoEngine.deriveKeyArgon2id(realMasterPasswordChars, env0.kdfSalt, params0)
+            val kek0 = CryptoEngine.deriveKeyArgon2id(realMasterPasswordChars, env0.kdfSalt, params0)
             val unwrapped0 = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                realKek,
-                env0.wrapNonce,
-                env0.slotId,
-                env0.envelopeVersion,
-                params0,
-                env0.wrappedPayloadCiphertext
+                kekBytes = kek0,
+                nonce = env0.envelopeNonce,
+                slotId = VaultSessionManager.REAL_SLOT,
+                envelopeVersion = env0.envelopeVersion,
+                params = params0,
+                wrappedCiphertext = env0.wrappedPayloadCiphertext
             )
-            Arrays.fill(realKek, 0.toByte())
             if (unwrapped0 == null || !unwrapped0.isActiveVault) {
+                Arrays.fill(kek0, 0.toByte())
                 unwrapped0?.wipe()
-                return@withContext Result.failure(SecurityException("Real master password verification failed."))
+                throw IllegalArgumentException("Real Master Password verification failed.")
             }
-            unwrapped0.wipe()
 
             val now = System.currentTimeMillis()
-            val dummyParams = defaultKdfParamsProvider()
-            val dummySalt = CryptoEngine.generateSalt()
-            val dummyNonce = CryptoEngine.generateNonce()
-            val dummyDek = CryptoEngine.generateDek()
-            val dummyPass = UUID.randomUUID().toString().toCharArray()
-            val dummyKek = CryptoEngine.deriveKeyArgon2id(dummyPass, dummySalt, dummyParams)
+            val salt1 = CryptoEngine.generateSalt()
+            val nonce1 = CryptoEngine.generateNonce()
+            val dek1 = CryptoEngine.generateDek()
+            val dummyChars = CharArray(16) { 'x' }
+            val kek1 = CryptoEngine.deriveKeyArgon2id(dummyChars, salt1, params0)
 
             try {
-                val wrappedDummy = CryptoEngine.wrapEnvelopePayload(
-                    kekBytes = dummyKek,
-                    nonce = dummyNonce,
-                    slotId = VaultSessionManager.DECOY_SLOT,
-                    envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
-                    params = dummyParams,
-                    payload = CryptoEngine.UnwrappedEnvelopePayload(
-                        slotRoleFlag = CryptoEngine.SLOT_ROLE_DUMMY,
-                        createdAtEpochMs = now,
-                        rotatedAtEpochMs = now,
-                        dekBytes = dummyDek
-                    )
+                val newNonce0 = CryptoEngine.generateNonce()
+                val updatedPayload0 = unwrapped0.copy(
+                    decoyPolicyFlag = CryptoEngine.DECOY_POLICY_DISABLED,
+                    rotatedAtEpochMs = now
+                )
+                val rewrapped0 = CryptoEngine.wrapEnvelopePayload(
+                    kekBytes = kek0,
+                    nonce = newNonce0,
+                    slotId = VaultSessionManager.REAL_SLOT,
+                    envelopeVersion = env0.envelopeVersion,
+                    params = params0,
+                    payload = updatedPayload0
+                )
+                val updatedEnv0 = env0.copy(
+                    envelopeNonce = newNonce0,
+                    wrappedPayloadCiphertext = rewrapped0
                 )
 
-                val dummySlot1 = VaultEnvelopeEntity(
+                val payload1 = CryptoEngine.UnwrappedEnvelopePayload(
+                    slotRoleFlag = CryptoEngine.SLOT_ROLE_DUMMY,
+                    decoyPolicyFlag = CryptoEngine.DECOY_POLICY_DISABLED,
+                    createdAtEpochMs = now,
+                    rotatedAtEpochMs = now,
+                    dekBytes = dek1
+                )
+                val wrapped1 = CryptoEngine.wrapEnvelopePayload(
+                    kekBytes = kek1,
+                    nonce = nonce1,
                     slotId = VaultSessionManager.DECOY_SLOT,
                     envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
-                    kdfAlgorithm = dummyParams.algorithm,
-                    kdfMemoryKb = dummyParams.memoryKb,
-                    kdfIterations = dummyParams.iterations,
-                    kdfParallelism = dummyParams.parallelism,
-                    kdfSalt = dummySalt,
-                    wrapNonce = dummyNonce,
-                    wrappedPayloadCiphertext = wrappedDummy,
-                    biometricNonce = null,
-                    biometricWrappedDek = null
+                    params = params0,
+                    payload = payload1
+                )
+
+                val dummyEnv1 = VaultEnvelopeEntity(
+                    slotId = VaultSessionManager.DECOY_SLOT,
+                    envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
+                    kdfAlgorithm = params0.algorithm,
+                    kdfSalt = salt1,
+                    kdfMemoryKb = params0.memoryKb,
+                    kdfIterations = params0.iterations,
+                    kdfParallelism = params0.parallelism,
+                    envelopeNonce = nonce1,
+                    wrappedPayloadCiphertext = wrapped1
                 )
 
                 withContext(Dispatchers.IO) {
-                    vaultDao.upsertEnvelope(dummySlot1)
-                    vaultDao.deleteAllRecordsForSlot(VaultSessionManager.DECOY_SLOT)
-                }
-                Result.success(Unit)
-            } finally {
-                Arrays.fill(dummyDek, 0.toByte())
-                Arrays.fill(dummyKek, 0.toByte())
-                Arrays.fill(dummyPass, '\u0000')
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    /**
-     * Completes Biometric Unlock enrollment using a Cipher authenticated by BiometricPrompt.
-     * Permitted ONLY when Decoy Mode is disabled.
-     */
-    suspend fun enrollBiometricWrapperWithAuthenticatedCipher(
-        sessionId: Long,
-        authenticatedEncryptionCipher: Cipher
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        try {
-            val session = sessionManager.requireActiveSession(sessionId)
-            require(session.canManageVaultSecurity) {
-                "Biometric enrollment is only allowed in the Real Vault."
-            }
-            val decoyRecords = vaultDao.getEncryptedRecordsForSlot(VaultSessionManager.DECOY_SLOT)
-            require(decoyRecords.isEmpty()) {
-                "Biometric unlock cannot be enabled while Decoy Mode is active."
-            }
-
-            val env0 = vaultDao.getEnvelopeBySlot(VaultSessionManager.REAL_SLOT)
-                ?: return@withContext Result.failure(IllegalStateException("Slot 0 envelope missing."))
-
-            val dekCopy = session.borrowDekCopy()
-            try {
-                val wrappedDek = authenticatedEncryptionCipher.doFinal(dekCopy)
-                val iv = authenticatedEncryptionCipher.iv
-                vaultDao.upsertEnvelope(
-                    env0.copy(
-                        biometricNonce = iv,
-                        biometricWrappedDek = wrappedDek
+                    vaultDao.disableDecoyAtomically(
+                        updatedRealEnvelope = updatedEnv0,
+                        dummyDecoyEnvelope = dummyEnv1,
+                        decoySlotId = VaultSessionManager.DECOY_SLOT
                     )
-                )
-                Result.success(Unit)
-            } finally {
-                Arrays.fill(dekCopy, 0.toByte())
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    /**
-     * Unlocks Slot 0 using a Decryption Cipher authenticated by AndroidX BiometricPrompt (S12).
-     */
-    suspend fun unlockWithAuthenticatedBiometricCipher(
-        authenticatedDecryptionCipher: Cipher
-    ): Result<VaultSessionManager.SessionState.Unlocked> = withContext(Dispatchers.IO) {
-        try {
-            val env0 = vaultDao.getEnvelopeBySlot(VaultSessionManager.REAL_SLOT)
-                ?: return@withContext Result.failure(IllegalStateException("Slot 0 envelope missing."))
-            val wrapped = env0.biometricWrappedDek
-                ?: return@withContext Result.failure(IllegalStateException("Biometric wrapper not configured."))
-
-            val dekBytes = authenticatedDecryptionCipher.doFinal(wrapped)
-            try {
-                val session = sessionManager.openSession(VaultSessionManager.REAL_SLOT, dekBytes)
-                consecutiveFailedAttempts = 0
-                Result.success(session)
-            } finally {
-                Arrays.fill(dekBytes, 0.toByte())
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    suspend fun disableBiometricUnlock(sessionId: Long): Result<Unit> = withContext(Dispatchers.IO) {
-        try {
-            val session = sessionManager.requireActiveSession(sessionId)
-            require(session.canManageVaultSecurity) { "Unauthorized session." }
-            biometricManager?.deleteBiometricKey()
-            val env0 = vaultDao.getEnvelopeBySlot(VaultSessionManager.REAL_SLOT)
-            if (env0 != null) {
-                vaultDao.upsertEnvelope(env0.copy(biometricNonce = null, biometricWrappedDek = null))
-            }
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    /**
-     * Observes and decrypts all records for the given active session.
-     * If the session is locked or replaced, immediately stops decrypting and returns empty.
-     */
-    fun observeDecryptedRecords(sessionId: Long): Flow<List<VaultRecordPayload>> {
-        val initialSession = sessionManager.requireActiveSession(sessionId)
-        val targetSlot = initialSession.slotId
-
-        return vaultDao.observeEncryptedRecordsForSlot(targetSlot).map { entities ->
-            if (!sessionManager.isSessionActive(sessionId)) {
-                return@map emptyList()
-            }
-            val activeSession = try {
-                sessionManager.requireActiveSession(sessionId)
-            } catch (_: Exception) {
-                return@map emptyList()
-            }
-            val dekCopy = activeSession.borrowDekCopy()
-            try {
-                entities.mapNotNull { entity ->
-                    if (!sessionManager.isSessionActive(sessionId)) return@map emptyList()
-                    decryptEntityOrNull(entity, dekCopy)
                 }
+                sessionManager.updateRealVaultDecoyPolicyState(sessionId, isDecoyConfigured = false)
             } finally {
-                Arrays.fill(dekCopy, 0.toByte())
+                Arrays.fill(kek0, 0.toByte())
+                Arrays.fill(kek1, 0.toByte())
+                Arrays.fill(dek1, 0.toByte())
+                Arrays.fill(dummyChars, '\u0000')
+                unwrapped0.wipe()
             }
         }
     }
 
     /**
-     * Atomically encrypts and saves a Note, Credential, or Folder into the active session's slot.
-     * Verifies session liveness both before encryption and immediately before committing to SQLite (S07).
+     * Loads and decrypts all records belonging to the currently active session slot, returning
+     * both decrypted items and any corrupted record IDs (`N02`) while automatically canonicalizing
+     * `folderId` links (`R12`).
      */
-    suspend fun saveRecord(
-        sessionId: Long,
-        payload: VaultRecordPayload
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        try {
+    suspend fun loadDecryptedSlotSnapshotForSession(sessionId: Long): DecryptedSlotSnapshot =
+        withContext(Dispatchers.Default) {
             val session = sessionManager.requireActiveSession(sessionId)
             val dekCopy = session.borrowDekCopy()
             try {
-                val entity = encryptPayloadToEntity(payload, session.slotId, dekCopy)
-                // Re-verify session is still active after encryption before writing to DB (S07)
-                sessionManager.requireActiveSession(sessionId)
-                vaultDao.upsertEncryptedRecord(entity)
-                Result.success(Unit)
+                val entities = withContext(Dispatchers.IO) {
+                    vaultDao.getRecordsForSlot(session.slotId)
+                }
+                val decodedItems = mutableListOf<VaultItem>()
+                val corruptedIds = mutableListOf<String>()
+
+                for (entity in entities) {
+                    when (val res = decryptEntityStructured(session.slotId, dekCopy, entity)) {
+                        is RecordDecryptResult.Success -> decodedItems.add(res.item)
+                        is RecordDecryptResult.Corrupted -> corruptedIds.add(res.recordId)
+                    }
+                }
+
+                // Ensure default "General" folders exist and canonicalize folderId links (R12)
+                val normalizedItems = normalizeFoldersAndLinks(decodedItems)
+                DecryptedSlotSnapshot(
+                    items = normalizedItems,
+                    corruptedRecordIds = corruptedIds
+                )
             } finally {
                 Arrays.fill(dekCopy, 0.toByte())
             }
-        } catch (e: Exception) {
-            Result.failure(e)
+        }
+
+    /**
+     * Loads and decrypts all valid records belonging to the currently active session slot.
+     */
+    suspend fun loadDecryptedRecordsForSession(sessionId: Long): List<VaultItem> {
+        return loadDecryptedSlotSnapshotForSession(sessionId).items
+    }
+
+    /**
+     * Encrypts and saves a `VaultItem` (`NoteRecord`, `CredentialRecord`, or `VaultFolder`)
+     * into the active session's slot only after validating `sessionId`.
+     */
+    suspend fun saveVaultItem(sessionId: Long, item: VaultItem) = withContext(Dispatchers.Default) {
+        val session = sessionManager.requireActiveSession(sessionId)
+        val dekCopy = session.borrowDekCopy()
+        try {
+            val entity = encryptItemForSlot(session.slotId, dekCopy, item)
+            if (!sessionManager.isSessionActive(sessionId)) {
+                throw IllegalStateException("Vault locked before write could complete.")
+            }
+            withContext(Dispatchers.IO) {
+                vaultDao.upsertRecord(entity)
+            }
+        } finally {
+            Arrays.fill(dekCopy, 0.toByte())
         }
     }
 
-    suspend fun deleteRecordPermanently(
+    suspend fun deleteVaultItem(sessionId: Long, recordId: String) = withContext(Dispatchers.IO) {
+        val session = sessionManager.requireActiveSession(sessionId)
+        vaultDao.deleteRecord(session.slotId, recordId)
+    }
+
+    /**
+     * R12 Fix: Renames an existing custom folder and updates all notes/credentials bound to that
+     * folder's `folderId` (or legacy `folderName`) so no record is orphaned.
+     */
+    suspend fun renameVaultFolder(
         sessionId: Long,
-        recordId: String
-    ): Result<Unit> = withContext(Dispatchers.IO) {
+        folderId: String,
+        newNameRaw: String
+    ) = withContext(Dispatchers.Default) {
+        val newName = newNameRaw.trim()
+        require(newName.isNotEmpty() && newName.length <= 60) {
+            "Folder name must be between 1 and 60 characters."
+        }
+        require(!VaultFolder.isReservedAllName(newName)) {
+            "\"All\" is reserved for the view filter."
+        }
+        require(!VaultFolder.isDefaultGeneralName(newName)) {
+            "\"General\" is the built-in default folder."
+        }
+
+        val session = sessionManager.requireActiveSession(sessionId)
+        val snapshot = loadDecryptedSlotSnapshotForSession(sessionId)
+        val targetFolder = snapshot.items.filterIsInstance<VaultFolder>().firstOrNull { it.id == folderId }
+            ?: throw IllegalArgumentException("Folder not found.")
+
+        val duplicateExists = snapshot.items.filterIsInstance<VaultFolder>().any {
+            it.scope == targetFolder.scope &&
+                it.id != targetFolder.id &&
+                it.name.trim().equals(newName, ignoreCase = true)
+        }
+        require(!duplicateExists) {
+            "A folder named \"$newName\" already exists."
+        }
+
+        val now = System.currentTimeMillis()
+        val updatedFolder = targetFolder.copy(name = newName, updatedAtEpochMs = now)
+        val updatedRecords = mutableListOf<VaultItem>(updatedFolder)
+
+        snapshot.items.forEach { item ->
+            when (item) {
+                is NoteRecord -> {
+                    if (targetFolder.scope == FolderScope.NOTES &&
+                        (item.folderId == targetFolder.id || item.folderName.equals(targetFolder.name, ignoreCase = true))
+                    ) {
+                        updatedRecords.add(
+                            item.copy(
+                                folderId = targetFolder.id,
+                                folderName = newName,
+                                updatedAtEpochMs = now
+                            )
+                        )
+                    }
+                }
+                is CredentialRecord -> {
+                    if (targetFolder.scope == FolderScope.CREDENTIALS &&
+                        (item.folderId == targetFolder.id || item.folderName.equals(targetFolder.name, ignoreCase = true))
+                    ) {
+                        updatedRecords.add(
+                            item.copy(
+                                folderId = targetFolder.id,
+                                folderName = newName,
+                                updatedAtEpochMs = now
+                            )
+                        )
+                    }
+                }
+                else -> {}
+            }
+        }
+
+        val dekCopy = session.borrowDekCopy()
         try {
-            val session = sessionManager.requireActiveSession(sessionId)
-            vaultDao.deleteEncryptedRecordById(recordId, session.slotId)
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
+            val entities = updatedRecords.map { encryptItemForSlot(session.slotId, dekCopy, it) }
+            if (!sessionManager.isSessionActive(sessionId)) {
+                throw IllegalStateException("Vault locked before folder rename could complete.")
+            }
+            withContext(Dispatchers.IO) {
+                vaultDao.upsertRecords(entities)
+            }
+        } finally {
+            Arrays.fill(dekCopy, 0.toByte())
         }
     }
 
     /**
-     * Builds an encrypted `.pvault` byte snapshot of the currently authenticated vault slot ONLY (S08, B06).
+     * R12 Fix: Deletes a custom folder and reassigns all records inside it to the built-in
+     * `"General"` folder (`DEFAULT_NOTE_FOLDER_ID` or `DEFAULT_CREDENTIAL_FOLDER_ID`) so deleting
+     * a folder never deletes or orphans user notes or credentials.
+     */
+    suspend fun deleteVaultFolderAndReassignRecords(
+        sessionId: Long,
+        folderId: String
+    ) = withContext(Dispatchers.Default) {
+        require(
+            folderId != VaultFolder.DEFAULT_NOTE_FOLDER_ID &&
+                folderId != VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID
+        ) {
+            "The built-in General folder cannot be deleted."
+        }
+
+        val session = sessionManager.requireActiveSession(sessionId)
+        val snapshot = loadDecryptedSlotSnapshotForSession(sessionId)
+        val targetFolder = snapshot.items.filterIsInstance<VaultFolder>().firstOrNull { it.id == folderId }
+            ?: return@withContext
+        require(!VaultFolder.isDefaultGeneralName(targetFolder.name)) {
+            "The built-in General folder cannot be deleted."
+        }
+
+        val now = System.currentTimeMillis()
+        val reassignedItems = mutableListOf<VaultItem>()
+        snapshot.items.forEach { item ->
+            when (item) {
+                is NoteRecord -> {
+                    if (targetFolder.scope == FolderScope.NOTES &&
+                        (item.folderId == targetFolder.id || item.folderName.equals(targetFolder.name, ignoreCase = true))
+                    ) {
+                        reassignedItems.add(
+                            item.copy(
+                                folderId = VaultFolder.DEFAULT_NOTE_FOLDER_ID,
+                                folderName = VaultFolder.DEFAULT_FOLDER_NAME,
+                                updatedAtEpochMs = now
+                            )
+                        )
+                    }
+                }
+                is CredentialRecord -> {
+                    if (targetFolder.scope == FolderScope.CREDENTIALS &&
+                        (item.folderId == targetFolder.id || item.folderName.equals(targetFolder.name, ignoreCase = true))
+                    ) {
+                        reassignedItems.add(
+                            item.copy(
+                                folderId = VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID,
+                                folderName = VaultFolder.DEFAULT_FOLDER_NAME,
+                                updatedAtEpochMs = now
+                            )
+                        )
+                    }
+                }
+                else -> {}
+            }
+        }
+
+        val dekCopy = session.borrowDekCopy()
+        try {
+            val entities = reassignedItems.map { encryptItemForSlot(session.slotId, dekCopy, it) }
+            if (!sessionManager.isSessionActive(sessionId)) {
+                throw IllegalStateException("Vault locked before folder deletion could complete.")
+            }
+            withContext(Dispatchers.IO) {
+                if (entities.isNotEmpty()) {
+                    vaultDao.upsertRecords(entities)
+                }
+                vaultDao.deleteRecord(session.slotId, targetFolder.id)
+            }
+        } finally {
+            Arrays.fill(dekCopy, 0.toByte())
+        }
+    }
+
+    /**
+     * Generates an encrypted `.pvault` byte array for the active session's slot.
+     *
+     * N02 Fix: If any record in the active slot fails AEAD authentication or decoding, aborts
+     * the ordinary export with `VaultRecordIntegrityException` unless the caller explicitly sets
+     * `allowSkipCorruptedRecords = true` (Recovery Export mode).
      */
     suspend fun prepareEncryptedBackupBytes(
         sessionId: Long,
         backupPasswordChars: CharArray,
-        scope: PortableBackupEngine.ExportScope
-    ): Result<ByteArray> = withContext(Dispatchers.Default) {
-        try {
-            val session = sessionManager.requireActiveSession(sessionId)
-            val dekCopy = session.borrowDekCopy()
-            val decryptedRecords = try {
-                val entities = withContext(Dispatchers.IO) {
-                    vaultDao.getEncryptedRecordsForSlot(session.slotId)
-                }
-                entities.mapNotNull { decryptEntityOrNull(it, dekCopy) }
-            } finally {
-                Arrays.fill(dekCopy, 0.toByte())
-            }
-
-            sessionManager.requireActiveSession(sessionId)
-            val bytes = PortableBackupEngine.createEncryptedBackupBytes(
-                backupPasswordChars = backupPasswordChars,
-                records = decryptedRecords,
-                scope = scope,
-                kdfParams = defaultKdfParamsProvider()
+        appVersionName: String = "1.0.1",
+        allowSkipCorruptedRecords: Boolean = false
+    ): ByteArray = withContext(Dispatchers.Default) {
+        val snapshot = loadDecryptedSlotSnapshotForSession(sessionId)
+        if (snapshot.hasCorruptedRecords && !allowSkipCorruptedRecords) {
+            throw VaultRecordIntegrityException(
+                corruptedRecordIds = snapshot.corruptedRecordIds,
+                message = "Backup aborted: ${snapshot.corruptedRecordIds.size} encrypted record(s) failed integrity verification. Enable Recovery Export if you wish to export only intact records."
             )
-            Result.success(bytes)
-        } catch (e: Exception) {
-            Result.failure(e)
         }
+        val params = defaultKdfParamsProvider()
+        PortableBackupEngine.createEncryptedBackupBytes(
+            items = snapshot.items,
+            backupPasswordChars = backupPasswordChars,
+            appVersionName = appVersionName,
+            kdfParams = params
+        )
     }
 
     /**
-     * Writes already-encrypted `.pvault` bytes to a user-selected SAF OutputStream and flushes/closes safely.
-     */
-    suspend fun writeEncryptedBackupToStream(
-        encryptedBytes: ByteArray,
-        outputStream: OutputStream
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        try {
-            outputStream.use { out ->
-                out.write(encryptedBytes)
-                out.flush()
-            }
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    /**
-     * Verifies and previews a `.pvault` backup stream without modifying the database.
-     */
-    suspend fun previewBackupFromStream(
-        sessionId: Long,
-        inputStream: InputStream,
-        backupPasswordChars: CharArray
-    ): Result<PortableBackupEngine.VerifiedBackupPreview> = withContext(Dispatchers.Default) {
-        try {
-            sessionManager.requireActiveSession(sessionId)
-            val preview = inputStream.use { stream ->
-                PortableBackupEngine.verifyAndDecryptBackup(stream, backupPasswordChars)
-            }
-            sessionManager.requireActiveSession(sessionId)
-            Result.success(preview)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    /**
-     * Atomically applies a verified backup preview into the currently authenticated vault slot ONLY (S09, B05).
+     * Decrypts, verifies, and applies a `.pvault` backup into the currently unlocked vault slot.
+     *
+     * - Authenticates the entire `.pvault` file in memory before touching SQLite.
+     * - Binds `originSlotId` at the start and verifies `sessionManager.requireActiveSession(sessionId)`
+     *   matches `originSlotId` immediately before committing the Room transaction.
+     * - N02 Fix: In `MERGE_KEEP_NEWEST` mode, if any existing record in the active slot is corrupted,
+     *   aborts before modifying SQLite so corrupted ciphertext is never silently deleted! Also writes
+     *   merged records via `upsertRecords` rather than `deleteAllRecordsForSlot`.
      */
     suspend fun applyVerifiedBackupRestore(
         sessionId: Long,
-        preview: PortableBackupEngine.VerifiedBackupPreview,
-        mode: PortableBackupEngine.RestoreMode
-    ): Result<Int> = withContext(Dispatchers.IO) {
+        backupBytes: ByteArray,
+        backupPasswordChars: CharArray,
+        restoreMode: PortableBackupEngine.RestoreMode
+    ): PortableBackupEngine.BackupPayload = withContext(Dispatchers.Default) {
+        val initialSession = sessionManager.requireActiveSession(sessionId)
+        val originSlotId = initialSession.slotId
+
+        // 1. Verify and decrypt backup completely in memory before touching database
+        val verifiedPayload = PortableBackupEngine.decryptAndVerifyBackupBytes(
+            backupBytes = backupBytes,
+            backupPasswordChars = backupPasswordChars
+        )
+
+        // 2. Re-verify active session and slot binding
+        val currentSession = sessionManager.requireActiveSession(sessionId)
+        check(currentSession.slotId == originSlotId) {
+            "Session slot changed during restore; aborting to prevent cross-vault write."
+        }
+
+        val snapshot = loadDecryptedSlotSnapshotForSession(sessionId)
+        if (restoreMode == PortableBackupEngine.RestoreMode.MERGE_KEEP_NEWEST && snapshot.hasCorruptedRecords) {
+            throw VaultRecordIntegrityException(
+                corruptedRecordIds = snapshot.corruptedRecordIds,
+                message = "Merge restore aborted to prevent data loss: ${snapshot.corruptedRecordIds.size} existing record(s) in this vault failed integrity verification."
+            )
+        }
+
+        val finalItems = when (restoreMode) {
+            PortableBackupEngine.RestoreMode.REPLACE_ACTIVE_VAULT ->
+                normalizeFoldersAndLinks(verifiedPayload.items)
+            PortableBackupEngine.RestoreMode.MERGE_KEEP_NEWEST -> {
+                PortableBackupEngine.mergeItemsKeepNewest(snapshot.items, verifiedPayload.items)
+            }
+        }
+
+        val dekCopy = currentSession.borrowDekCopy()
         try {
-            val session = sessionManager.requireActiveSession(sessionId)
-            val dekCopy = session.borrowDekCopy()
-            try {
-                when (mode) {
+            val newEntities = finalItems.map { item ->
+                encryptItemForSlot(originSlotId, dekCopy, item)
+            }
+
+            // Final atomic session check right before Room transaction
+            val finalCheckSession = sessionManager.requireActiveSession(sessionId)
+            check(finalCheckSession.slotId == originSlotId) {
+                "Vault session expired before restore transaction commit."
+            }
+
+            withContext(Dispatchers.IO) {
+                when (restoreMode) {
                     PortableBackupEngine.RestoreMode.REPLACE_ACTIVE_VAULT -> {
-                        val newEntities = preview.records.map { record ->
-                            encryptPayloadToEntity(record, session.slotId, dekCopy)
-                        }
-                        sessionManager.requireActiveSession(sessionId)
-                        vaultDao.replaceAllRecordsForSlot(session.slotId, newEntities)
-                        Result.success(newEntities.size)
+                        vaultDao.replaceAllRecordsForSlot(originSlotId, newEntities)
                     }
-
                     PortableBackupEngine.RestoreMode.MERGE_KEEP_NEWEST -> {
-                        val existingEntities = vaultDao.getEncryptedRecordsForSlot(session.slotId)
-                        val existingMap = existingEntities
-                            .mapNotNull { decryptEntityOrNull(it, dekCopy) }
-                            .associateBy { it.id }
-                            .toMutableMap()
-
-                        for (incoming in preview.records) {
-                            val current = existingMap[incoming.id]
-                            if (current == null || incoming.updatedAtEpochMs >= current.updatedAtEpochMs) {
-                                existingMap[incoming.id] = incoming
-                            }
-                        }
-
-                        val mergedEntities = existingMap.values.map { record ->
-                            encryptPayloadToEntity(record, session.slotId, dekCopy)
-                        }
-                        sessionManager.requireActiveSession(sessionId)
-                        vaultDao.replaceAllRecordsForSlot(session.slotId, mergedEntities)
-                        Result.success(preview.records.size)
+                        vaultDao.upsertRecords(newEntities)
                     }
                 }
-            } finally {
-                Arrays.fill(dekCopy, 0.toByte())
             }
-        } catch (e: Exception) {
-            Result.failure(e)
+            verifiedPayload
+        } finally {
+            Arrays.fill(dekCopy, 0.toByte())
         }
     }
 
-    private fun encryptPayloadToEntity(
-        payload: VaultRecordPayload,
-        vaultSlot: Int,
-        dekBytes: ByteArray
+    private fun normalizeFoldersAndLinks(rawItems: List<VaultItem>): List<VaultItem> {
+        val folders = rawItems.filterIsInstance<VaultFolder>().toMutableList()
+        val hasNotesGeneral = folders.any {
+            it.scope == FolderScope.NOTES &&
+                (it.id == VaultFolder.DEFAULT_NOTE_FOLDER_ID || VaultFolder.isDefaultGeneralName(it.name))
+        }
+        if (!hasNotesGeneral) {
+            folders.add(
+                0,
+                VaultFolder(
+                    id = VaultFolder.DEFAULT_NOTE_FOLDER_ID,
+                    name = VaultFolder.DEFAULT_FOLDER_NAME,
+                    scope = FolderScope.NOTES,
+                    createdAtEpochMs = 0L,
+                    updatedAtEpochMs = 0L
+                )
+            )
+        }
+        val hasCredsGeneral = folders.any {
+            it.scope == FolderScope.CREDENTIALS &&
+                (it.id == VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID || VaultFolder.isDefaultGeneralName(it.name))
+        }
+        if (!hasCredsGeneral) {
+            folders.add(
+                VaultFolder(
+                    id = VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID,
+                    name = VaultFolder.DEFAULT_FOLDER_NAME,
+                    scope = FolderScope.CREDENTIALS,
+                    createdAtEpochMs = 0L,
+                    updatedAtEpochMs = 0L
+                )
+            )
+        }
+
+        val noteFolderById = folders.filter { it.scope == FolderScope.NOTES }.associateBy { it.id }
+        val noteFolderByName = folders.filter { it.scope == FolderScope.NOTES }
+            .associateBy { it.name.trim().lowercase() }
+
+        val credFolderById = folders.filter { it.scope == FolderScope.CREDENTIALS }.associateBy { it.id }
+        val credFolderByName = folders.filter { it.scope == FolderScope.CREDENTIALS }
+            .associateBy { it.name.trim().lowercase() }
+
+        val normalizedNonFolders = rawItems.filterNot { it is VaultFolder }.map { item ->
+            when (item) {
+                is NoteRecord -> {
+                    val matched = noteFolderById[item.folderId]
+                        ?: noteFolderByName[item.folderName.trim().lowercase()]
+                    if (matched != null) {
+                        item.copy(folderId = matched.id, folderName = matched.name)
+                    } else {
+                        item.copy(
+                            folderId = VaultFolder.DEFAULT_NOTE_FOLDER_ID,
+                            folderName = VaultFolder.DEFAULT_FOLDER_NAME
+                        )
+                    }
+                }
+                is CredentialRecord -> {
+                    val matched = credFolderById[item.folderId]
+                        ?: credFolderByName[item.folderName.trim().lowercase()]
+                    if (matched != null) {
+                        item.copy(folderId = matched.id, folderName = matched.name)
+                    } else {
+                        item.copy(
+                            folderId = VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID,
+                            folderName = VaultFolder.DEFAULT_FOLDER_NAME
+                        )
+                    }
+                }
+                else -> item
+            }
+        }
+
+        return folders + normalizedNonFolders
+    }
+
+    private fun encryptItemForSlot(
+        slotId: Int,
+        dekBytes: ByteArray,
+        item: VaultItem
     ): EncryptedRecordEntity {
-        val plaintextBytes = VaultPayloadSerializer.serialize(payload)
         val nonce = CryptoEngine.generateNonce()
-        val aad = CryptoEngine.buildRecordAad(
-            vaultSlot = vaultSlot,
-            recordId = payload.id,
-            schemaVersion = CryptoEngine.RECORD_SCHEMA_VERSION
-        )
+        val plaintext = VaultRecordCodec.encode(item)
         try {
+            val aad = CryptoEngine.buildRecordAad(
+                vaultSlot = slotId,
+                recordId = item.id,
+                schemaVersion = CryptoEngine.RECORD_SCHEMA_VERSION
+            )
             val ciphertext = CryptoEngine.encryptAesGcm(
                 keyBytes = dekBytes,
                 nonce = nonce,
-                plaintext = plaintextBytes,
+                plaintext = plaintext,
                 aad = aad
             )
             return EncryptedRecordEntity(
-                recordId = payload.id,
-                vaultSlot = vaultSlot,
+                recordId = item.id,
+                vaultSlot = slotId,
                 schemaVersion = CryptoEngine.RECORD_SCHEMA_VERSION,
                 nonce = nonce,
                 ciphertext = ciphertext
             )
         } finally {
-            Arrays.fill(plaintextBytes, 0.toByte())
+            Arrays.fill(plaintext, 0.toByte())
         }
     }
 
-    private fun decryptEntityOrNull(
-        entity: EncryptedRecordEntity,
-        dekBytes: ByteArray
-    ): VaultRecordPayload? {
+    private sealed interface RecordDecryptResult {
+        data class Success(val item: VaultItem) : RecordDecryptResult
+        data class Corrupted(val recordId: String) : RecordDecryptResult
+    }
+
+    private fun decryptEntityStructured(
+        slotId: Int,
+        dekBytes: ByteArray,
+        entity: EncryptedRecordEntity
+    ): RecordDecryptResult {
+        if (entity.vaultSlot != slotId) return RecordDecryptResult.Corrupted(entity.recordId)
         val aad = CryptoEngine.buildRecordAad(
-            vaultSlot = entity.vaultSlot,
+            vaultSlot = slotId,
             recordId = entity.recordId,
             schemaVersion = entity.schemaVersion
         )
-        val decryptedBytes = try {
-            CryptoEngine.decryptAesGcm(
+        var plaintext = ByteArray(0)
+        return try {
+            plaintext = CryptoEngine.decryptAesGcm(
                 keyBytes = dekBytes,
                 nonce = entity.nonce,
                 ciphertext = entity.ciphertext,
                 aad = aad
             )
+            val decoded = VaultRecordCodec.decode(plaintext)
+            if (decoded.id != entity.recordId) {
+                RecordDecryptResult.Corrupted(entity.recordId)
+            } else {
+                RecordDecryptResult.Success(decoded)
+            }
         } catch (_: Exception) {
-            return null
-        }
-
-        return try {
-            VaultPayloadSerializer.deserialize(decryptedBytes)
-        } catch (_: Exception) {
-            null
+            RecordDecryptResult.Corrupted(entity.recordId)
         } finally {
-            Arrays.fill(decryptedBytes, 0.toByte())
+            if (plaintext.isNotEmpty()) {
+                Arrays.fill(plaintext, 0.toByte())
+            }
         }
     }
 
-    private fun createDefaultFoldersForSlot(
-        slotId: Int,
-        dekBytes: ByteArray,
-        now: Long
-    ): List<EncryptedRecordEntity> {
-        val folders = listOf(
-            VaultRecordPayload.FolderRecord(
-                id = UUID.randomUUID().toString(),
-                name = "General",
-                colorHex = "#10B981",
-                createdAtEpochMs = now,
-                updatedAtEpochMs = now
+    private fun buildDefaultStarterFolders(): List<VaultFolder> {
+        return listOf(
+            VaultFolder(
+                id = VaultFolder.DEFAULT_NOTE_FOLDER_ID,
+                name = VaultFolder.DEFAULT_FOLDER_NAME,
+                scope = FolderScope.NOTES,
+                createdAtEpochMs = 0L,
+                updatedAtEpochMs = 0L
             ),
-            VaultRecordPayload.FolderRecord(
-                id = UUID.randomUUID().toString(),
-                name = "Personal",
-                colorHex = "#14B8A6",
-                createdAtEpochMs = now,
-                updatedAtEpochMs = now
-            ),
-            VaultRecordPayload.FolderRecord(
-                id = UUID.randomUUID().toString(),
-                name = "Work",
-                colorHex = "#38BDF8",
-                createdAtEpochMs = now,
-                updatedAtEpochMs = now
+            VaultFolder(
+                id = VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID,
+                name = VaultFolder.DEFAULT_FOLDER_NAME,
+                scope = FolderScope.CREDENTIALS,
+                createdAtEpochMs = 0L,
+                updatedAtEpochMs = 0L
             )
         )
-        return folders.map { encryptPayloadToEntity(it, slotId, dekBytes) }
     }
 
-    /**
-     * Generates ordinary-looking fictitious records using reserved example domains (`example.com`,
-     * `example.org`) when the owner chooses to pre-populate the Decoy Vault during setup.
-     */
-    private fun createFictitiousDecoyRecords(
-        decoyDek: ByteArray,
-        now: Long
-    ): List<EncryptedRecordEntity> {
-        val samplePayloads = listOf(
-            VaultRecordPayload.NoteRecord(
+    private fun buildStarterRealVaultRecords(now: Long): List<VaultItem> {
+        return listOf(
+            NoteRecord(
                 id = UUID.randomUUID().toString(),
-                title = "Weekly Grocery & Errands",
-                body = "Milk, whole bean coffee, olive oil, oats, sparkling water, and dish soap.",
-                formatStyle = NoteFormatStyle.CHECKLIST,
-                checklistItems = listOf(
-                    NoteChecklistItem("1", "Coffee beans (medium roast)", true),
-                    NoteChecklistItem("2", "Olive oil & pasta", false),
-                    NoteChecklistItem("3", "Pick up dry cleaning on Thursday", false)
-                ),
-                folderName = "Personal",
-                tags = listOf("errands", "home"),
+                title = "Welcome to PRIVATE VAULT",
+                body = "## Offline-First Security Architecture\n" +
+                    "- **Key Derivation:** Argon2id v1.3 (`bcprov-jdk18on`)\n" +
+                    "- **Authenticated Encryption:** AES-256-GCM with per-record 96-bit nonces and strict AAD slot binding\n" +
+                    "- **Zero Cloud Sync:** All notes and credentials stay encrypted on your device.",
+                format = NoteBodyFormat.MARKDOWN,
+                category = "Security",
+                folderName = VaultFolder.DEFAULT_FOLDER_NAME,
+                folderId = VaultFolder.DEFAULT_NOTE_FOLDER_ID,
+                tags = listOf("architecture", "security"),
+                colorAccentIndex = 1,
                 isPinned = true,
-                createdAtEpochMs = now - 86_400_000L * 3,
-                updatedAtEpochMs = now - 3_600_000L * 5
-            ),
-            VaultRecordPayload.NoteRecord(
-                id = UUID.randomUUID().toString(),
-                title = "Reading List & Wi-Fi Guest Info",
-                body = "Home Guest Network: LivingRoom_Guest\nPassphrase: WarmCoffee2026!\n\nBooks to check out:\n- The Pragmatic Programmer\n- Designing Data-Intensive Applications",
-                formatStyle = NoteFormatStyle.PARAGRAPH,
-                folderName = "General",
-                tags = listOf("notes", "books"),
-                isPinned = false,
-                createdAtEpochMs = now - 86_400_000L * 7,
-                updatedAtEpochMs = now - 86_400_000L * 2
-            ),
-            VaultRecordPayload.CredentialRecord(
-                id = UUID.randomUUID().toString(),
-                serviceName = "Public Library Portal",
-                accountLabel = "Personal",
-                username = "reader_card_4092",
-                email = "reader@example.org",
-                password = "LibraryBook#8492!Read",
-                websiteUrl = "https://library.example.org",
-                folderName = "Personal",
-                tags = listOf("reading"),
-                privateNotes = "City library e-book loan account (fictitious example domain)",
                 isFavorite = true,
-                createdAtEpochMs = now - 86_400_000L * 10,
-                updatedAtEpochMs = now - 86_400_000L * 4
+                createdAtEpochMs = now,
+                updatedAtEpochMs = now
             ),
-            VaultRecordPayload.CredentialRecord(
+            NoteRecord(
                 id = UUID.randomUUID().toString(),
-                serviceName = "Recipe Club Newsletter",
-                accountLabel = "Personal",
-                username = "homecook_weekly",
-                email = "kitchen@example.com",
-                password = "BasilTomato$2026*Soup",
-                websiteUrl = "https://recipes.example.com",
-                folderName = "General",
-                tags = listOf("food"),
-                privateNotes = "Weekend recipe archive login",
+                title = "Emergency Security Checklist",
+                body = "Essential offline recovery steps:",
+                format = NoteBodyFormat.CHECKLIST,
+                checklistItems = listOf(
+                    ChecklistEntry(text = "Verify Master Password is memorized", isChecked = true),
+                    ChecklistEntry(text = "Export an encrypted .pvault backup file", isChecked = false),
+                    ChecklistEntry(text = "Review password strength audit scores", isChecked = false)
+                ),
+                category = "Personal",
+                folderName = VaultFolder.DEFAULT_FOLDER_NAME,
+                folderId = VaultFolder.DEFAULT_NOTE_FOLDER_ID,
+                tags = listOf("backup", "checklist"),
+                colorAccentIndex = 2,
+                isPinned = false,
                 isFavorite = false,
-                createdAtEpochMs = now - 86_400_000L * 14,
-                updatedAtEpochMs = now - 86_400_000L * 6
+                createdAtEpochMs = now - 60_000L,
+                updatedAtEpochMs = now - 60_000L
             )
         )
-        return samplePayloads.map { encryptPayloadToEntity(it, VaultSessionManager.DECOY_SLOT, decoyDek) }
     }
 
-    private fun computeBackoffDelayMs(failedCount: Int): Long {
-        return when {
-            failedCount <= 2 -> 0L
-            failedCount == 3 -> 1_500L
-            failedCount == 4 -> 3_000L
-            failedCount == 5 -> 5_000L
-            else -> 8_000L
-        }
+    private fun buildPlausibleDecoyVaultRecords(now: Long): List<VaultItem> {
+        return listOf(
+            NoteRecord(
+                id = UUID.randomUUID().toString(),
+                title = "Weekly Grocery & Household List",
+                body = "Items to pick up this weekend:",
+                format = NoteBodyFormat.CHECKLIST,
+                checklistItems = listOf(
+                    ChecklistEntry(text = "Fresh Arabica coffee beans", isChecked = true),
+                    ChecklistEntry(text = "Almond milk & Greek yogurt", isChecked = false),
+                    ChecklistEntry(text = "AA rechargeable batteries", isChecked = false)
+                ),
+                category = "Personal",
+                folderName = VaultFolder.DEFAULT_FOLDER_NAME,
+                folderId = VaultFolder.DEFAULT_NOTE_FOLDER_ID,
+                tags = listOf("shopping", "home"),
+                colorAccentIndex = 0,
+                isPinned = true,
+                isFavorite = false,
+                createdAtEpochMs = now - 3_600_000L,
+                updatedAtEpochMs = now - 3_600_000L
+            ),
+            CredentialRecord(
+                id = UUID.randomUUID().toString(),
+                serviceName = "Local Library Wi-Fi",
+                username = "guest_reader",
+                password = "ReadBooks2026!Library",
+                websiteUrl = "https://library.example.org",
+                notes = "Public reading room access",
+                category = "Wi-Fi",
+                folderName = VaultFolder.DEFAULT_FOLDER_NAME,
+                folderId = VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID,
+                tags = listOf("wifi"),
+                isFavorite = false,
+                createdAtEpochMs = now - 7_200_000L,
+                updatedAtEpochMs = now - 7_200_000L
+            )
+        )
     }
 }

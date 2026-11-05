@@ -1,33 +1,33 @@
 package com.example.ui
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -47,59 +47,55 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.security.OfflinePasswordStrengthEstimator
-import com.example.ui.theme.JetBrainsMonoFontFamily
-import com.example.ui.theme.StatusFair
-import com.example.ui.theme.StatusStrong
-import com.example.ui.theme.StatusVeryStrong
-import com.example.ui.theme.StatusVeryWeak
-import com.example.ui.theme.StatusWeak
 
 @Composable
 fun SetupVaultScreen(
-    uiState: VaultUiState,
-    onCompleteSetup: (
-        masterPassword: String,
-        confirmMasterPassword: String,
+    isBusy: Boolean,
+    onCreateVault: (
+        realPassword: String,
+        confirmRealPassword: String,
         enableDecoy: Boolean,
         decoyPassword: String,
         confirmDecoyPassword: String,
-        seedSampleDecoyData: Boolean
+        seedStarterSamples: Boolean
     ) -> Unit
 ) {
-    var masterPassword by remember { mutableStateOf("") }
-    var confirmMasterPassword by remember { mutableStateOf("") }
-    var showMasterPassword by remember { mutableStateOf(false) }
+    // R10 Fix: Use rememberSaveable for non-secret toggles and state so keyboard or orientation
+    // changes during initial setup do not reset the setup screen layout.
+    var realPassword by rememberSaveable { mutableStateOf("") }
+    var confirmRealPassword by rememberSaveable { mutableStateOf("") }
+    var showRealPassword by rememberSaveable { mutableStateOf(false) }
 
-    var enableDecoy by remember { mutableStateOf(false) }
-    var decoyPassword by remember { mutableStateOf("") }
-    var confirmDecoyPassword by remember { mutableStateOf("") }
-    var showDecoyPassword by remember { mutableStateOf(false) }
-    var seedSampleDecoyData by remember { mutableStateOf(true) }
-    var acknowledgedNoReset by remember { mutableStateOf(false) }
+    var enableDecoy by rememberSaveable { mutableStateOf(false) }
+    var decoyPassword by rememberSaveable { mutableStateOf("") }
+    var confirmDecoyPassword by rememberSaveable { mutableStateOf("") }
+    var showDecoyPassword by rememberSaveable { mutableStateOf(false) }
 
-    val strengthReport = remember(masterPassword) {
-        OfflinePasswordStrengthEstimator.evaluate(masterPassword)
+    var seedStarterSamples by rememberSaveable { mutableStateOf(true) }
+
+    val strengthReport = remember(realPassword) {
+        OfflinePasswordStrengthEstimator.evaluate(realPassword)
     }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
+            .systemBarsPadding()
             .imePadding(),
         contentAlignment = Alignment.TopCenter
     ) {
@@ -108,197 +104,141 @@ fun SetupVaultScreen(
                 .fillMaxWidth()
                 .widthIn(max = 560.dp)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 28.dp),
+                .padding(horizontal = 24.dp, vertical = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f),
+                modifier = Modifier.size(72.dp)
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(52.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center
-                ) {
+                Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = Icons.Filled.Shield,
-                        contentDescription = "Private Vault Security Shield",
+                        contentDescription = "Vault Shield",
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(28.dp)
-                    )
-                }
-                Column {
-                    Text(
-                        text = "PRIVATE VAULT",
-                        style = MaterialTheme.typography.headlineLarge,
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
-                    Text(
-                        text = "Offline Encrypted Storage • Zero Cloud Backdoors",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary
+                        modifier = Modifier.size(40.dp)
                     )
                 }
             }
 
+            Text(
+                text = "Initialize PRIVATE VAULT",
+                style = MaterialTheme.typography.headlineMedium,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+
+            Text(
+                text = "100% Offline Encrypted Vault • Argon2id v1.3 + AES-256-GCM",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+
             Card(
+                modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
-                )
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                shape = RoundedCornerShape(16.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.VerifiedUser,
-                            contentDescription = "Encryption boundary info",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            text = "How Your Vault Is Protected",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                    Text(
-                        text = "• All notes, credentials, folders, and timestamps are encrypted locally on your device with AES-256-GCM.\n" +
-                            "• Your master passphrase derives your key using memory-hard Argon2id (RFC 9106) and is never stored or transmitted.\n" +
-                            "• There is NO developer backdoor and NO online password reset. If you forget your master password without an encrypted backup, your vault cannot be recovered.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            // Master Password Section
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
+                    modifier = Modifier.padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text(
-                        text = "1. Create Real Master Password",
-                        style = MaterialTheme.typography.titleMedium
+                        text = "Primary Vault Master Password",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Your Master Password derives a 256-bit key using Argon2id. Because PRIVATE VAULT operates offline with zero cloud accounts, a forgotten Master Password cannot be recovered.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
                     OutlinedTextField(
-                        value = masterPassword,
-                        onValueChange = { masterPassword = it },
-                        label = { Text("Master Password (min 8 chars, 16+ recommended)") },
+                        value = realPassword,
+                        onValueChange = { realPassword = it },
+                        label = { Text("Master Password (min 8 chars)") },
                         singleLine = true,
-                        visualTransformation = if (showMasterPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                        visualTransformation = if (showRealPassword) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
                         keyboardOptions = KeyboardOptions(
-                            capitalization = KeyboardCapitalization.None,
-                            autoCorrectEnabled = false,
                             keyboardType = KeyboardType.Password,
                             imeAction = ImeAction.Next
                         ),
                         trailingIcon = {
-                            IconButton(
-                                onClick = { showMasterPassword = !showMasterPassword },
-                                modifier = Modifier.semantics {
-                                    contentDescription = if (showMasterPassword) {
-                                        "Master password visible. Tap to hide."
-                                    } else {
-                                        "Master password hidden. Tap to reveal."
-                                    }
-                                }
-                            ) {
+                            IconButton(onClick = { showRealPassword = !showRealPassword }) {
                                 Icon(
-                                    imageVector = if (showMasterPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                    contentDescription = null
+                                    imageVector = if (showRealPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                    contentDescription = if (showRealPassword) "Hide password" else "Show password"
                                 )
                             }
                         },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("setup_master_password_input")
+                            .testTag("setup_real_password_input")
                     )
 
-                    if (masterPassword.isNotEmpty()) {
-                        val barColor = when (strengthReport.rating) {
-                            OfflinePasswordStrengthEstimator.StrengthRating.VERY_WEAK -> StatusVeryWeak
-                            OfflinePasswordStrengthEstimator.StrengthRating.WEAK -> StatusWeak
-                            OfflinePasswordStrengthEstimator.StrengthRating.FAIR -> StatusFair
-                            OfflinePasswordStrengthEstimator.StrengthRating.STRONG -> StatusStrong
-                            OfflinePasswordStrengthEstimator.StrengthRating.VERY_STRONG -> StatusVeryStrong
-                        }
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    text = "Offline Strength: ${strengthReport.rating.label}",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = barColor
-                                )
-                                Text(
-                                    text = "~${strengthReport.effectiveEntropyBits.toInt()} bits",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = JetBrainsMonoFontFamily
-                                )
-                            }
-                            LinearProgressIndicator(
-                                progress = { (strengthReport.scoreOutOf100 / 100f).coerceIn(0.05f, 1f) },
-                                color = barColor,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
+                    if (realPassword.isNotEmpty()) {
+                        PasswordStrengthInlineBar(report = strengthReport)
                     }
 
                     OutlinedTextField(
-                        value = confirmMasterPassword,
-                        onValueChange = { confirmMasterPassword = it },
+                        value = confirmRealPassword,
+                        onValueChange = { confirmRealPassword = it },
                         label = { Text("Confirm Master Password") },
                         singleLine = true,
-                        visualTransformation = if (showMasterPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                        visualTransformation = if (showRealPassword) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
                         keyboardOptions = KeyboardOptions(
-                            capitalization = KeyboardCapitalization.None,
-                            autoCorrectEnabled = false,
                             keyboardType = KeyboardType.Password,
                             imeAction = ImeAction.Done
                         ),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .testTag("setup_confirm_master_password_input")
+                            .testTag("setup_confirm_real_password_input")
                     )
                 }
             }
 
-            // Optional Decoy Vault Setup
+            // Optional Plausible Deniability Decoy Vault Card
             Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                shape = RoundedCornerShape(16.dp)
             ) {
                 Column(
-                    modifier = Modifier.padding(16.dp),
+                    modifier = Modifier.padding(20.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "2. Optional Fake / Decoy Vault",
+                                text = "Configure Decoy Vault (Optional)",
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Text(
-                                text = "Configure a separate password that opens an isolated secondary vault.",
+                                text = "Creates an independent second vault unlocked by a distinct Decoy Password.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                        Spacer(modifier = Modifier.width(12.dp))
                         Switch(
                             checked = enableDecoy,
                             onCheckedChange = { enableDecoy = it },
@@ -306,84 +246,59 @@ fun SetupVaultScreen(
                         )
                     }
 
-                    if (enableDecoy) {
-                        HorizontalDivider()
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            shape = MaterialTheme.shapes.small
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Outlined.Info,
-                                    contentDescription = "Decoy limitations notice",
-                                    tint = MaterialTheme.colorScheme.secondary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Text(
-                                    text = "Decoy Privacy & Limitations: Entering the decoy password opens only the decoy vault with zero visual indicators. While Decoy Mode is enabled, biometric unlock for the real vault is disabled. Note: Decoy isolation protects against casual inspection, but forensic analysis of storage size or app specifications may still indicate that decoy support exists.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-
-                        OutlinedTextField(
-                            value = decoyPassword,
-                            onValueChange = { decoyPassword = it },
-                            label = { Text("Decoy Password (must differ from Real Password)") },
-                            singleLine = true,
-                            visualTransformation = if (showDecoyPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(
-                                capitalization = KeyboardCapitalization.None,
-                                autoCorrectEnabled = false,
-                                keyboardType = KeyboardType.Password,
-                                imeAction = ImeAction.Next
-                            ),
-                            trailingIcon = {
-                                IconButton(onClick = { showDecoyPassword = !showDecoyPassword }) {
-                                    Icon(
-                                        imageVector = if (showDecoyPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                        contentDescription = if (showDecoyPassword) "Hide decoy password" else "Reveal decoy password"
-                                    )
-                                }
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("setup_decoy_password_input")
-                        )
-
-                        OutlinedTextField(
-                            value = confirmDecoyPassword,
-                            onValueChange = { confirmDecoyPassword = it },
-                            label = { Text("Confirm Decoy Password") },
-                            singleLine = true,
-                            visualTransformation = if (showDecoyPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                            keyboardOptions = KeyboardOptions(
-                                capitalization = KeyboardCapitalization.None,
-                                autoCorrectEnabled = false,
-                                keyboardType = KeyboardType.Password,
-                                imeAction = ImeAction.Done
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("setup_confirm_decoy_password_input")
-                        )
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Checkbox(
-                                checked = seedSampleDecoyData,
-                                onCheckedChange = { seedSampleDecoyData = it },
-                                modifier = Modifier.testTag("setup_seed_decoy_checkbox")
-                            )
+                    AnimatedVisibility(visible = enableDecoy) {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            HorizontalDivider()
                             Text(
-                                text = "Pre-populate harmless sample notes & fictitious accounts (example.org) in Decoy Vault",
-                                style = MaterialTheme.typography.bodySmall
+                                text = "Both Slot 0 (Real) and Slot 1 (Decoy) key envelopes always exist on disk and are evaluated on every unlock. Note: Biometric quick-unlock is automatically disabled while Decoy Mode is active.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            OutlinedTextField(
+                                value = decoyPassword,
+                                onValueChange = { decoyPassword = it },
+                                label = { Text("Decoy Vault Password (min 8 chars)") },
+                                singleLine = true,
+                                visualTransformation = if (showDecoyPassword) {
+                                    VisualTransformation.None
+                                } else {
+                                    PasswordVisualTransformation()
+                                },
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Password,
+                                    imeAction = ImeAction.Next
+                                ),
+                                trailingIcon = {
+                                    IconButton(onClick = { showDecoyPassword = !showDecoyPassword }) {
+                                        Icon(
+                                            imageVector = if (showDecoyPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                            contentDescription = if (showDecoyPassword) "Hide decoy password" else "Show decoy password"
+                                        )
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("setup_decoy_password_input")
+                            )
+
+                            OutlinedTextField(
+                                value = confirmDecoyPassword,
+                                onValueChange = { confirmDecoyPassword = it },
+                                label = { Text("Confirm Decoy Password") },
+                                singleLine = true,
+                                visualTransformation = if (showDecoyPassword) {
+                                    VisualTransformation.None
+                                } else {
+                                    PasswordVisualTransformation()
+                                },
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Password,
+                                    imeAction = ImeAction.Done
+                                ),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("setup_confirm_decoy_password_input")
                             )
                         }
                     }
@@ -391,65 +306,51 @@ fun SetupVaultScreen(
             }
 
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Checkbox(
-                    checked = acknowledgedNoReset,
-                    onCheckedChange = { acknowledgedNoReset = it },
-                    modifier = Modifier.testTag("setup_acknowledge_checkbox")
+                    checked = seedStarterSamples,
+                    onCheckedChange = { seedStarterSamples = it },
+                    modifier = Modifier.testTag("setup_seed_samples_checkbox")
                 )
+                Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "I understand that PRIVATE VAULT is 100% offline and there is no online password recovery.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onBackground
+                    text = "Include encrypted starter notes & plausible decoy items",
+                    style = MaterialTheme.typography.bodyMedium
                 )
-            }
-
-            if (uiState.unlockErrorMessage != null) {
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = uiState.unlockErrorMessage,
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(12.dp)
-                    )
-                }
             }
 
             Button(
                 onClick = {
-                    onCompleteSetup(
-                        masterPassword,
-                        confirmMasterPassword,
+                    onCreateVault(
+                        realPassword,
+                        confirmRealPassword,
                         enableDecoy,
                         decoyPassword,
                         confirmDecoyPassword,
-                        seedSampleDecoyData
+                        seedStarterSamples
                     )
                 },
-                enabled = !uiState.isUnlockInProgress && acknowledgedNoReset && masterPassword.length >= 8,
+                enabled = !isBusy && realPassword.length >= 8 && confirmRealPassword.length >= 8,
+                shape = RoundedCornerShape(14.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(54.dp)
-                    .testTag("setup_initialize_vault_button")
+                    .testTag("setup_create_vault_button")
             ) {
-                if (uiState.isUnlockInProgress) {
+                if (isBusy) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(22.dp),
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        strokeWidth = 2.dp
+                        strokeWidth = 2.5.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
                     )
                     Spacer(modifier = Modifier.width(12.dp))
-                    Text("Deriving Argon2id Keys & Sealing Envelopes...")
+                    Text("Deriving Argon2id Vault Keys…")
                 } else {
-                    Icon(imageVector = Icons.Filled.Lock, contentDescription = null)
+                    Icon(Icons.Filled.Lock, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Initialize Encrypted Vault")
+                    Text("Create Encrypted Vault", fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -458,84 +359,94 @@ fun SetupVaultScreen(
 
 @Composable
 fun UnlockVaultScreen(
-    uiState: VaultUiState,
+    isBusy: Boolean,
+    isBiometricAvailable: Boolean,
+    failedAttempts: Int,
+    cooldownRemainingMs: Long,
+    lastKdfDurationMs: Long,
     onUnlockWithPassword: (String) -> Unit,
-    onTriggerBiometricUnlock: () -> Unit
+    onRequestBiometricUnlock: () -> Unit
 ) {
-    var password by remember { mutableStateOf("") }
-    var showPassword by remember { mutableStateOf(false) }
+    var password by rememberSaveable { mutableStateOf("") }
+    var showPassword by rememberSaveable { mutableStateOf(false) }
 
-    val isLockedOut = uiState.unlockBackoffRemainingMs > 0L
-
+    // U03 Fix: Full-bleed background + single systemBarsPadding + imePadding + verticalScroll
+    // so opening the keyboard smoothly scrolls the unlock card without black or blank regions.
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
+            .systemBarsPadding()
             .imePadding(),
         contentAlignment = Alignment.Center
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .widthIn(max = 460.dp)
+                .widthIn(max = 480.dp)
                 .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(20.dp)
+            verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .size(72.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center
+            Surface(
+                shape = RoundedCornerShape(22.dp),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f),
+                modifier = Modifier.size(80.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Filled.Security,
-                    contentDescription = "Vault Locked",
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(36.dp)
-                )
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Filled.Shield,
+                        contentDescription = "PRIVATE VAULT Emblem",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(44.dp)
+                    )
+                }
             }
 
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = "PRIVATE VAULT",
-                    style = MaterialTheme.typography.headlineLarge,
-                    color = MaterialTheme.colorScheme.onBackground
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "Enter your master password to decrypt and unlock your session.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            Text(
+                text = "PRIVATE VAULT",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground
+            )
+
+            Text(
+                text = "Enter your Vault Password to unwrap your AES-256-GCM key envelope",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
 
             Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                shape = RoundedCornerShape(18.dp)
             ) {
                 Column(
                     modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     OutlinedTextField(
                         value = password,
                         onValueChange = { password = it },
-                        label = { Text("Master Password") },
+                        label = { Text("Vault Password") },
                         singleLine = true,
-                        enabled = !uiState.isUnlockInProgress && !isLockedOut,
-                        visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                        enabled = !isBusy,
+                        visualTransformation = if (showPassword) {
+                            VisualTransformation.None
+                        } else {
+                            PasswordVisualTransformation()
+                        },
                         keyboardOptions = KeyboardOptions(
-                            capitalization = KeyboardCapitalization.None,
-                            autoCorrectEnabled = false,
                             keyboardType = KeyboardType.Password,
                             imeAction = ImeAction.Done
                         ),
                         keyboardActions = KeyboardActions(
                             onDone = {
-                                if (password.isNotEmpty() && !isLockedOut && !uiState.isUnlockInProgress) {
+                                if (password.isNotBlank() && !isBusy) {
                                     val submitted = password
                                     password = ""
                                     onUnlockWithPassword(submitted)
@@ -543,19 +454,10 @@ fun UnlockVaultScreen(
                             }
                         ),
                         trailingIcon = {
-                            IconButton(
-                                onClick = { showPassword = !showPassword },
-                                modifier = Modifier.semantics {
-                                    contentDescription = if (showPassword) {
-                                        "Password visible. Tap to hide."
-                                    } else {
-                                        "Password hidden. Tap to reveal."
-                                    }
-                                }
-                            ) {
+                            IconButton(onClick = { showPassword = !showPassword }) {
                                 Icon(
                                     imageVector = if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                    contentDescription = null
+                                    contentDescription = if (showPassword) "Hide password" else "Show password"
                                 )
                             }
                         },
@@ -564,80 +466,123 @@ fun UnlockVaultScreen(
                             .testTag("unlock_password_input")
                     )
 
-                    if (uiState.unlockErrorMessage != null) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.errorContainer,
-                            shape = MaterialTheme.shapes.small,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(modifier = Modifier.padding(12.dp)) {
-                                Text(
-                                    text = uiState.unlockErrorMessage,
-                                    color = MaterialTheme.colorScheme.onErrorContainer,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                                if (isLockedOut) {
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        text = "Retry available in ${(uiState.unlockBackoffRemainingMs / 1000L) + 1L}s...",
-                                        color = MaterialTheme.colorScheme.onErrorContainer,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = JetBrainsMonoFontFamily
-                                    )
-                                }
-                            }
-                        }
-                    }
-
                     Button(
                         onClick = {
                             val submitted = password
                             password = ""
                             onUnlockWithPassword(submitted)
                         },
-                        enabled = password.isNotEmpty() && !uiState.isUnlockInProgress && !isLockedOut,
+                        enabled = !isBusy && password.isNotBlank(),
+                        shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(52.dp)
                             .testTag("unlock_submit_button")
                     ) {
-                        if (uiState.isUnlockInProgress) {
+                        if (isBusy) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(20.dp),
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                strokeWidth = 2.dp
+                                strokeWidth = 2.5.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
                             )
                             Spacer(modifier = Modifier.width(10.dp))
-                            Text("Verifying Argon2id Key Envelope...")
+                            Text("Verifying Argon2id Envelopes…")
                         } else {
-                            Icon(imageVector = Icons.Filled.Lock, contentDescription = null)
+                            Icon(Icons.Filled.Lock, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Unlock Vault")
+                            Text("Unlock Vault", fontWeight = FontWeight.Bold)
                         }
                     }
 
-                    if (uiState.isBiometricEnrolledForRealVault) {
+                    if (isBiometricAvailable) {
                         OutlinedButton(
-                            onClick = onTriggerBiometricUnlock,
-                            enabled = !uiState.isUnlockInProgress && !isLockedOut,
+                            onClick = onRequestBiometricUnlock,
+                            enabled = !isBusy,
+                            shape = RoundedCornerShape(14.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(48.dp)
+                                .height(50.dp)
                                 .testTag("unlock_biometric_button")
                         ) {
-                            Icon(imageVector = Icons.Filled.Fingerprint, contentDescription = null)
+                            Icon(Icons.Filled.Fingerprint, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Unlock with Hardware Biometrics")
+                            Text("Biometric Quick-Unlock")
+                        }
+                    }
+
+                    if (failedAttempts > 0 || lastKdfDurationMs > 0L) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            if (failedAttempts > 0) {
+                                Text(
+                                    text = "Failed attempts: $failedAttempts",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+                            if (lastKdfDurationMs > 0L) {
+                                Text(
+                                    text = "2-Slot KDF: ${lastKdfDurationMs}ms",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }
             }
 
             Text(
-                text = "Forgot Master Password? An existing encrypted vault cannot be reset online. If you exported a .pvault backup file, you can restore it into a freshly initialized vault using its backup password.",
-                style = MaterialTheme.typography.bodySmall,
+                text = "Zero Cloud Sync • Zero Analytics • Local Argon2id + AES-256-GCM",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+}
+
+@Composable
+fun PasswordStrengthInlineBar(
+    report: OfflinePasswordStrengthEstimator.StrengthReport
+) {
+    val barColor = when (report.band) {
+        OfflinePasswordStrengthEstimator.StrengthBand.CRITICAL -> Color(0xFFEF4444)
+        OfflinePasswordStrengthEstimator.StrengthBand.WEAK -> Color(0xFFF97316)
+        OfflinePasswordStrengthEstimator.StrengthBand.FAIR -> Color(0xFFF59E0B)
+        OfflinePasswordStrengthEstimator.StrengthBand.STRONG -> Color(0xFF10B981)
+        OfflinePasswordStrengthEstimator.StrengthBand.FORTRESS -> Color(0xFF38BDF8)
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Strength: ${report.band.label} (${report.score}/100)",
+                style = MaterialTheme.typography.labelMedium,
+                color = barColor,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "~${report.estimatedEntropyBits} bits entropy",
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        LinearProgressIndicator(
+            progress = { (report.score / 100f).coerceIn(0.05f, 1f) },
+            color = barColor,
+            trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(6.dp)
+        )
     }
 }

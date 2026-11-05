@@ -234,7 +234,7 @@ jobs:
             --title "${RELEASE_TITLE}" \
             --target "${TARGET_COMMIT}" \
             --notes "${RELEASE_NOTES}" \
-            --latest
+            --prerelease
 
       - name: Report APK download result
         if: always()

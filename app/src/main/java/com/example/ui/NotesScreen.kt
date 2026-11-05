@@ -1,16 +1,15 @@
 package com.example.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -21,35 +20,25 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Archive
-import androidx.compose.material.icons.filled.CheckBox
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DeleteForever
-import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.FormatListBulleted
-import androidx.compose.material.icons.filled.FormatListNumbered
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.RestoreFromTrash
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.SortByAlpha
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.filled.Title
-import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.PushPin
-import androidx.compose.material.icons.outlined.StarOutline
-import androidx.compose.material.icons.outlined.Unarchive
+import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -66,265 +55,273 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.example.data.NoteChecklistItem
-import com.example.data.NoteFormatStyle
-import com.example.data.VaultRecordPayload
+import com.example.data.ChecklistEntry
+import com.example.data.FolderScope
+import com.example.data.NoteBodyFormat
+import com.example.data.NoteRecord
+import com.example.data.VaultFolder
+import com.example.ui.theme.NoteCardAccents
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.UUID
 
-@OptIn(ExperimentalLayoutApi::class)
+private val NOTE_CATEGORIES = listOf("All", "Personal", "Work", "Finance", "Security", "Ideas")
+
 @Composable
 fun NotesTabScreen(
     uiState: VaultUiState,
     viewModel: VaultViewModel
 ) {
-    var editingNote by remember { mutableStateOf<VaultRecordPayload.NoteRecord?>(null) }
-    var showCreateFolderDialog by remember { mutableStateOf(false) }
-    var newFolderName by remember { mutableStateOf("") }
-    var notePendingPermanentDelete by remember { mutableStateOf<VaultRecordPayload.NoteRecord?>(null) }
+    var showManageFoldersDialog by remember { mutableStateOf(false) }
 
-    if (editingNote != null) {
+    val activeDraft = uiState.activeNoteDraft
+    if (activeDraft != null) {
+        val noteFolders = remember(uiState.folders) {
+            uiState.folders.filter { it.scope == FolderScope.NOTES }
+                .ifEmpty {
+                    listOf(
+                        VaultFolder(
+                            id = VaultFolder.DEFAULT_NOTE_FOLDER_ID,
+                            name = VaultFolder.DEFAULT_FOLDER_NAME,
+                            scope = FolderScope.NOTES
+                        )
+                    )
+                }
+        }
         NoteEditorView(
-            initialNote = editingNote!!,
-            availableFolders = uiState.folders.map { it.name }.ifEmpty { listOf("General", "Personal", "Work") },
-            autosaveStatus = uiState.autosaveStatus,
-            autosaveErrorMessage = uiState.autosaveErrorMessage,
-            onSaveNote = { updatedNote, isAuto ->
-                editingNote = updatedNote
-                viewModel.saveNote(updatedNote, isAutosave = isAuto)
+            draft = activeDraft,
+            availableFolders = noteFolders,
+            onUpdateDraft = viewModel::updateActiveNoteDraft,
+            onSaveAndClose = {
+                viewModel.commitActiveNoteDraft(closeOnSuccess = true, isSilentAutosave = false)
             },
-            onDuplicate = { note ->
-                viewModel.duplicateNote(note)
-                editingNote = null
+            onSilentAutosave = {
+                viewModel.commitActiveNoteDraft(closeOnSuccess = false, isSilentAutosave = true)
             },
-            onMoveToTrash = { note ->
-                viewModel.moveNoteToTrash(note)
-                editingNote = null
+            onDelete = if (activeDraft.isEditingExisting) {
+                { viewModel.deleteNote(activeDraft.noteId) }
+            } else {
+                null
             },
-            onClose = { editingNote = null }
+            onCloseWithoutDiscard = {
+                // Flush non-empty draft before closing so Back/Close never drops typed edits (R11)
+                if (activeDraft.title.isNotBlank() || activeDraft.body.isNotBlank() ||
+                    activeDraft.checklistItems.isNotEmpty() || activeDraft.pendingNewChecklistText.isNotBlank()
+                ) {
+                    viewModel.commitActiveNoteDraft(closeOnSuccess = true, isSilentAutosave = true)
+                } else {
+                    viewModel.closeNoteDraft()
+                }
+            }
         )
         return
     }
 
-    val folderNames = remember(uiState.folders) {
-        listOf("All") + uiState.folders.map { it.name }.distinct()
+    val noteFolders = remember(uiState.folders) {
+        uiState.folders.filter { it.scope == FolderScope.NOTES }
+            .sortedWith(compareBy<VaultFolder> { !VaultFolder.isDefaultGeneralName(it.name) }.thenBy { it.name.lowercase() })
     }
 
     val filteredNotes = remember(
         uiState.notes,
-        uiState.noteSearchQuery,
-        uiState.selectedNoteFolder,
-        uiState.noteFilterMode,
-        uiState.noteSortMode
+        uiState.notesSearchQuery,
+        uiState.selectedNoteCategory,
+        uiState.selectedNoteFolderId,
+        uiState.notesSortOrder,
+        uiState.notesFavoritesOnly
     ) {
-        val q = uiState.noteSearchQuery.trim().lowercase(Locale.ROOT)
-        uiState.notes
-            .filter { note ->
-                when (uiState.noteFilterMode) {
-                    NoteFilterMode.ACTIVE -> !note.isTrashed && !note.isArchived
-                    NoteFilterMode.FAVORITES -> !note.isTrashed && note.isFavorite
-                    NoteFilterMode.ARCHIVED -> !note.isTrashed && note.isArchived
-                    NoteFilterMode.TRASH -> note.isTrashed
-                }
+        val q = uiState.notesSearchQuery.trim().lowercase(Locale.US)
+        val filtered = uiState.notes.filter { note ->
+            val matchesQuery = if (q.isEmpty()) {
+                true
+            } else {
+                note.title.lowercase(Locale.US).contains(q) ||
+                    note.body.lowercase(Locale.US).contains(q) ||
+                    note.category.lowercase(Locale.US).contains(q) ||
+                    note.folderName.lowercase(Locale.US).contains(q) ||
+                    note.tags.any { it.lowercase(Locale.US).contains(q) } ||
+                    note.checklistItems.any { it.text.lowercase(Locale.US).contains(q) }
             }
-            .filter { note ->
-                uiState.selectedNoteFolder == "All" || note.folderName.equals(uiState.selectedNoteFolder, ignoreCase = true)
-            }
-            .filter { note ->
-                if (q.isEmpty()) true
-                else {
-                    note.title.lowercase(Locale.ROOT).contains(q) ||
-                        note.body.lowercase(Locale.ROOT).contains(q) ||
-                        note.tags.any { it.lowercase(Locale.ROOT).contains(q) } ||
-                        note.checklistItems.any { it.text.lowercase(Locale.ROOT).contains(q) }
-                }
-            }
-            .sortedWith(
-                Comparator { a, b ->
-                    if (a.isPinned != b.isPinned) {
-                        if (a.isPinned) -1 else 1
-                    } else {
-                        when (uiState.noteSortMode) {
-                            NoteSortMode.UPDATED_DESC -> b.updatedAtEpochMs.compareTo(a.updatedAtEpochMs)
-                            NoteSortMode.TITLE_ASC -> a.title.lowercase(Locale.ROOT).compareTo(b.title.lowercase(Locale.ROOT))
-                        }
-                    }
-                }
-            )
+            val matchesCat = uiState.selectedNoteCategory == "All" ||
+                note.category.equals(uiState.selectedNoteCategory, ignoreCase = true)
+            val matchesFolder = uiState.selectedNoteFolderId == null ||
+                note.folderId == uiState.selectedNoteFolderId
+            val matchesFav = !uiState.notesFavoritesOnly || note.isFavorite
+            matchesQuery && matchesCat && matchesFolder && matchesFav
+        }
+
+        val comparator = when (uiState.notesSortOrder) {
+            SortOrder.UPDATED_DESC -> compareByDescending<NoteRecord> { it.isPinned }
+                .thenByDescending { it.updatedAtEpochMs }
+            SortOrder.CREATED_DESC -> compareByDescending<NoteRecord> { it.isPinned }
+                .thenByDescending { it.createdAtEpochMs }
+            SortOrder.ALPHABETICAL -> compareByDescending<NoteRecord> { it.isPinned }
+                .thenBy { it.title.lowercase(Locale.US) }
+        }
+        filtered.sortedWith(comparator)
     }
 
+    if (showManageFoldersDialog) {
+        FolderManagementDialog(
+            scopeLabel = "Note",
+            folders = noteFolders,
+            onCreateFolder = { name -> viewModel.createFolder(name, FolderScope.NOTES) },
+            onRenameFolder = { folderId, newName -> viewModel.renameFolder(folderId, newName) },
+            onDeleteFolder = { folderId -> viewModel.deleteFolder(folderId) },
+            onDismiss = { showManageFoldersDialog = false }
+        )
+    }
+
+    // U03 Fix: Nested Scaffold uses zero contentWindowInsets so outer Scaffold's consumed insets
+    // are not applied a second time when the keyboard opens!
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        containerColor = MaterialTheme.colorScheme.background,
         floatingActionButton = {
             FloatingActionButton(
-                onClick = {
-                    val now = System.currentTimeMillis()
-                    editingNote = VaultRecordPayload.NoteRecord(
-                        id = UUID.randomUUID().toString(),
-                        title = "",
-                        body = "",
-                        folderName = if (uiState.selectedNoteFolder == "All") "General" else uiState.selectedNoteFolder,
-                        createdAtEpochMs = now,
-                        updatedAtEpochMs = now
-                    )
-                },
+                onClick = { viewModel.openNewNoteDraft() },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.testTag("create_note_fab")
+                modifier = Modifier.testTag("add_note_fab")
             ) {
-                Icon(imageVector = Icons.Filled.Add, contentDescription = "Create Private Note")
+                Icon(Icons.Filled.Add, contentDescription = "Create Encrypted Note")
             }
         }
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp),
+                .imePadding()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Search & Sort Row
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedTextField(
-                    value = uiState.noteSearchQuery,
-                    onValueChange = viewModel::updateNoteSearchQuery,
-                    placeholder = { Text("Search encrypted notes...") },
-                    singleLine = true,
-                    leadingIcon = {
-                        Icon(imageVector = Icons.Filled.Search, contentDescription = "Search notes")
-                    },
-                    trailingIcon = {
-                        if (uiState.noteSearchQuery.isNotEmpty()) {
-                            IconButton(onClick = { viewModel.updateNoteSearchQuery("") }) {
-                                Icon(imageVector = Icons.Filled.Close, contentDescription = "Clear search")
-                            }
-                        }
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag("notes_search_input")
-                )
-
-                IconButton(
-                    onClick = {
-                        val nextSort = if (uiState.noteSortMode == NoteSortMode.UPDATED_DESC) {
-                            NoteSortMode.TITLE_ASC
-                        } else {
-                            NoteSortMode.UPDATED_DESC
-                        }
-                        viewModel.updateNoteSortMode(nextSort)
-                    },
-                    modifier = Modifier.testTag("notes_sort_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.SortByAlpha,
-                        contentDescription = "Sort notes (${uiState.noteSortMode.label})"
-                    )
-                }
-
-                IconButton(
-                    onClick = { showCreateFolderDialog = true },
-                    modifier = Modifier.testTag("notes_add_folder_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.CreateNewFolder,
-                        contentDescription = "Create new folder"
-                    )
-                }
-            }
-
-            // Filter Mode Chips (Active / Favorites / Archived / Trash)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                NoteFilterMode.entries.forEach { mode ->
-                    FilterChip(
-                        selected = uiState.noteFilterMode == mode,
-                        onClick = { viewModel.updateNoteFilterMode(mode) },
-                        label = { Text(mode.label) }
-                    )
-                }
-            }
-
-            // Folder Chips
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                folderNames.forEach { folder ->
-                    AssistChip(
-                        onClick = { viewModel.updateSelectedNoteFolder(folder) },
-                        label = {
-                            Text(
-                                text = folder,
-                                fontWeight = if (uiState.selectedNoteFolder == folder) FontWeight.Bold else FontWeight.Normal
+            // Search Bar
+            OutlinedTextField(
+                value = uiState.notesSearchQuery,
+                onValueChange = viewModel::setNotesSearchQuery,
+                placeholder = { Text("Search encrypted notes, tags, checklists…") },
+                singleLine = true,
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                trailingIcon = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { viewModel.setNotesFavoritesOnly(!uiState.notesFavoritesOnly) }) {
+                            Icon(
+                                imageVector = if (uiState.notesFavoritesOnly) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                                contentDescription = "Toggle Favorites Filter",
+                                tint = if (uiState.notesFavoritesOnly) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                        IconButton(
+                            onClick = { showManageFoldersDialog = true },
+                            modifier = Modifier.testTag("manage_note_folders_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.CreateNewFolder,
+                                contentDescription = "Manage Note Folders"
+                            )
+                        }
+                    }
+                },
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("notes_search_input")
+            )
+
+            // Category Filter Chips
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                NOTE_CATEGORIES.forEach { category ->
+                    FilterChip(
+                        selected = uiState.selectedNoteCategory == category,
+                        onClick = { viewModel.setSelectedNoteCategory(category) },
+                        label = { Text(category) }
                     )
                 }
             }
 
-            if (uiState.noteFilterMode == NoteFilterMode.TRASH) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    shape = MaterialTheme.shapes.small,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "Recoverable Trash: Notes in Trash remain encrypted inside this vault until you restore them or permanently delete them. Note: on flash storage, permanent deletion removes database records but cannot guarantee physical erasure of all prior flash wear-leveling blocks or exported backups.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(10.dp)
+            // Folder & Sort Bar (R12: "All Folders" is represented by null selectedNoteFolderId)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FilterChip(
+                    selected = uiState.selectedNoteFolderId == null,
+                    onClick = { viewModel.setSelectedNoteFolderId(null) },
+                    label = { Text("Folder: All") },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Filled.Folder,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                )
+                noteFolders.forEach { folder ->
+                    FilterChip(
+                        selected = uiState.selectedNoteFolderId == folder.id,
+                        onClick = { viewModel.setSelectedNoteFolderId(folder.id) },
+                        label = { Text(folder.name) }
                     )
                 }
+
+                AssistChip(
+                    onClick = {
+                        val nextOrder = when (uiState.notesSortOrder) {
+                            SortOrder.UPDATED_DESC -> SortOrder.CREATED_DESC
+                            SortOrder.CREATED_DESC -> SortOrder.ALPHABETICAL
+                            SortOrder.ALPHABETICAL -> SortOrder.UPDATED_DESC
+                        }
+                        viewModel.setNotesSortOrder(nextOrder)
+                    },
+                    label = { Text("Sort: ${uiState.notesSortOrder.label}") }
+                )
             }
 
             if (filteredNotes.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .weight(1f),
+                        .padding(32.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Description,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(48.dp)
-                        )
                         Text(
-                            text = "No notes in ${uiState.noteFilterMode.label}",
+                            text = "No matching encrypted notes",
                             style = MaterialTheme.typography.titleMedium
                         )
                         Text(
-                            text = "Tap + to create an AES-256-GCM encrypted private note.",
+                            text = "Tap the + button to create a rich Markdown, checklist, or plain-text note encrypted with AES-256-GCM.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -334,117 +331,46 @@ fun NotesTabScreen(
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxSize()
-                        .weight(1f),
-                    contentPadding = PaddingValues(bottom = 88.dp),
+                        .testTag("notes_list"),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(filteredNotes, key = { it.id }) { note ->
-                        NoteListCard(
+                        NoteItemCard(
                             note = note,
-                            onClick = { editingNote = note },
-                            onTogglePin = {
-                                viewModel.saveNote(note.copy(isPinned = !note.isPinned))
-                            },
-                            onToggleFavorite = {
-                                viewModel.saveNote(note.copy(isFavorite = !note.isFavorite))
-                            },
-                            onToggleArchive = {
-                                viewModel.saveNote(note.copy(isArchived = !note.isArchived))
-                            },
-                            onRestoreFromTrash = {
-                                viewModel.restoreNoteFromTrash(note)
-                            },
-                            onDeletePermanently = {
-                                notePendingPermanentDelete = note
-                            }
+                            onClick = { viewModel.openExistingNoteDraft(note) },
+                            onTogglePin = { viewModel.toggleNotePin(note) },
+                            onToggleFavorite = { viewModel.toggleNoteFavorite(note) }
                         )
                     }
                 }
             }
         }
     }
-
-    if (showCreateFolderDialog) {
-        AlertDialog(
-            onDismissRequest = { showCreateFolderDialog = false },
-            title = { Text("Create Encrypted Folder") },
-            text = {
-                OutlinedTextField(
-                    value = newFolderName,
-                    onValueChange = { newFolderName = it },
-                    label = { Text("Folder Name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.createFolder(newFolderName)
-                        newFolderName = ""
-                        showCreateFolderDialog = false
-                    }
-                ) {
-                    Text("Create")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCreateFolderDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
-
-    if (notePendingPermanentDelete != null) {
-        val target = notePendingPermanentDelete!!
-        AlertDialog(
-            onDismissRequest = { notePendingPermanentDelete = null },
-            title = { Text("Permanently Delete Note?") },
-            text = {
-                Text(
-                    "This will permanently remove \"${target.title.ifBlank { "Untitled Note" }}\" from your active encrypted database. This action cannot be undone unless you have a separate .pvault backup."
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.deleteRecordPermanently(target.id)
-                        notePendingPermanentDelete = null
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Delete Permanently")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { notePendingPermanentDelete = null }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun NoteListCard(
-    note: VaultRecordPayload.NoteRecord,
+private fun NoteItemCard(
+    note: NoteRecord,
     onClick: () -> Unit,
     onTogglePin: () -> Unit,
-    onToggleFavorite: () -> Unit,
-    onToggleArchive: () -> Unit,
-    onRestoreFromTrash: () -> Unit,
-    onDeletePermanently: () -> Unit
+    onToggleFavorite: () -> Unit
 ) {
-    val dateFormat = remember { SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault()) }
+    val dateFormat = remember { SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.US) }
+    val accentBg = NoteCardAccents.getOrElse(note.colorAccentIndex) { MaterialTheme.colorScheme.surface }
 
     Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .testTag("note_card_${note.id}")
+            .testTag("note_card_${note.id}"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (note.colorAccentIndex == 0) {
+                MaterialTheme.colorScheme.surface
+            } else {
+                accentBg
+            }
+        )
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -452,111 +378,77 @@ private fun NoteListCard(
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.weight(1f)
                 ) {
-                    if (note.isPinned) {
-                        Icon(
-                            imageVector = Icons.Filled.PushPin,
-                            contentDescription = "Pinned",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
                     Text(
-                        text = note.title.ifBlank { "Untitled Private Note" },
-                        style = when (note.formatStyle) {
-                            NoteFormatStyle.HEADING -> MaterialTheme.typography.titleLarge
-                            else -> MaterialTheme.typography.titleMedium
-                        },
+                        text = note.title.ifBlank { "Untitled Note" },
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
 
-                if (!note.isTrashed) {
-                    Row {
-                        IconButton(onClick = onTogglePin, modifier = Modifier.size(36.dp)) {
-                            Icon(
-                                imageVector = if (note.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
-                                contentDescription = if (note.isPinned) "Unpin note" else "Pin note",
-                                tint = if (note.isPinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                        IconButton(onClick = onToggleFavorite, modifier = Modifier.size(36.dp)) {
-                            Icon(
-                                imageVector = if (note.isFavorite) Icons.Filled.Star else Icons.Outlined.StarOutline,
-                                contentDescription = if (note.isFavorite) "Remove favorite" else "Mark favorite",
-                                tint = if (note.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                        IconButton(onClick = onToggleArchive, modifier = Modifier.size(36.dp)) {
-                            Icon(
-                                imageVector = if (note.isArchived) Icons.Outlined.Unarchive else Icons.Filled.Archive,
-                                contentDescription = if (note.isArchived) "Unarchive note" else "Archive note",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onTogglePin,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (note.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
+                            contentDescription = if (note.isPinned) "Unpin Note" else "Pin Note",
+                            tint = if (note.isPinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
-                } else {
-                    Row {
-                        IconButton(onClick = onRestoreFromTrash) {
-                            Icon(
-                                imageVector = Icons.Filled.RestoreFromTrash,
-                                contentDescription = "Restore note from trash",
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                        IconButton(onClick = onDeletePermanently) {
-                            Icon(
-                                imageVector = Icons.Filled.DeleteForever,
-                                contentDescription = "Permanently delete note",
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                        }
+                    IconButton(
+                        onClick = onToggleFavorite,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (note.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                            contentDescription = if (note.isFavorite) "Remove Favorite" else "Mark Favorite",
+                            tint = if (note.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(18.dp)
+                        )
                     }
                 }
             }
 
-            if (note.formatStyle == NoteFormatStyle.CHECKLIST && note.checklistItems.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    note.checklistItems.take(3).forEach { item ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.CheckBox,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp),
-                                tint = if (item.isChecked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = item.text,
-                                style = MaterialTheme.typography.bodySmall,
-                                textDecoration = if (item.isChecked) TextDecoration.LineThrough else TextDecoration.None,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
+            if (note.format == NoteBodyFormat.CHECKLIST && note.checklistItems.isNotEmpty()) {
+                val doneCount = note.checklistItems.count { it.isChecked }
+                Text(
+                    text = "Checklist ($doneCount/${note.checklistItems.size} completed)",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.secondary
+                )
+                note.checklistItems.take(3).forEach { entry ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = if (entry.isChecked) "☑" else "☐",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Text(
+                            text = entry.text,
+                            style = MaterialTheme.typography.bodySmall,
+                            textDecoration = if (entry.isChecked) TextDecoration.LineThrough else TextDecoration.None,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             } else if (note.body.isNotBlank()) {
-                val formattedPreview = when (note.formatStyle) {
-                    NoteFormatStyle.BULLET_LIST -> note.body.lines().take(3).joinToString("\n") { "• $it" }
-                    NoteFormatStyle.NUMBERED_LIST -> note.body.lines().take(3).mapIndexed { i, line -> "${i + 1}. $line" }.joinToString("\n")
-                    else -> note.body
-                }
                 Text(
-                    text = formattedPreview,
+                    text = note.body,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 3,
@@ -564,37 +456,50 @@ private fun NoteListCard(
                 )
             }
 
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(
-                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
-                    shape = MaterialTheme.shapes.extraSmall
-                ) {
-                    Text(
-                        text = note.folderName,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                    )
-                }
-                note.tags.forEach { tag ->
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceVariant,
-                        shape = MaterialTheme.shapes.extraSmall
+                        shape = RoundedCornerShape(6.dp)
                     ) {
                         Text(
-                            text = "#$tag",
+                            text = note.category,
                             style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                         )
                     }
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(6.dp)
+                    ) {
+                        Text(
+                            text = note.folderName,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                    note.tags.take(2).forEach { tag ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = "#$tag",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
+                    }
                 }
-                Spacer(modifier = Modifier.weight(1f))
+
                 Text(
                     text = dateFormat.format(Date(note.updatedAtEpochMs)),
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -602,188 +507,120 @@ private fun NoteListCard(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun NoteEditorView(
-    initialNote: VaultRecordPayload.NoteRecord,
-    availableFolders: List<String>,
-    autosaveStatus: AutosaveStatus,
-    autosaveErrorMessage: String?,
-    onSaveNote: (VaultRecordPayload.NoteRecord, Boolean) -> Unit,
-    onDuplicate: (VaultRecordPayload.NoteRecord) -> Unit,
-    onMoveToTrash: (VaultRecordPayload.NoteRecord) -> Unit,
-    onClose: () -> Unit
+    draft: NoteEditorDraftState,
+    availableFolders: List<VaultFolder>,
+    onUpdateDraft: ((NoteEditorDraftState) -> NoteEditorDraftState) -> Unit,
+    onSaveAndClose: () -> Unit,
+    onSilentAutosave: () -> Unit,
+    onDelete: (() -> Unit)?,
+    onCloseWithoutDiscard: () -> Unit
 ) {
-    var title by remember(initialNote.id) { mutableStateOf(initialNote.title) }
-    var body by remember(initialNote.id) { mutableStateOf(initialNote.body) }
-    var formatStyle by remember(initialNote.id) { mutableStateOf(initialNote.formatStyle) }
-    var folderName by remember(initialNote.id) { mutableStateOf(initialNote.folderName) }
-    var tagsText by remember(initialNote.id) { mutableStateOf(initialNote.tags.joinToString(", ")) }
-    var checklistItems by remember(initialNote.id) { mutableStateOf(initialNote.checklistItems) }
-    var newChecklistText by remember { mutableStateOf("") }
-
-    fun currentDraft(): VaultRecordPayload.NoteRecord {
-        val parsedTags = tagsText.split(",")
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .distinct()
-        return initialNote.copy(
-            title = title,
-            body = body,
-            formatStyle = formatStyle,
-            folderName = folderName,
-            tags = parsedTags,
-            checklistItems = checklistItems
-        )
-    }
-
     BackHandler {
-        val draft = currentDraft()
-        if (draft.title.isNotBlank() || draft.body.isNotBlank() || draft.checklistItems.isNotEmpty()) {
-            onSaveNote(draft, false)
-        }
-        onClose()
+        onCloseWithoutDiscard()
     }
 
+    // Debounced encrypted autosave when editing an existing or non-empty note
+    LaunchedEffect(
+        draft.title,
+        draft.body,
+        draft.format,
+        draft.category,
+        draft.folderId,
+        draft.tagsText,
+        draft.colorAccentIndex,
+        draft.isPinned,
+        draft.isFavorite,
+        draft.checklistItems
+    ) {
+        if (draft.title.isNotBlank() || draft.body.isNotBlank() || draft.checklistItems.isNotEmpty()) {
+            delay(850L)
+            onSilentAutosave()
+        }
+    }
+
+    // U03 Fix: Single scrollable Column with a single imePadding() and dark background
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Editor Header with Autosave Status & Actions
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
             IconButton(
-                onClick = {
-                    val draft = currentDraft()
-                    if (draft.title.isNotBlank() || draft.body.isNotBlank() || draft.checklistItems.isNotEmpty()) {
-                        onSaveNote(draft, false)
-                    }
-                    onClose()
-                }
+                onClick = onCloseWithoutDiscard,
+                modifier = Modifier.testTag("note_editor_back_button")
             ) {
-                Icon(imageVector = Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to notes")
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to Notes")
             }
 
-            // Encrypted Autosave Status Badge
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                when (autosaveStatus) {
-                    AutosaveStatus.SAVING -> {
-                        Text(
-                            text = "Encrypting & saving...",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.secondary
-                        )
-                    }
-                    AutosaveStatus.SAVED -> {
-                        Icon(
-                            imageVector = Icons.Filled.CheckCircle,
-                            contentDescription = "Saved",
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "Saved (Encrypted)",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    AutosaveStatus.ERROR -> {
-                        Icon(
-                            imageVector = Icons.Filled.ErrorOutline,
-                            contentDescription = "Save error",
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Text(
-                            text = "Save failed (Draft kept)",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-                    AutosaveStatus.IDLE -> {
-                        Text(
-                            text = "Encrypted Editor",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-
-            Row {
-                IconButton(onClick = { onDuplicate(currentDraft()) }) {
-                    Icon(imageVector = Icons.Filled.ContentCopy, contentDescription = "Duplicate note")
-                }
-                IconButton(onClick = { onMoveToTrash(currentDraft()) }) {
+                IconButton(onClick = { onUpdateDraft { it.copy(isPinned = !it.isPinned) } }) {
                     Icon(
-                        imageVector = Icons.Filled.Delete,
-                        contentDescription = "Move note to trash",
-                        tint = MaterialTheme.colorScheme.error
+                        imageVector = if (draft.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
+                        contentDescription = "Pin Note",
+                        tint = if (draft.isPinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+                IconButton(onClick = { onUpdateDraft { it.copy(isFavorite = !it.isFavorite) } }) {
+                    Icon(
+                        imageVector = if (draft.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                        contentDescription = "Favorite Note",
+                        tint = if (draft.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (onDelete != null) {
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier.testTag("note_editor_delete_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Delete,
+                            contentDescription = "Delete Note",
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+                Button(
+                    onClick = onSaveAndClose,
+                    modifier = Modifier.testTag("note_editor_save_button")
+                ) {
+                    Icon(Icons.Filled.Check, contentDescription = null)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Save & Done")
                 }
             }
         }
 
-        if (autosaveErrorMessage != null) {
+        if (draft.editorError != null) {
             Surface(
                 color = MaterialTheme.colorScheme.errorContainer,
-                shape = MaterialTheme.shapes.small,
+                shape = RoundedCornerShape(10.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    text = autosaveErrorMessage,
-                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    text = draft.editorError,
                     style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(10.dp)
-                )
-            }
-        }
-
-        // Lightweight Formatting Toolbar (Paragraph, Heading, Bullets, Numbered, Checklist)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            NoteFormatStyle.entries.forEach { style ->
-                FilterChip(
-                    selected = formatStyle == style,
-                    onClick = {
-                        formatStyle = style
-                        onSaveNote(currentDraft(), true)
-                    },
-                    leadingIcon = {
-                        val icon = when (style) {
-                            NoteFormatStyle.HEADING -> Icons.Filled.Title
-                            NoteFormatStyle.BULLET_LIST -> Icons.Filled.FormatListBulleted
-                            NoteFormatStyle.NUMBERED_LIST -> Icons.Filled.FormatListNumbered
-                            NoteFormatStyle.CHECKLIST -> Icons.Filled.CheckBox
-                            NoteFormatStyle.PARAGRAPH -> Icons.Outlined.Description
-                        }
-                        Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(16.dp))
-                    },
-                    label = { Text(style.label) }
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    modifier = Modifier.padding(12.dp)
                 )
             }
         }
 
         OutlinedTextField(
-            value = title,
-            onValueChange = {
-                title = it
-                onSaveNote(currentDraft(), true)
-            },
+            value = draft.title,
+            onValueChange = { text -> onUpdateDraft { it.copy(title = text, editorError = null) } },
             label = { Text("Note Title") },
             singleLine = true,
             modifier = Modifier
@@ -791,72 +628,187 @@ private fun NoteEditorView(
                 .testTag("note_editor_title_input")
         )
 
-        if (formatStyle == NoteFormatStyle.CHECKLIST) {
+        // Format switcher: Plain Text / Markdown / Checklist
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            NoteBodyFormat.entries.forEach { fmt ->
+                FilterChip(
+                    selected = draft.format == fmt,
+                    onClick = { onUpdateDraft { it.copy(format = fmt) } },
+                    label = { Text(fmt.name.replace('_', ' ')) }
+                )
+            }
+            if (draft.format == NoteBodyFormat.MARKDOWN) {
+                FilterChip(
+                    selected = draft.showMarkdownPreview,
+                    onClick = { onUpdateDraft { it.copy(showMarkdownPreview = !it.showMarkdownPreview) } },
+                    label = { Text(if (draft.showMarkdownPreview) "Edit Markdown" else "Preview Markdown") }
+                )
+            }
+        }
+
+        // Category & Folder selection
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            NOTE_CATEGORIES.filter { it != "All" }.forEach { cat ->
+                FilterChip(
+                    selected = draft.category.equals(cat, ignoreCase = true),
+                    onClick = { onUpdateDraft { it.copy(category = cat) } },
+                    label = { Text(cat) }
+                )
+            }
+        }
+
+        if (availableFolders.isNotEmpty()) {
+            Text(
+                text = "Folder",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                availableFolders.forEach { folder ->
+                    FilterChip(
+                        selected = draft.folderId == folder.id,
+                        onClick = {
+                            onUpdateDraft {
+                                it.copy(folderId = folder.id, folderName = folder.name)
+                            }
+                        },
+                        label = { Text(folder.name) }
+                    )
+                }
+            }
+        }
+
+        // Color Accent Picker
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text("Card Accent:", style = MaterialTheme.typography.labelMedium)
+            NoteCardAccents.forEachIndexed { idx, color ->
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(color)
+                        .clickable { onUpdateDraft { it.copy(colorAccentIndex = idx) } },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (draft.colorAccentIndex == idx) {
+                        Icon(
+                            imageVector = Icons.Filled.Check,
+                            contentDescription = "Selected Accent",
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        OutlinedTextField(
+            value = draft.tagsText,
+            onValueChange = { text -> onUpdateDraft { it.copy(tagsText = text) } },
+            label = { Text("Tags (comma separated)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        if (draft.format == NoteBodyFormat.CHECKLIST) {
             Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
                 Column(
-                    modifier = Modifier.padding(12.dp),
+                    modifier = Modifier.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "Checklist Items",
-                        style = MaterialTheme.typography.titleSmall
+                        text = "Interactive Checklist",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary
                     )
-                    checklistItems.forEachIndexed { idx, item ->
+
+                    draft.checklistItems.forEach { entry ->
                         Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             Checkbox(
-                                checked = item.isChecked,
+                                checked = entry.isChecked,
                                 onCheckedChange = { checked ->
-                                    checklistItems = checklistItems.toMutableList().also {
-                                        it[idx] = item.copy(isChecked = checked)
+                                    onUpdateDraft { state ->
+                                        state.copy(
+                                            checklistItems = state.checklistItems.map {
+                                                if (it.id == entry.id) it.copy(isChecked = checked) else it
+                                            }
+                                        )
                                     }
-                                    onSaveNote(currentDraft(), true)
                                 }
                             )
                             Text(
-                                text = item.text,
+                                text = entry.text,
                                 modifier = Modifier.weight(1f),
-                                textDecoration = if (item.isChecked) TextDecoration.LineThrough else TextDecoration.None
+                                textDecoration = if (entry.isChecked) TextDecoration.LineThrough else TextDecoration.None
                             )
                             IconButton(
                                 onClick = {
-                                    checklistItems = checklistItems.toMutableList().also { it.removeAt(idx) }
-                                    onSaveNote(currentDraft(), true)
+                                    onUpdateDraft { state ->
+                                        state.copy(
+                                            checklistItems = state.checklistItems.filterNot { it.id == entry.id }
+                                        )
+                                    }
                                 }
                             ) {
-                                Icon(imageVector = Icons.Filled.Close, contentDescription = "Remove checklist item")
+                                Icon(Icons.Filled.Delete, contentDescription = "Remove Item")
                             }
                         }
                     }
 
                     Row(
+                        modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         OutlinedTextField(
-                            value = newChecklistText,
-                            onValueChange = { newChecklistText = it },
-                            placeholder = { Text("Add checklist item...") },
+                            value = draft.pendingNewChecklistText,
+                            onValueChange = { text ->
+                                onUpdateDraft { it.copy(pendingNewChecklistText = text, editorError = null) }
+                            },
+                            placeholder = { Text("Add checklist item…") },
                             singleLine = true,
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("note_checklist_new_input")
                         )
                         Button(
                             onClick = {
-                                if (newChecklistText.isNotBlank()) {
-                                    checklistItems = checklistItems + NoteChecklistItem(
-                                        id = UUID.randomUUID().toString(),
-                                        text = newChecklistText.trim(),
-                                        isChecked = false
-                                    )
-                                    newChecklistText = ""
-                                    onSaveNote(currentDraft(), true)
+                                if (draft.pendingNewChecklistText.isNotBlank()) {
+                                    onUpdateDraft { state ->
+                                        state.copy(
+                                            checklistItems = state.checklistItems +
+                                                ChecklistEntry(text = state.pendingNewChecklistText.trim()),
+                                            pendingNewChecklistText = "",
+                                            editorError = null
+                                        )
+                                    }
                                 }
-                            }
+                            },
+                            modifier = Modifier.testTag("note_checklist_add_button")
                         ) {
                             Text("Add")
                         }
@@ -865,81 +817,230 @@ private fun NoteEditorView(
             }
         }
 
-        OutlinedTextField(
-            value = body,
-            onValueChange = {
-                body = it
-                onSaveNote(currentDraft(), true)
-            },
-            label = {
-                Text(
-                    when (formatStyle) {
-                        NoteFormatStyle.BULLET_LIST -> "Bullet List Content (one bullet per line)"
-                        NoteFormatStyle.NUMBERED_LIST -> "Numbered List Content (one item per line)"
-                        else -> "Private Note Body"
-                    }
-                )
-            },
-            minLines = 8,
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("note_editor_body_input")
-        )
+        if (draft.format == NoteBodyFormat.MARKDOWN && draft.showMarkdownPreview) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "Markdown Preview",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    HorizontalDivider()
+                    MarkdownPreviewBlock(markdown = draft.body)
+                }
+            }
+        } else {
+            OutlinedTextField(
+                value = draft.body,
+                onValueChange = { text -> onUpdateDraft { it.copy(body = text, editorError = null) } },
+                label = { Text("Encrypted Note Content") },
+                minLines = 8,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("note_editor_body_input")
+            )
+        }
+    }
+}
 
-        // Folder Selector & Tags
-        Text(
-            text = "Folder",
-            style = MaterialTheme.typography.labelLarge
-        )
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            availableFolders.forEach { folder ->
-                FilterChip(
-                    selected = folderName == folder,
-                    onClick = {
-                        folderName = folder
-                        onSaveNote(currentDraft(), true)
-                    },
-                    label = { Text(folder) }
+@Composable
+fun FolderManagementDialog(
+    scopeLabel: String,
+    folders: List<VaultFolder>,
+    onCreateFolder: (String) -> Unit,
+    onRenameFolder: (String, String) -> Unit,
+    onDeleteFolder: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var newFolderName by remember { mutableStateOf("") }
+    var editingFolderId by remember { mutableStateOf<String?>(null) }
+    var editingFolderName by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Manage $scopeLabel Folders") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Create custom folders or rename/delete existing ones. Deleting a folder safely moves its items to General.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = newFolderName,
+                        onValueChange = { newFolderName = it },
+                        label = { Text("New folder name") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("new_folder_name_input")
+                    )
+                    Button(
+                        onClick = {
+                            if (newFolderName.isNotBlank()) {
+                                onCreateFolder(newFolderName.trim())
+                                newFolderName = ""
+                            }
+                        },
+                        enabled = newFolderName.isNotBlank(),
+                        modifier = Modifier.testTag("create_folder_confirm_button")
+                    ) {
+                        Text("Create")
+                    }
+                }
+
+                HorizontalDivider()
+
+                folders.forEach { folder ->
+                    val isBuiltInGeneral = VaultFolder.isDefaultGeneralName(folder.name) ||
+                        folder.id == VaultFolder.DEFAULT_NOTE_FOLDER_ID ||
+                        folder.id == VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID
+
+                    if (editingFolderId == folder.id) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = editingFolderName,
+                                onValueChange = { editingFolderName = it },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(
+                                onClick = {
+                                    if (editingFolderName.isNotBlank()) {
+                                        onRenameFolder(folder.id, editingFolderName.trim())
+                                        editingFolderId = null
+                                    }
+                                }
+                            ) {
+                                Text("Save")
+                            }
+                            TextButton(onClick = { editingFolderId = null }) {
+                                Text("Cancel")
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    Icons.Filled.Folder,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Text(
+                                    text = if (isBuiltInGeneral) "${folder.name} (Default)" else folder.name,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                            if (!isBuiltInGeneral) {
+                                Row {
+                                    IconButton(
+                                        onClick = {
+                                            editingFolderId = folder.id
+                                            editingFolderName = folder.name
+                                        },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.Edit,
+                                            contentDescription = "Rename ${folder.name}",
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { onDeleteFolder(folder.id) },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.Delete,
+                                            contentDescription = "Delete ${folder.name}",
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            OutlinedButton(onClick = onDismiss) {
+                Text("Done")
             }
         }
+    )
+}
 
-        OutlinedTextField(
-            value = tagsText,
-            onValueChange = {
-                tagsText = it
-                onSaveNote(currentDraft(), true)
-            },
-            label = { Text("Tags (comma separated, e.g. personal, finance, ideas)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        HorizontalDivider()
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            OutlinedButton(
-                onClick = onClose,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("Close")
-            }
-            Button(
-                onClick = {
-                    onSaveNote(currentDraft(), false)
-                    onClose()
-                },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("note_editor_save_button")
-            ) {
-                Text("Save & Done")
+@Composable
+private fun MarkdownPreviewBlock(markdown: String) {
+    val lines = remember(markdown) { markdown.lines() }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        lines.forEach { line ->
+            val trimmed = line.trim()
+            when {
+                trimmed.startsWith("### ") -> Text(
+                    text = trimmed.removePrefix("### "),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                trimmed.startsWith("## ") -> Text(
+                    text = trimmed.removePrefix("## "),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                trimmed.startsWith("# ") -> Text(
+                    text = trimmed.removePrefix("# "),
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                trimmed.startsWith("- ") || trimmed.startsWith("* ") -> Text(
+                    text = "• " + trimmed.drop(2),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                trimmed.startsWith("> ") -> Text(
+                    text = trimmed.removePrefix("> "),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontStyle = FontStyle.Italic,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                trimmed.startsWith("```") -> HorizontalDivider()
+                else -> Text(
+                    text = line,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = if (line.startsWith("    ")) FontFamily.Monospace else FontFamily.Default
+                )
             }
         }
     }

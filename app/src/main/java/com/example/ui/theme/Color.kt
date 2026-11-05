@@ -3,10 +3,10 @@ package com.example.ui.theme
 import androidx.compose.ui.graphics.Color
 
 // Dark Palette — Obsidian & Emerald Precision
-val ObsidianBackground = Color(0xFF090D12)
-val ObsidianSurface = Color(0xFF111820)
-val ObsidianSurfaceVariant = Color(0xFF1A2430)
-val ObsidianOutline = Color(0xFF2B3A4B)
+val ObsidianBackground = Color(0xFF090D16)
+val ObsidianSurface = Color(0xFF111827)
+val ObsidianSurfaceVariant = Color(0xFF1E293B)
+val ObsidianOutline = Color(0xFF334155)
 val EmeraldPrimaryDark = Color(0xFF10B981)
 val EmeraldOnPrimaryDark = Color(0xFF002114)
 val EmeraldContainerDark = Color(0xFF064E3B)
@@ -36,3 +36,13 @@ val StatusWeak = Color(0xFFF97316)
 val StatusFair = Color(0xFFF59E0B)
 val StatusStrong = Color(0xFF10B981)
 val StatusVeryStrong = Color(0xFF059669)
+
+// Encrypted Note Card Accent Colors
+val NoteCardAccents = listOf(
+    Color(0xFF1E293B),
+    Color(0xFF064E3B),
+    Color(0xFF1E3A8A),
+    Color(0xFF4C1D95),
+    Color(0xFF7C2D12),
+    Color(0xFF134E4A)
+)

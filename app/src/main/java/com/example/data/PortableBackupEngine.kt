@@ -3,108 +3,100 @@ package com.example.data
 import com.example.security.CryptoEngine
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
-import java.io.InputStream
 import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
 import java.util.Arrays
 import javax.crypto.AEADBadTagException
 
 /**
- * Portable Encrypted Backup & Restore Engine (Section 17).
+ * Self-contained encrypted portable `.pvault` backup engine.
  *
- * Binary `.pvault` Format v1:
- * - [0..3]    4B Magic: `"PVBK"`
- * - [4..7]    4B Schema Version: `1` (Big-Endian Int)
- * - [8..11]   4B Argon2id Memory KB: e.g. `32768` (bounded `[4096..131072]` before allocation)
- * - [12..15]  4B Argon2id Iterations: e.g. `3` (bounded `[1..12]`)
- * - [16..19]  4B Argon2id Parallelism: e.g. `2` (bounded `[1..4]`)
- * - [20..35]  16B Argon2id Salt
- * - [36..47]  12B AES-256-GCM Nonce
- * - [48..N]   AES-256-GCM Ciphertext + 16B Auth Tag (bound with AAD `"PV1-BACKUP|ver=1|..."`)
+ * Binary Header Layout:
+ * - `[0..7]`   8B Magic `"PVAULTB1"`
+ * - `[8..11]`  4B `backupSchemaVersion` (`1`)
+ * - `[12..15]` 4B `kdfMemoryKb`
+ * - `[16..19]` 4B `kdfIterations`
+ * - `[20..23]` 4B `kdfParallelism`
+ * - `[24..39]` 16B `backupKdfSalt`
+ * - `[40..51]` 12B `backupGcmNonce`
+ * - `[52..N]`  AES-256-GCM ciphertext + 16B tag of UTF-8 JSON payload
  *
- * Security Rules:
- * - Header contains ONLY minimal non-secret framing; all record counts, timestamps, notes,
- *   credentials, and folders live inside the authenticated encrypted payload.
- * - Never embeds the backup password, raw master password, or live vault DEK.
- * - Exports ONLY the currently authenticated vault slot (`Real` OR `Decoy`), never both.
+ * Scope & Privacy Guarantee:
+ * - Exports ONLY the currently unlocked vault slot's records.
+ * - Never embeds SQLite `vault_slot` integers or reveals whether another slot exists.
  */
 object PortableBackupEngine {
 
-    private val MAGIC_BYTES = byteArrayOf('P'.code.toByte(), 'V'.code.toByte(), 'B'.code.toByte(), 'K'.code.toByte())
-    const val HEADER_BYTES = 48
-    const val MAX_BACKUP_FILE_BYTES = 50 * 1024 * 1024 // 50 MiB upper bound (B03)
+    private val MAGIC_BYTES = "PVAULTB1".toByteArray(StandardCharsets.US_ASCII)
+    const val HEADER_BYTES = 52
+    const val MAX_BACKUP_FILE_BYTES = 32 * 1024 * 1024 // 32 MiB ceiling
+    const val MAX_RECORDS_PER_BACKUP = 10_000
+    const val MAX_FIELD_CHARS = 256_000
 
-    enum class ExportScope(val label: String) {
-        ALL("All Active Vault Data (Notes, Passwords & Folders)"),
-        NOTES_ONLY("Private Notes & Folders Only"),
-        PASSWORDS_ONLY("Saved Passwords & Folders Only")
+    enum class RestoreMode {
+        MERGE_KEEP_NEWEST,
+        REPLACE_ACTIVE_VAULT
     }
 
-    enum class RestoreMode(val label: String, val description: String) {
-        MERGE_KEEP_NEWEST(
-            "Merge with Current Vault",
-            "Keeps existing records and imports new or newer records from the backup."
-        ),
-        REPLACE_ACTIVE_VAULT(
-            "Replace Active Vault Only",
-            "Replaces all records in the currently unlocked vault with the backup contents. Never touches the other vault."
-        )
-    }
-
-    data class VerifiedBackupPreview(
-        val schemaVersion: Int,
+    data class BackupPayload(
         val exportedAtEpochMs: Long,
-        val exportScope: ExportScope,
-        val notesCount: Int,
-        val credentialsCount: Int,
-        val foldersCount: Int,
-        val records: List<VaultRecordPayload>
-    )
+        val appVersionName: String,
+        val items: List<VaultItem>
+    ) {
+        val notesCount: Int get() = items.count { it is NoteRecord }
+        val credentialsCount: Int get() = items.count { it is CredentialRecord }
+        val foldersCount: Int get() = items.count { it is VaultFolder }
+    }
 
     /**
-     * Builds and encrypts a portable `.pvault` byte array in memory from the active vault's records.
+     * Encrypts a list of active-slot `VaultItem`s into a portable `.pvault` byte array.
      */
     fun createEncryptedBackupBytes(
+        items: List<VaultItem>,
         backupPasswordChars: CharArray,
-        records: List<VaultRecordPayload>,
-        scope: ExportScope = ExportScope.ALL,
+        appVersionName: String = "1.0.1",
         kdfParams: CryptoEngine.KdfParams = CryptoEngine.KdfParams(),
         exportedAtEpochMs: Long = System.currentTimeMillis()
     ): ByteArray {
-        require(backupPasswordChars.size >= 8) {
-            "Backup password must be at least 8 characters."
+        require(backupPasswordChars.isNotEmpty()) { "Backup password cannot be empty." }
+        require(items.size <= MAX_RECORDS_PER_BACKUP) {
+            "Backup exceeds maximum supported record count ($MAX_RECORDS_PER_BACKUP)."
         }
         kdfParams.validateBounds()
 
-        val filteredRecords = records.filter { record ->
-            when (scope) {
-                ExportScope.ALL -> true
-                ExportScope.NOTES_ONLY -> record is VaultRecordPayload.NoteRecord || record is VaultRecordPayload.FolderRecord
-                ExportScope.PASSWORDS_ONLY -> record is VaultRecordPayload.CredentialRecord || record is VaultRecordPayload.FolderRecord
-            }
-        }
-
-        val rootJson = JSONObject()
-        rootJson.put("schemaVersion", CryptoEngine.BACKUP_SCHEMA_VERSION)
-        rootJson.put("exportedAtEpochMs", exportedAtEpochMs)
-        rootJson.put("exportScope", scope.name)
-
-        val recordsJsonArray = JSONArray()
-        for (record in filteredRecords) {
-            val serializedRecordJson = String(VaultPayloadSerializer.serialize(record), Charsets.UTF_8)
-            recordsJsonArray.put(JSONObject(serializedRecordJson))
-        }
-        rootJson.put("records", recordsJsonArray)
-
-        val plaintextBytes = rootJson.toString().toByteArray(Charsets.UTF_8)
         val salt = CryptoEngine.generateSalt()
         val nonce = CryptoEngine.generateNonce()
-        val backupKey = CryptoEngine.deriveKeyArgon2id(backupPasswordChars, salt, kdfParams)
+        val backupKek = CryptoEngine.deriveKeyArgon2id(backupPasswordChars, salt, kdfParams)
 
+        var plaintextBytes = ByteArray(0)
         try {
+            val root = JSONObject()
+            root.put("backupSchemaVersion", CryptoEngine.BACKUP_SCHEMA_VERSION)
+            root.put("exportedAtEpochMs", exportedAtEpochMs)
+            root.put("appVersionName", appVersionName)
+
+            val recordsArray = JSONArray()
+            val seenIds = HashSet<String>(items.size)
+            items.forEach { item ->
+                require(item.id.isNotBlank()) { "Cannot export a record with a blank ID." }
+                require(seenIds.add(item.id)) { "Duplicate record ID detected during backup export: ${item.id}" }
+                val encodedBytes = VaultRecordCodec.encode(item)
+                try {
+                    val itemJson = JSONObject(String(encodedBytes, StandardCharsets.UTF_8))
+                    recordsArray.put(itemJson)
+                } finally {
+                    Arrays.fill(encodedBytes, 0.toByte())
+                }
+            }
+            root.put("records", recordsArray)
+
+            plaintextBytes = root.toString().toByteArray(StandardCharsets.UTF_8)
+            require(plaintextBytes.size <= MAX_BACKUP_FILE_BYTES - HEADER_BYTES - CryptoEngine.GCM_TAG_BYTES) {
+                "Serialized backup exceeds maximum safe size."
+            }
             val aad = CryptoEngine.buildBackupAad(CryptoEngine.BACKUP_SCHEMA_VERSION, kdfParams)
             val ciphertext = CryptoEngine.encryptAesGcm(
-                keyBytes = backupKey,
+                keyBytes = backupKek,
                 nonce = nonce,
                 plaintext = plaintextBytes,
                 aad = aad
@@ -122,141 +114,230 @@ object PortableBackupEngine {
             buffer.put(ciphertext)
             return output
         } finally {
-            Arrays.fill(backupKey, 0.toByte())
-            Arrays.fill(plaintextBytes, 0.toByte())
+            Arrays.fill(backupKek, 0.toByte())
+            if (plaintextBytes.isNotEmpty()) {
+                Arrays.fill(plaintextBytes, 0.toByte())
+            }
         }
     }
 
     /**
-     * Reads, validates bounds, authenticates, and decrypts a `.pvault` stream for restore preview.
-     * Rejects oversized files, malformed headers, out-of-bounds KDF parameters, wrong passwords,
-     * and tampered ciphertexts before touching any database state.
+     * Validates the `.pvault` header, enforces KDF bounds, derives the backup key, verifies the
+     * AES-256-GCM authentication tag in memory, and parses all records BEFORE any database write.
      */
-    @Throws(IllegalArgumentException::class, SecurityException::class)
-    fun verifyAndDecryptBackup(
-        inputStream: InputStream,
+    @Throws(
+        IllegalArgumentException::class,
+        AEADBadTagException::class
+    )
+    fun decryptAndVerifyBackupBytes(
+        backupBytes: ByteArray,
         backupPasswordChars: CharArray
-    ): VerifiedBackupPreview {
-        val rawBytes = readBoundedBytes(inputStream, MAX_BACKUP_FILE_BYTES)
-        return verifyAndDecryptBackupBytes(rawBytes, backupPasswordChars)
-    }
-
-    @Throws(IllegalArgumentException::class, SecurityException::class)
-    fun verifyAndDecryptBackupBytes(
-        rawBytes: ByteArray,
-        backupPasswordChars: CharArray
-    ): VerifiedBackupPreview {
-        if (rawBytes.size < HEADER_BYTES + CryptoEngine.GCM_TAG_BYTES) {
-            throw IllegalArgumentException("Backup file is truncated or too small to be a valid .pvault archive.")
+    ): BackupPayload {
+        require(backupPasswordChars.isNotEmpty()) { "Backup password is required." }
+        require(backupBytes.size >= HEADER_BYTES + CryptoEngine.GCM_TAG_BYTES) {
+            "Invalid or truncated .pvault backup file."
         }
-        if (rawBytes.size > MAX_BACKUP_FILE_BYTES) {
-            throw IllegalArgumentException("Backup file exceeds the 50 MiB safety limit.")
+        require(backupBytes.size <= MAX_BACKUP_FILE_BYTES) {
+            "Backup file exceeds maximum safe size (32 MiB)."
         }
 
-        val buffer = ByteBuffer.wrap(rawBytes)
-        val magic = ByteArray(4)
-        buffer.get(magic)
-        if (!magic.contentEquals(MAGIC_BYTES)) {
-            throw IllegalArgumentException("Unrecognized file format (missing PVBK header).")
+        val buffer = ByteBuffer.wrap(backupBytes)
+        val fileMagic = ByteArray(MAGIC_BYTES.size)
+        buffer.get(fileMagic)
+        require(fileMagic.contentEquals(MAGIC_BYTES)) {
+            "Unrecognized file header. Please select a valid .pvault encrypted backup."
         }
 
         val schemaVersion = buffer.int
-        if (schemaVersion != CryptoEngine.BACKUP_SCHEMA_VERSION) {
-            throw IllegalArgumentException("Unsupported backup format version: $schemaVersion.")
+        require(schemaVersion == CryptoEngine.BACKUP_SCHEMA_VERSION) {
+            "Unsupported backup schema version: $schemaVersion"
         }
 
         val memoryKb = buffer.int
         val iterations = buffer.int
         val parallelism = buffer.int
 
-        // Validate KDF bounds BEFORE allocating Argon2 memory (B03)
         val kdfParams = CryptoEngine.KdfParams(
             algorithm = CryptoEngine.KDF_ALGORITHM_ARGON2ID,
             memoryKb = memoryKb,
             iterations = iterations,
             parallelism = parallelism
         )
+        // Strict KDF bounds enforcement before allocating Argon2 memory (B03 / S03)
         kdfParams.validateBounds()
 
         val salt = ByteArray(CryptoEngine.SALT_BYTES)
         buffer.get(salt)
+
         val nonce = ByteArray(CryptoEngine.NONCE_BYTES)
         buffer.get(nonce)
 
-        val ciphertextLength = rawBytes.size - HEADER_BYTES
+        val ciphertextLength = backupBytes.size - HEADER_BYTES
         val ciphertext = ByteArray(ciphertextLength)
         buffer.get(ciphertext)
 
-        val backupKey = CryptoEngine.deriveKeyArgon2id(backupPasswordChars, salt, kdfParams)
-        val decryptedBytes = try {
+        val backupKek = CryptoEngine.deriveKeyArgon2id(backupPasswordChars, salt, kdfParams)
+        var decryptedBytes = ByteArray(0)
+        try {
             val aad = CryptoEngine.buildBackupAad(schemaVersion, kdfParams)
-            CryptoEngine.decryptAesGcm(
-                keyBytes = backupKey,
+            decryptedBytes = CryptoEngine.decryptAesGcm(
+                keyBytes = backupKek,
                 nonce = nonce,
                 ciphertext = ciphertext,
                 aad = aad
             )
-        } catch (e: AEADBadTagException) {
-            throw SecurityException("Incorrect backup password or tampered backup archive.", e)
-        } catch (e: Exception) {
-            throw SecurityException("Failed to authenticate backup archive: ${e.message}", e)
-        } finally {
-            Arrays.fill(backupKey, 0.toByte())
-        }
 
-        try {
-            val rootJson = JSONObject(String(decryptedBytes, Charsets.UTF_8))
-            val innerVersion = rootJson.optInt("schemaVersion", -1)
-            if (innerVersion != schemaVersion) {
-                throw SecurityException("Backup inner version mismatch.")
-            }
-            val exportedAt = rootJson.optLong("exportedAtEpochMs", 0L)
-            val scopeStr = rootJson.optString("exportScope", ExportScope.ALL.name)
-            val scope = try {
-                ExportScope.valueOf(scopeStr)
-            } catch (_: Exception) {
-                ExportScope.ALL
+            val root = JSONObject(String(decryptedBytes, StandardCharsets.UTF_8))
+            val exportedAt = root.optLong("exportedAtEpochMs", 0L)
+            val appVersion = root.optString("appVersionName", "unknown")
+            val recordsArray = root.optJSONArray("records") ?: JSONArray()
+
+            require(recordsArray.length() <= MAX_RECORDS_PER_BACKUP) {
+                "Backup contains too many records (${recordsArray.length()} > $MAX_RECORDS_PER_BACKUP)."
             }
 
-            val recordsArray = rootJson.getJSONArray("records")
-            val parsedRecords = mutableListOf<VaultRecordPayload>()
+            val items = mutableListOf<VaultItem>()
+            val seenIds = HashSet<String>(recordsArray.length())
             for (i in 0 until recordsArray.length()) {
-                val itemObj = recordsArray.getJSONObject(i)
-                val record = VaultPayloadSerializer.deserialize(itemObj.toString().toByteArray(Charsets.UTF_8))
-                parsedRecords.add(record)
+                val obj = recordsArray.optJSONObject(i)
+                    ?: throw IllegalArgumentException("Malformed record at index $i in backup.")
+                val decoded = VaultRecordCodec.decodeFromJsonObject(obj)
+                validateDecodedRecordLimits(decoded)
+                require(seenIds.add(decoded.id)) {
+                    "Backup contains duplicate record ID: ${decoded.id}"
+                }
+                items.add(decoded)
             }
 
-            val notesCount = parsedRecords.count { it is VaultRecordPayload.NoteRecord }
-            val credentialsCount = parsedRecords.count { it is VaultRecordPayload.CredentialRecord }
-            val foldersCount = parsedRecords.count { it is VaultRecordPayload.FolderRecord }
-
-            return VerifiedBackupPreview(
-                schemaVersion = schemaVersion,
+            return BackupPayload(
                 exportedAtEpochMs = exportedAt,
-                exportScope = scope,
-                notesCount = notesCount,
-                credentialsCount = credentialsCount,
-                foldersCount = foldersCount,
-                records = parsedRecords
+                appVersionName = appVersion,
+                items = items
             )
         } finally {
-            Arrays.fill(decryptedBytes, 0.toByte())
+            Arrays.fill(backupKek, 0.toByte())
+            if (decryptedBytes.isNotEmpty()) {
+                Arrays.fill(decryptedBytes, 0.toByte())
+            }
         }
     }
 
-    private fun readBoundedBytes(inputStream: InputStream, maxBytes: Int): ByteArray {
-        val out = ByteArrayOutputStream()
-        val buf = ByteArray(8192)
-        var total = 0
-        while (true) {
-            val read = inputStream.read(buf)
-            if (read == -1) break
-            total += read
-            if (total > maxBytes) {
-                throw IllegalArgumentException("Input stream exceeds maximum allowed backup size ($maxBytes bytes).")
-            }
-            out.write(buf, 0, read)
+    private fun validateDecodedRecordLimits(item: VaultItem) {
+        require(item.id.isNotBlank() && item.id.length <= 128) {
+            "Invalid record ID length in backup."
         }
-        return out.toByteArray()
+        when (item) {
+            is NoteRecord -> {
+                require(item.title.length <= MAX_FIELD_CHARS && item.body.length <= MAX_FIELD_CHARS) {
+                    "Note record in backup exceeds maximum allowed text length."
+                }
+            }
+            is CredentialRecord -> {
+                require(
+                    item.serviceName.length <= MAX_FIELD_CHARS &&
+                        item.username.length <= MAX_FIELD_CHARS &&
+                        item.password.length <= MAX_FIELD_CHARS &&
+                        item.notes.length <= MAX_FIELD_CHARS
+                ) {
+                    "Credential record in backup exceeds maximum allowed field length."
+                }
+            }
+            is VaultFolder -> {
+                require(item.name.isNotBlank() && item.name.length <= 120) {
+                    "Folder record in backup has an invalid name."
+                }
+                require(!VaultFolder.isReservedAllName(item.name)) {
+                    "Folder record in backup uses reserved filter name 'All'."
+                }
+            }
+        }
+    }
+
+    /**
+     * Computes a deterministic merge between existing active-vault records and imported backup records.
+     * - Matching `id`: keeps the item with the newer `updatedAtEpochMs`.
+     * - Folders with matching `(scope, normalized name)`: deduplicates and canonicalizes `folderId`
+     *   across imported records so folder links stay consistent after merge (`R12`).
+     */
+    fun mergeItemsKeepNewest(
+        existingItems: List<VaultItem>,
+        importedItems: List<VaultItem>
+    ): List<VaultItem> {
+        val mergedById = LinkedHashMap<String, VaultItem>()
+        existingItems.forEach { mergedById[it.id] = it }
+
+        importedItems.forEach { imported ->
+            val current = mergedById[imported.id]
+            if (current == null || imported.updatedAtEpochMs >= current.updatedAtEpochMs) {
+                mergedById[imported.id] = imported
+            }
+        }
+
+        // Deduplicate folders by (scope, lowercase name) and remap folderId/folderName if needed (R12)
+        val canonicalFoldersByKey = LinkedHashMap<String, VaultFolder>()
+        val folderIdRemap = HashMap<String, VaultFolder>()
+        val nonFolderItems = mutableListOf<VaultItem>()
+
+        mergedById.values.forEach { item ->
+            if (item is VaultFolder) {
+                val key = "${item.scope.name}:${item.name.trim().lowercase()}"
+                val existingFolder = canonicalFoldersByKey[key]
+                if (existingFolder == null) {
+                    canonicalFoldersByKey[key] = item
+                    folderIdRemap[item.id] = item
+                } else {
+                    val winner = if (item.updatedAtEpochMs > existingFolder.updatedAtEpochMs) {
+                        // Keep stable existing ID when possible, or update name casing
+                        existingFolder.copy(
+                            name = item.name.trim(),
+                            updatedAtEpochMs = item.updatedAtEpochMs
+                        )
+                    } else {
+                        existingFolder
+                    }
+                    canonicalFoldersByKey[key] = winner
+                    folderIdRemap[existingFolder.id] = winner
+                    folderIdRemap[item.id] = winner
+                }
+            } else {
+                nonFolderItems.add(item)
+            }
+        }
+
+        val normalizedItems = nonFolderItems.map { item ->
+            when (item) {
+                is NoteRecord -> {
+                    val mappedFolder = folderIdRemap[item.folderId]
+                        ?: canonicalFoldersByKey["${FolderScope.NOTES.name}:${item.folderName.trim().lowercase()}"]
+                    if (mappedFolder != null) {
+                        item.copy(folderId = mappedFolder.id, folderName = mappedFolder.name)
+                    } else if (VaultFolder.isDefaultGeneralName(item.folderName)) {
+                        item.copy(
+                            folderId = VaultFolder.DEFAULT_NOTE_FOLDER_ID,
+                            folderName = VaultFolder.DEFAULT_FOLDER_NAME
+                        )
+                    } else {
+                        item
+                    }
+                }
+                is CredentialRecord -> {
+                    val mappedFolder = folderIdRemap[item.folderId]
+                        ?: canonicalFoldersByKey["${FolderScope.CREDENTIALS.name}:${item.folderName.trim().lowercase()}"]
+                    if (mappedFolder != null) {
+                        item.copy(folderId = mappedFolder.id, folderName = mappedFolder.name)
+                    } else if (VaultFolder.isDefaultGeneralName(item.folderName)) {
+                        item.copy(
+                            folderId = VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID,
+                            folderName = VaultFolder.DEFAULT_FOLDER_NAME
+                        )
+                    } else {
+                        item
+                    }
+                }
+                else -> item
+            }
+        }
+
+        return canonicalFoldersByKey.values.toList() + normalizedItems
     }
 }

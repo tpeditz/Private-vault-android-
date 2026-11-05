@@ -1,90 +1,118 @@
 package com.example
 
+import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.Uri
 import android.os.Bundle
 import android.view.WindowManager
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoFixHigh
-import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SystemUpdate
-import androidx.compose.material.icons.outlined.AutoFixHigh
-import androidx.compose.material.icons.outlined.Description
-import androidx.compose.material.icons.outlined.Key
-import androidx.compose.material.icons.outlined.Security
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.lifecycleScope
+import com.example.data.ThemePreference
 import com.example.ota.OtaUpdateManager
 import com.example.security.VaultSessionManager
 import com.example.ui.AboutVaultScreen
 import com.example.ui.BackupAndRestoreScreen
-import com.example.ui.GeneratorTabScreen
+import com.example.ui.GeneratorAndStrengthScreen
 import com.example.ui.NotesTabScreen
 import com.example.ui.OtaThreeOptionUpdateDialog
 import com.example.ui.OtaUpdatesScreen
 import com.example.ui.PasswordsTabScreen
-import com.example.ui.PrimaryVaultTab
+import com.example.ui.PrimaryTab
 import com.example.ui.SecondaryDestination
 import com.example.ui.SecurityAndDecoySettingsScreen
 import com.example.ui.SetupVaultScreen
-import com.example.ui.StrengthCheckTabScreen
+import com.example.ui.StrengthAuditTabScreen
 import com.example.ui.UnlockVaultScreen
 import com.example.ui.VaultUiState
 import com.example.ui.VaultViewModel
-import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.PrivateVaultTheme
 import kotlinx.coroutines.launch
+import javax.crypto.Cipher
 
 class MainActivity : FragmentActivity() {
 
@@ -95,19 +123,19 @@ class MainActivity : FragmentActivity() {
     private val screenOffReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == Intent.ACTION_SCREEN_OFF) {
-                viewModel.lockVaultNow()
+                viewModel.onScreenTurnedOff()
             }
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Enforce FLAG_SECURE by default before rendering any secret UI (Section 16)
+        enableEdgeToEdge()
+        // Default to FLAG_SECURE immediately at window creation before first frame (R09)
         window.setFlags(
             WindowManager.LayoutParams.FLAG_SECURE,
             WindowManager.LayoutParams.FLAG_SECURE
         )
-        enableEdgeToEdge()
 
         val filter = IntentFilter(Intent.ACTION_SCREEN_OFF)
         ContextCompat.registerReceiver(
@@ -119,103 +147,77 @@ class MainActivity : FragmentActivity() {
 
         setContent {
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-            val sessionState by viewModel.sessionState.collectAsStateWithLifecycle()
-            val settingsState by viewModel.settingsState.collectAsStateWithLifecycle()
+            val preferences by viewModel.preferences.collectAsStateWithLifecycle()
             val otaState by viewModel.otaState.collectAsStateWithLifecycle()
-            val clipboardSeconds by viewModel.clipboardRemainingSeconds.collectAsStateWithLifecycle()
+            val clipboardCountdown by viewModel.clipboardCountdownSeconds.collectAsStateWithLifecycle()
 
-            LaunchedEffect(settingsState.blockScreenshots) {
-                if (settingsState.blockScreenshots) {
-                    window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            val useDarkTheme = when (preferences.themePreference) {
+                ThemePreference.DARK_OBSIDIAN -> true
+                ThemePreference.LIGHT_CLEAN -> false
+                ThemePreference.SYSTEM -> isSystemInDarkTheme()
+            }
+
+            // R09 Fix: Enforce FLAG_SECURE unconditionally while locked/setup, and whenever
+            // preferences.blockScreenshots is true.
+            val isUnlocked = uiState.sessionState is VaultSessionManager.SessionState.Unlocked
+            val shouldEnforceFlagSecure = !isUnlocked || preferences.blockScreenshots
+            LaunchedEffect(shouldEnforceFlagSecure) {
+                if (shouldEnforceFlagSecure) {
+                    window.setFlags(
+                        WindowManager.LayoutParams.FLAG_SECURE,
+                        WindowManager.LayoutParams.FLAG_SECURE
+                    )
                 } else {
                     window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 }
             }
 
-            PrivateVaultTheme(themeMode = settingsState.themeMode) {
-                // Global 3-Option OTA Update Prompt Dialog (Update Now | Update Later | Remind Me Later)
-                val availableUpdate = otaState as? OtaUpdateManager.OtaUiState.UpdateAvailable
-                if (availableUpdate != null && availableUpdate.showPromptDialog) {
-                    OtaThreeOptionUpdateDialog(
-                        manifest = availableUpdate.manifest,
-                        advisoryWarning = availableUpdate.advisorySupportWarning,
-                        onUpdateNow = {
-                            viewModel.chooseUpdateNow(availableUpdate.manifest)
-                            if (sessionState is VaultSessionManager.SessionState.Unlocked) {
-                                viewModel.openSecondaryDestination(SecondaryDestination.UPDATES)
+            // Observe ON_STOP / ON_START for immediate or timed auto-lock
+            val lifecycleOwner = LocalLifecycleOwner.current
+            DisposableEffect(lifecycleOwner) {
+                val observer = LifecycleEventObserver { _, event ->
+                    when (event) {
+                        Lifecycle.Event.ON_STOP -> {
+                            if (!isChangingConfigurations) {
+                                viewModel.onAppBackgrounded()
                             }
-                        },
-                        onUpdateLater = {
-                            viewModel.chooseUpdateLater()
-                        },
-                        onRemindMeLater = { deferralOption ->
-                            viewModel.chooseRemindMeLater(availableUpdate.manifest, deferralOption)
                         }
-                    )
+                        Lifecycle.Event.ON_START -> {
+                            viewModel.onAppForegrounded()
+                        }
+                        else -> {}
+                    }
                 }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose {
+                    lifecycleOwner.lifecycle.removeObserver(observer)
+                }
+            }
 
-                when {
-                    uiState.isLoadingInitialization -> {
-                        Box(
-                            modifier = Modifier.fillMaxSize(),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            CircularProgressIndicator()
-                        }
-                    }
-
-                    !uiState.isVaultInitialized -> {
-                        SetupVaultScreen(
-                            uiState = uiState,
-                            onCompleteSetup = viewModel::setupInitialVault
-                        )
-                    }
-
-                    sessionState is VaultSessionManager.SessionState.Locked -> {
-                        UnlockVaultScreen(
-                            uiState = uiState,
-                            onUnlockWithPassword = viewModel::unlockVault,
-                            onTriggerBiometricUnlock = {
-                                launchBiometricUnlockPrompt()
-                            }
-                        )
-                    }
-
-                    sessionState is VaultSessionManager.SessionState.Unlocked -> {
-                        AuthenticatedVaultShell(
-                            uiState = uiState,
-                            sessionState = sessionState,
-                            settingsState = settingsState,
-                            otaState = otaState,
-                            clipboardRemainingSeconds = clipboardSeconds,
-                            viewModel = viewModel,
-                            onRequestBiometricEnrollment = {
-                                launchBiometricEnrollmentPrompt()
-                            },
-                            onLaunchExternalIntent = { intent ->
-                                try {
-                                    startActivity(intent)
-                                } catch (_: Exception) {
-                                }
-                            }
-                        )
-                    }
+            PrivateVaultTheme(darkTheme = useDarkTheme) {
+                // U03 Fix: Full-bleed root Surface matching theme background so keyboard transitions
+                // never expose a raw black or white window backdrop.
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    PrivateVaultRootApp(
+                        activity = this@MainActivity,
+                        viewModel = viewModel,
+                        uiState = uiState,
+                        preferences = preferences,
+                        otaState = otaState,
+                        clipboardCountdown = clipboardCountdown
+                    )
                 }
             }
         }
     }
 
-    override fun onStop() {
-        super.onStop()
-        viewModel.sessionManager.onAppBackgrounded()
-    }
-
-    override fun onStart() {
-        super.onStart()
-        val timeoutMs = viewModel.settingsState.value.autoLockTimeoutMs
-        val locked = viewModel.sessionManager.onAppForegrounded(timeoutMs)
-        if (locked) {
-            viewModel.clipboardManager.clearIfStillOwned()
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            viewModel.onWindowFocusRegained()
         }
     }
 
@@ -226,85 +228,215 @@ class MainActivity : FragmentActivity() {
         }
         super.onDestroy()
     }
-
-    private fun launchBiometricEnrollmentPrompt() {
-        try {
-            val cipher = viewModel.biometricKeystoreManager.createEncryptionCipherForBiometricEnrollment()
-            val executor = ContextCompat.getMainExecutor(this)
-            val prompt = BiometricPrompt(
-                this,
-                executor,
-                object : BiometricPrompt.AuthenticationCallback() {
-                    override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                        val authedCipher = result.cryptoObject?.cipher ?: return
-                        viewModel.completeBiometricEnrollment(authedCipher)
-                    }
-                }
-            )
-            val promptInfo = BiometricPrompt.PromptInfo.Builder()
-                .setTitle("Enable Biometric Vault Unlock")
-                .setSubtitle("Bind hardware-backed Keystore encryption key to your biometric credential")
-                .setNegativeButtonText("Cancel")
-                .build()
-            prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun launchBiometricUnlockPrompt() {
-        lifecycleScope.launch {
-            try {
-                val iv = viewModel.getRealVaultBiometricNonce() ?: return@launch
-                val cipher = viewModel.biometricKeystoreManager.createDecryptionCipher(iv)
-                val executor = ContextCompat.getMainExecutor(this@MainActivity)
-                val prompt = BiometricPrompt(
-                    this@MainActivity,
-                    executor,
-                    object : BiometricPrompt.AuthenticationCallback() {
-                        override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                            val authedCipher = result.cryptoObject?.cipher ?: return
-                            viewModel.unlockWithAuthenticatedBiometricCipher(authedCipher)
-                        }
-                    }
-                )
-                val promptInfo = BiometricPrompt.PromptInfo.Builder()
-                    .setTitle("Unlock PRIVATE VAULT")
-                    .setSubtitle("Authenticate to unwrap your encrypted vault key")
-                    .setNegativeButtonText("Use Master Password")
-                    .build()
-                prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))
-            } catch (_: Exception) {
-                // If biometric key was invalidated (e.g. new fingerprint enrolled), fall back safely to master password
-            }
-        }
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AuthenticatedVaultShell(
-    uiState: VaultUiState,
-    sessionState: VaultSessionManager.SessionState,
-    settingsState: com.example.data.AppPreferencesRepository.AppSettingsState,
-    otaState: OtaUpdateManager.OtaUiState,
-    clipboardRemainingSeconds: Int,
+fun PrivateVaultRootApp(
+    activity: FragmentActivity,
     viewModel: VaultViewModel,
-    onRequestBiometricEnrollment: () -> Unit,
-    onLaunchExternalIntent: (Intent) -> Unit
+    uiState: VaultUiState,
+    preferences: com.example.data.VaultAppPreferences,
+    otaState: OtaUpdateManager.OtaState,
+    clipboardCountdown: Int?
 ) {
-    var showOverflowMenu by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
-    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-        val isWideScreen = maxWidth >= 600.dp
+    // U01 & U02 Fix: Register SAF document launchers at the top-level root composable so they
+    // survive screen navigation, configuration changes, and file-picker lifecycle transitions!
+    val createBackupDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { destinationUri: Uri? ->
+        viewModel.completeExportToUri(destinationUri)
+    }
+
+    val openRestoreDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { sourceUri: Uri? ->
+        viewModel.onRestoreFileSelected(sourceUri)
+    }
+
+    val launchCreateBackupPicker: (String) -> Unit = { suggestedFileName ->
+        try {
+            createBackupDocumentLauncher.launch(suggestedFileName)
+        } catch (e: ActivityNotFoundException) {
+            viewModel.setErrorBanner("No document picker app found on this device to save the backup file.")
+        } catch (e: Exception) {
+            viewModel.setErrorBanner("Could not open Save As dialog: ${e.message}")
+        }
+    }
+
+    val launchOpenRestorePicker: () -> Unit = {
+        try {
+            openRestoreDocumentLauncher.launch(arrayOf("*/*"))
+        } catch (e: ActivityNotFoundException) {
+            viewModel.setErrorBanner("No file manager app found on this device to select a .pvault file.")
+        } catch (e: Exception) {
+            viewModel.setErrorBanner("Could not open file selector: ${e.message}")
+        }
+    }
+
+    // Global 3-option OTA Update Available dialog ("Update Now", "Update Later", "Remind Me Later")
+    val availableUpdateState = otaState as? OtaUpdateManager.OtaState.UpdateAvailable
+    if (availableUpdateState != null && availableUpdateState.showPromptDialog) {
+        OtaThreeOptionUpdateDialog(
+            manifest = availableUpdateState.manifest,
+            onUpdateNow = {
+                viewModel.onOtaUpdateNowSelected(availableUpdateState.manifest)
+            },
+            onUpdateLater = {
+                viewModel.onOtaUpdateLaterSelected()
+            },
+            onRemindMeLater = { reminderPolicy ->
+                viewModel.onOtaRemindMeLaterSelected(
+                    policy = reminderPolicy,
+                    versionCode = availableUpdateState.manifest.versionCode
+                )
+            }
+        )
+    }
+
+    // R14 Fix: If the user tapped "Update Now" while the vault is locked, show a locked-safe
+    // progress/verification/install dialog so they can see progress and launch the installer
+    // without unlocking!
+    val isLocked = uiState.sessionState !is VaultSessionManager.SessionState.Unlocked
+    if (isLocked) {
+        LockedOtaStatusDialogIfActive(
+            otaState = otaState,
+            onInstallVerifiedApk = { apkFile ->
+                try {
+                    context.startActivity(viewModel.otaUpdateManager.buildInstallVerifiedApkIntent(apkFile))
+                } catch (e: Exception) {
+                    viewModel.setErrorBanner("Could not launch package installer: ${e.message}")
+                }
+            },
+            onOpenUnknownSourcesSettings = {
+                try {
+                    context.startActivity(viewModel.otaUpdateManager.buildManageUnknownAppSourcesIntent())
+                } catch (e: Exception) {
+                    viewModel.setErrorBanner("Could not open Unknown App Sources settings: ${e.message}")
+                }
+            },
+            onRetryDownload = { manifest ->
+                viewModel.onOtaUpdateNowSelected(manifest)
+            },
+            onDismissError = {
+                viewModel.otaUpdateManager.dismissUpdatePrompt()
+            }
+        )
+    }
+
+    if (uiState.isLoading) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularProgressIndicator()
+        }
+        return
+    }
+
+    if (!uiState.isVaultProvisioned) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+        ) {
+            StatusBannerStrip(
+                statusMessage = uiState.statusBannerMessage,
+                errorMessage = uiState.errorBannerMessage,
+                clipboardCountdown = clipboardCountdown,
+                onDismiss = viewModel::clearBanners
+            )
+            SetupVaultScreen(
+                isBusy = uiState.isBusy,
+                onCreateVault = { realPass, confirmReal, enableDecoy, decoyPass, confirmDecoy, seedSamples ->
+                    viewModel.setupNewVault(
+                        realPassword = realPass,
+                        confirmRealPassword = confirmReal,
+                        enableDecoy = enableDecoy,
+                        decoyPassword = decoyPass,
+                        confirmDecoyPassword = confirmDecoy,
+                        seedStarterSamples = seedSamples
+                    )
+                }
+            )
+        }
+        return
+    }
+
+    val unlockedSession = uiState.sessionState as? VaultSessionManager.SessionState.Unlocked
+    if (unlockedSession == null) {
+        val biometricHardwareAvailable = remember(context) {
+            BiometricManager.from(context).canAuthenticate(
+                BiometricManager.Authenticators.BIOMETRIC_STRONG
+            ) == BiometricManager.BIOMETRIC_SUCCESS
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.background)
+        ) {
+            StatusBannerStrip(
+                statusMessage = uiState.statusBannerMessage,
+                errorMessage = uiState.errorBannerMessage,
+                clipboardCountdown = clipboardCountdown,
+                onDismiss = viewModel::clearBanners
+            )
+            UnlockVaultScreen(
+                isBusy = uiState.isBusy,
+                isBiometricAvailable = uiState.isBiometricEnrolled && biometricHardwareAvailable,
+                failedAttempts = uiState.failedUnlockAttempts,
+                cooldownRemainingMs = uiState.unlockCooldownRemainingMs,
+                lastKdfDurationMs = uiState.lastUnlockKdfDurationMs,
+                onUnlockWithPassword = viewModel::unlockWithPassword,
+                onRequestBiometricUnlock = {
+                    scope.launch {
+                        val cipher = viewModel.vaultRepository.getCipherForBiometricUnlock()
+                        if (cipher != null) {
+                            launchBiometricPrompt(
+                                activity = activity,
+                                title = "Unlock PRIVATE VAULT",
+                                subtitle = "Verify your biometric credential to unwrap the vault key",
+                                cipher = cipher,
+                                onAuthenticated = { authCipher ->
+                                    viewModel.completeBiometricUnlock(authCipher)
+                                },
+                                onError = { errMsg ->
+                                    viewModel.setErrorBanner(errMsg)
+                                }
+                            )
+                        } else {
+                            viewModel.handleInvalidatedBiometricKey()
+                        }
+                    }
+                }
+            )
+        }
+        return
+    }
+
+    // Active Unlocked Vault Shell
+    var topMenuExpanded by remember { mutableStateOf(false) }
+
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        val isWideLayout = maxWidth >= 640.dp
 
         Scaffold(
-            contentWindowInsets = WindowInsets.safeDrawing,
+            modifier = Modifier.fillMaxSize(),
+            containerColor = MaterialTheme.colorScheme.background,
+            contentWindowInsets = WindowInsets.systemBars,
             topBar = {
                 Column {
                     TopAppBar(
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.surface
-                        ),
                         title = {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -315,17 +447,25 @@ fun AuthenticatedVaultShell(
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.primary
                                 )
-                                Text(
-                                    text = "PRIVATE VAULT",
-                                    style = MaterialTheme.typography.titleLarge
-                                )
+                                Column {
+                                    Text(
+                                        text = "PRIVATE VAULT",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        text = "AES-256-GCM • Offline Encrypted",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         },
                         actions = {
-                            // Visible Instant Lock Action (Section 05 & 13)
+                            // Immediate One-Tap Lock Button
                             IconButton(
-                                onClick = viewModel::lockVaultNow,
-                                modifier = Modifier.testTag("top_bar_lock_button")
+                                onClick = { viewModel.lockVaultNow("Vault locked.") },
+                                modifier = Modifier.testTag("top_lock_vault_button")
                             ) {
                                 Icon(
                                     imageVector = Icons.Filled.Lock,
@@ -336,247 +476,250 @@ fun AuthenticatedVaultShell(
 
                             Box {
                                 IconButton(
-                                    onClick = { showOverflowMenu = true },
-                                    modifier = Modifier.testTag("top_bar_overflow_menu_button")
+                                    onClick = { topMenuExpanded = true },
+                                    modifier = Modifier.testTag("top_overflow_menu_button")
                                 ) {
                                     Icon(
                                         imageVector = Icons.Filled.MoreVert,
-                                        contentDescription = "More tools & settings"
+                                        contentDescription = "Vault Menu"
                                     )
                                 }
 
                                 DropdownMenu(
-                                    expanded = showOverflowMenu,
-                                    onDismissRequest = { showOverflowMenu = false }
+                                    expanded = topMenuExpanded,
+                                    onDismissRequest = { topMenuExpanded = false }
                                 ) {
                                     DropdownMenuItem(
-                                        text = { Text("Backup & Restore") },
+                                        text = { Text("Backup & Restore (.pvault)") },
                                         leadingIcon = {
-                                            Icon(imageVector = Icons.Filled.Backup, contentDescription = null)
+                                            Icon(Icons.Filled.SaveAlt, contentDescription = null)
                                         },
                                         onClick = {
-                                            showOverflowMenu = false
+                                            topMenuExpanded = false
                                             viewModel.openSecondaryDestination(SecondaryDestination.BACKUP_RESTORE)
                                         },
                                         modifier = Modifier.testTag("menu_backup_restore")
                                     )
                                     DropdownMenuItem(
-                                        text = { Text("Security & Settings") },
+                                        text = { Text("Security & Vault Settings") },
                                         leadingIcon = {
-                                            Icon(imageVector = Icons.Filled.Security, contentDescription = null)
+                                            Icon(Icons.Filled.Settings, contentDescription = null)
                                         },
                                         onClick = {
-                                            showOverflowMenu = false
-                                            viewModel.openSecondaryDestination(SecondaryDestination.SECURITY_DECOY)
+                                            topMenuExpanded = false
+                                            viewModel.openSecondaryDestination(SecondaryDestination.SECURITY_SETTINGS)
                                         },
                                         modifier = Modifier.testTag("menu_security_settings")
                                     )
                                     DropdownMenuItem(
                                         text = { Text("Updates (OTA)") },
                                         leadingIcon = {
-                                            Icon(imageVector = Icons.Filled.SystemUpdate, contentDescription = null)
+                                            Icon(Icons.Filled.SystemUpdate, contentDescription = null)
                                         },
                                         onClick = {
-                                            showOverflowMenu = false
-                                            viewModel.openSecondaryDestination(SecondaryDestination.UPDATES)
+                                            topMenuExpanded = false
+                                            viewModel.openSecondaryDestination(SecondaryDestination.OTA_UPDATES)
                                         },
                                         modifier = Modifier.testTag("menu_ota_updates")
                                     )
                                     DropdownMenuItem(
-                                        text = { Text("About PRIVATE VAULT") },
+                                        text = { Text("About & Credits") },
                                         leadingIcon = {
-                                            Icon(imageVector = Icons.Filled.Info, contentDescription = null)
+                                            Icon(Icons.Filled.Info, contentDescription = null)
                                         },
                                         onClick = {
-                                            showOverflowMenu = false
-                                            viewModel.openSecondaryDestination(SecondaryDestination.ABOUT)
+                                            topMenuExpanded = false
+                                            viewModel.openSecondaryDestination(SecondaryDestination.ABOUT_CREDITS)
                                         },
-                                        modifier = Modifier.testTag("menu_about")
+                                        modifier = Modifier.testTag("menu_about_credits")
                                     )
                                 }
                             }
-                        }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
                     )
 
-                    // Sensitive Clipboard Countdown Banner (never displays the secret itself - Section 16)
-                    if (clipboardRemainingSeconds > 0) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.secondaryContainer,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Secret copied (marked sensitive) • Auto-clearing in ${clipboardRemainingSeconds}s",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = JetBrainsMonoFontFamily,
-                                    color = MaterialTheme.colorScheme.onSecondaryContainer
-                                )
-                            }
-                        }
-                    }
+                    StatusBannerStrip(
+                        statusMessage = uiState.statusBannerMessage,
+                        errorMessage = uiState.errorBannerMessage,
+                        clipboardCountdown = clipboardCountdown,
+                        onDismiss = viewModel::clearBanners
+                    )
                 }
             },
             bottomBar = {
-                if (!isWideScreen && uiState.secondaryDestination == SecondaryDestination.NONE) {
+                if (!isWideLayout && uiState.secondaryDestination == SecondaryDestination.NONE) {
                     NavigationBar {
                         NavigationBarItem(
-                            selected = uiState.selectedTab == PrimaryVaultTab.NOTES,
-                            onClick = { viewModel.selectPrimaryTab(PrimaryVaultTab.NOTES) },
-                            icon = {
-                                Icon(
-                                    imageVector = if (uiState.selectedTab == PrimaryVaultTab.NOTES) {
-                                        Icons.Filled.Description
-                                    } else {
-                                        Icons.Outlined.Description
-                                    },
-                                    contentDescription = "Notes"
-                                )
-                            },
+                            selected = uiState.primaryTab == PrimaryTab.NOTES,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.NOTES) },
+                            icon = { Icon(Icons.Filled.Description, contentDescription = "Notes") },
                             label = { Text("Notes") },
                             modifier = Modifier.testTag("nav_tab_notes")
                         )
-
                         NavigationBarItem(
-                            selected = uiState.selectedTab == PrimaryVaultTab.PASSWORDS,
-                            onClick = { viewModel.selectPrimaryTab(PrimaryVaultTab.PASSWORDS) },
-                            icon = {
-                                Icon(
-                                    imageVector = if (uiState.selectedTab == PrimaryVaultTab.PASSWORDS) {
-                                        Icons.Filled.Key
-                                    } else {
-                                        Icons.Outlined.Key
-                                    },
-                                    contentDescription = "Passwords"
-                                )
-                            },
+                            selected = uiState.primaryTab == PrimaryTab.PASSWORDS,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.PASSWORDS) },
+                            icon = { Icon(Icons.Filled.Key, contentDescription = "Passwords") },
                             label = { Text("Passwords") },
                             modifier = Modifier.testTag("nav_tab_passwords")
                         )
-
                         NavigationBarItem(
-                            selected = uiState.selectedTab == PrimaryVaultTab.GENERATOR,
-                            onClick = { viewModel.selectPrimaryTab(PrimaryVaultTab.GENERATOR) },
-                            icon = {
-                                Icon(
-                                    imageVector = if (uiState.selectedTab == PrimaryVaultTab.GENERATOR) {
-                                        Icons.Filled.AutoFixHigh
-                                    } else {
-                                        Icons.Outlined.AutoFixHigh
-                                    },
-                                    contentDescription = "Generator"
-                                )
-                            },
+                            selected = uiState.primaryTab == PrimaryTab.GENERATOR,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.GENERATOR) },
+                            icon = { Icon(Icons.Filled.Refresh, contentDescription = "Generator") },
                             label = { Text("Generator") },
                             modifier = Modifier.testTag("nav_tab_generator")
                         )
-
                         NavigationBarItem(
-                            selected = uiState.selectedTab == PrimaryVaultTab.STRENGTH_CHECK,
-                            onClick = { viewModel.selectPrimaryTab(PrimaryVaultTab.STRENGTH_CHECK) },
-                            icon = {
-                                Icon(
-                                    imageVector = if (uiState.selectedTab == PrimaryVaultTab.STRENGTH_CHECK) {
-                                        Icons.Filled.Security
-                                    } else {
-                                        Icons.Outlined.Security
-                                    },
-                                    contentDescription = "Strength Check"
-                                )
-                            },
-                            label = { Text("Strength Check") },
+                            selected = uiState.primaryTab == PrimaryTab.STRENGTH_AUDIT,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.STRENGTH_AUDIT) },
+                            icon = { Icon(Icons.Filled.Security, contentDescription = "Strength") },
+                            label = { Text("Strength") },
                             modifier = Modifier.testTag("nav_tab_strength")
                         )
                     }
                 }
             }
         ) { innerPadding ->
+            // U03 Fix: Consume outer Scaffold's innerPadding so nested screens and IME padding
+            // never double-count system bar or keyboard insets!
             Row(
                 modifier = Modifier
                     .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
                     .padding(innerPadding)
+                    .consumeWindowInsets(innerPadding)
             ) {
-                if (isWideScreen && uiState.secondaryDestination == SecondaryDestination.NONE) {
-                    NavigationRail {
+                if (isWideLayout) {
+                    NavigationRail(
+                        modifier = Modifier.fillMaxHeight()
+                    ) {
                         NavigationRailItem(
-                            selected = uiState.selectedTab == PrimaryVaultTab.NOTES,
-                            onClick = { viewModel.selectPrimaryTab(PrimaryVaultTab.NOTES) },
+                            selected = uiState.secondaryDestination == SecondaryDestination.NONE &&
+                                uiState.primaryTab == PrimaryTab.NOTES,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.NOTES) },
                             icon = { Icon(Icons.Filled.Description, contentDescription = "Notes") },
                             label = { Text("Notes") }
                         )
                         NavigationRailItem(
-                            selected = uiState.selectedTab == PrimaryVaultTab.PASSWORDS,
-                            onClick = { viewModel.selectPrimaryTab(PrimaryVaultTab.PASSWORDS) },
+                            selected = uiState.secondaryDestination == SecondaryDestination.NONE &&
+                                uiState.primaryTab == PrimaryTab.PASSWORDS,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.PASSWORDS) },
                             icon = { Icon(Icons.Filled.Key, contentDescription = "Passwords") },
                             label = { Text("Passwords") }
                         )
                         NavigationRailItem(
-                            selected = uiState.selectedTab == PrimaryVaultTab.GENERATOR,
-                            onClick = { viewModel.selectPrimaryTab(PrimaryVaultTab.GENERATOR) },
-                            icon = { Icon(Icons.Filled.AutoFixHigh, contentDescription = "Generator") },
+                            selected = uiState.secondaryDestination == SecondaryDestination.NONE &&
+                                uiState.primaryTab == PrimaryTab.GENERATOR,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.GENERATOR) },
+                            icon = { Icon(Icons.Filled.Refresh, contentDescription = "Generator") },
                             label = { Text("Generator") }
                         )
                         NavigationRailItem(
-                            selected = uiState.selectedTab == PrimaryVaultTab.STRENGTH_CHECK,
-                            onClick = { viewModel.selectPrimaryTab(PrimaryVaultTab.STRENGTH_CHECK) },
-                            icon = { Icon(Icons.Filled.Security, contentDescription = "Strength Check") },
-                            label = { Text("Strength Check") }
+                            selected = uiState.secondaryDestination == SecondaryDestination.NONE &&
+                                uiState.primaryTab == PrimaryTab.STRENGTH_AUDIT,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.STRENGTH_AUDIT) },
+                            icon = { Icon(Icons.Filled.Security, contentDescription = "Strength") },
+                            label = { Text("Strength") }
                         )
                     }
                 }
 
-                Box(modifier = Modifier.fillMaxSize()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .background(MaterialTheme.colorScheme.background)
+                ) {
                     when (uiState.secondaryDestination) {
                         SecondaryDestination.BACKUP_RESTORE -> {
                             BackupAndRestoreScreen(
                                 uiState = uiState,
                                 viewModel = viewModel,
+                                onLaunchCreateBackupDocument = launchCreateBackupPicker,
+                                onLaunchOpenRestoreDocument = launchOpenRestorePicker,
                                 onBack = { viewModel.openSecondaryDestination(SecondaryDestination.NONE) }
                             )
                         }
 
-                        SecondaryDestination.SECURITY_DECOY -> {
+                        SecondaryDestination.SECURITY_SETTINGS -> {
                             SecurityAndDecoySettingsScreen(
                                 uiState = uiState,
-                                settingsState = settingsState,
-                                sessionState = sessionState,
+                                preferences = preferences,
                                 viewModel = viewModel,
-                                onRequestBiometricEnrollmentPrompt = onRequestBiometricEnrollment,
-                                onBack = { viewModel.openSecondaryDestination(SecondaryDestination.NONE) }
-                            )
-                        }
-
-                        SecondaryDestination.UPDATES -> {
-                            OtaUpdatesScreen(
-                                settingsState = settingsState,
-                                otaState = otaState,
-                                viewModel = viewModel,
-                                onLaunchInstallerIntent = onLaunchExternalIntent,
-                                onBack = { viewModel.openSecondaryDestination(SecondaryDestination.NONE) }
-                            )
-                        }
-
-                        SecondaryDestination.ABOUT -> {
-                            AboutVaultScreen(
-                                viewModel = viewModel,
-                                onNavigateToUpdates = {
-                                    viewModel.openSecondaryDestination(SecondaryDestination.UPDATES)
+                                onRequestBiometricEnrollment = {
+                                    scope.launch {
+                                        try {
+                                            val cipher = viewModel.vaultRepository.getCipherForBiometricEnrollment(
+                                                unlockedSession.sessionId
+                                            )
+                                            if (cipher != null) {
+                                                launchBiometricPrompt(
+                                                    activity = activity,
+                                                    title = "Enable Biometric Quick-Unlock",
+                                                    subtitle = "Confirm biometrics to wrap your vault key inside Android Keystore",
+                                                    cipher = cipher,
+                                                    onAuthenticated = { authCipher ->
+                                                        viewModel.completeBiometricEnrollment(authCipher)
+                                                    },
+                                                    onError = { errMsg ->
+                                                        viewModel.setErrorBanner(errMsg)
+                                                    }
+                                                )
+                                            } else {
+                                                viewModel.setErrorBanner(
+                                                    "Biometric quick-unlock is not available on this device or configuration."
+                                                )
+                                            }
+                                        } catch (e: Exception) {
+                                            viewModel.setErrorBanner(e.message ?: "Biometric enrollment unavailable.")
+                                        }
+                                    }
                                 },
                                 onBack = { viewModel.openSecondaryDestination(SecondaryDestination.NONE) }
                             )
                         }
 
+                        SecondaryDestination.OTA_UPDATES -> {
+                            OtaUpdatesScreen(
+                                otaState = otaState,
+                                preferences = preferences,
+                                viewModel = viewModel,
+                                onBack = { viewModel.openSecondaryDestination(SecondaryDestination.NONE) }
+                            )
+                        }
+
+                        SecondaryDestination.ABOUT_CREDITS -> {
+                            AboutVaultScreen(
+                                viewModel = viewModel,
+                                onBack = { viewModel.openSecondaryDestination(SecondaryDestination.NONE) }
+                            )
+                        }
+
                         SecondaryDestination.NONE -> {
-                            when (uiState.selectedTab) {
-                                PrimaryVaultTab.NOTES -> NotesTabScreen(uiState = uiState, viewModel = viewModel)
-                                PrimaryVaultTab.PASSWORDS -> PasswordsTabScreen(uiState = uiState, viewModel = viewModel)
-                                PrimaryVaultTab.GENERATOR -> GeneratorTabScreen(uiState = uiState, viewModel = viewModel)
-                                PrimaryVaultTab.STRENGTH_CHECK -> StrengthCheckTabScreen(uiState = uiState, viewModel = viewModel)
+                            when (uiState.primaryTab) {
+                                PrimaryTab.NOTES -> NotesTabScreen(
+                                    uiState = uiState,
+                                    viewModel = viewModel
+                                )
+
+                                PrimaryTab.PASSWORDS -> PasswordsTabScreen(
+                                    uiState = uiState,
+                                    viewModel = viewModel
+                                )
+
+                                PrimaryTab.GENERATOR -> GeneratorAndStrengthScreen(
+                                    uiState = uiState,
+                                    viewModel = viewModel
+                                )
+
+                                PrimaryTab.STRENGTH_AUDIT -> StrengthAuditTabScreen(
+                                    uiState = uiState,
+                                    viewModel = viewModel
+                                )
                             }
                         }
                     }
@@ -584,4 +727,271 @@ fun AuthenticatedVaultShell(
             }
         }
     }
+}
+
+@Composable
+private fun LockedOtaStatusDialogIfActive(
+    otaState: OtaUpdateManager.OtaState,
+    onInstallVerifiedApk: (java.io.File) -> Unit,
+    onOpenUnknownSourcesSettings: () -> Unit,
+    onRetryDownload: (OtaUpdateManager.UpdateManifest) -> Unit,
+    onDismissError: () -> Unit
+) {
+    when (otaState) {
+        is OtaUpdateManager.OtaState.Downloading -> {
+            val fraction = if (otaState.totalBytes > 0L) {
+                (otaState.bytesDownloaded.toFloat() / otaState.totalBytes.toFloat()).coerceIn(0f, 1f)
+            } else {
+                0f
+            }
+            AlertDialog(
+                onDismissRequest = {},
+                icon = { Icon(Icons.Filled.SystemUpdate, contentDescription = null) },
+                title = { Text("Downloading v${otaState.manifest.versionName}…") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        LinearProgressIndicator(
+                            progress = { fraction },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text(
+                            text = "${otaState.bytesDownloaded / 1024} KB / ${otaState.totalBytes / 1024} KB",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                },
+                confirmButton = {}
+            )
+        }
+
+        is OtaUpdateManager.OtaState.Verifying -> {
+            AlertDialog(
+                onDismissRequest = {},
+                icon = { CircularProgressIndicator(modifier = Modifier.size(28.dp)) },
+                title = { Text("Verifying APK Signature…") },
+                text = {
+                    Text(
+                        "Checking SHA-256 checksum, Android apksig signature scheme, and trusted signer match."
+                    )
+                },
+                confirmButton = {}
+            )
+        }
+
+        is OtaUpdateManager.OtaState.ReadyToInstall -> {
+            AlertDialog(
+                onDismissRequest = onDismissError,
+                icon = {
+                    Icon(
+                        Icons.Filled.CheckCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary
+                    )
+                },
+                title = { Text("Verified Update Ready") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            "Version ${otaState.manifest.versionName} passed SHA-256 and trusted signer verification."
+                        )
+                        Text(
+                            "Signer SHA-256: ${otaState.signerCertificateSha256.take(24)}…",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = { onInstallVerifiedApk(otaState.verifiedApkFile) },
+                        modifier = Modifier.testTag("locked_ota_install_button")
+                    ) {
+                        Text("Confirm Installation")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = onDismissError) {
+                        Text("Later")
+                    }
+                }
+            )
+        }
+
+        is OtaUpdateManager.OtaState.NeedsUnknownSourcesPermission -> {
+            AlertDialog(
+                onDismissRequest = onDismissError,
+                icon = { Icon(Icons.Filled.Build, contentDescription = null) },
+                title = { Text("Allow Update Installation") },
+                text = {
+                    Text(
+                        "The update APK is verified and ready. Enable 'Install unknown apps' for PRIVATE VAULT in Android Settings, then return here to install."
+                    )
+                },
+                confirmButton = {
+                    Button(onClick = onOpenUnknownSourcesSettings) {
+                        Text("Open Android Settings")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = onDismissError) {
+                        Text("Later")
+                    }
+                }
+            )
+        }
+
+        is OtaUpdateManager.OtaState.Error -> {
+            if (otaState.recoverableManifest != null) {
+                AlertDialog(
+                    onDismissRequest = onDismissError,
+                    icon = {
+                        Icon(
+                            Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    },
+                    title = { Text(otaState.title) },
+                    text = { Text(otaState.detail) },
+                    confirmButton = {
+                        OutlinedButton(onClick = { onRetryDownload(otaState.recoverableManifest) }) {
+                            Text("Retry Update")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = onDismissError) {
+                            Text("Close")
+                        }
+                    }
+                )
+            }
+        }
+
+        else -> {}
+    }
+}
+
+@Composable
+private fun StatusBannerStrip(
+    statusMessage: String?,
+    errorMessage: String?,
+    clipboardCountdown: Int?,
+    onDismiss: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        AnimatedVisibility(visible = clipboardCountdown != null) {
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Sensitive clipboard active • Auto-clearing in ${clipboardCountdown ?: 0}s",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+            }
+        }
+
+        AnimatedVisibility(visible = errorMessage != null || statusMessage != null) {
+            val isError = errorMessage != null
+            val containerColor = if (isError) {
+                MaterialTheme.colorScheme.errorContainer
+            } else {
+                MaterialTheme.colorScheme.primaryContainer
+            }
+            val contentColor = if (isError) {
+                MaterialTheme.colorScheme.onErrorContainer
+            } else {
+                MaterialTheme.colorScheme.onPrimaryContainer
+            }
+
+            Surface(
+                color = containerColor,
+                shape = RoundedCornerShape(0.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(if (isError) "error_banner" else "status_banner")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = errorMessage ?: statusMessage.orEmpty(),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = contentColor,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    IconButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Close,
+                            contentDescription = "Dismiss Banner",
+                            tint = contentColor,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun launchBiometricPrompt(
+    activity: FragmentActivity,
+    title: String,
+    subtitle: String,
+    cipher: Cipher,
+    onAuthenticated: (Cipher) -> Unit,
+    onError: (String) -> Unit
+) {
+    val executor = ContextCompat.getMainExecutor(activity)
+    val prompt = BiometricPrompt(
+        activity,
+        executor,
+        object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                super.onAuthenticationSucceeded(result)
+                val authenticatedCipher = result.cryptoObject?.cipher
+                if (authenticatedCipher != null) {
+                    onAuthenticated(authenticatedCipher)
+                } else {
+                    onError("Biometric cipher was not returned. Please unlock with your password.")
+                }
+            }
+
+            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                super.onAuthenticationError(errorCode, errString)
+                if (errorCode != BiometricPrompt.ERROR_USER_CANCELED &&
+                    errorCode != BiometricPrompt.ERROR_NEGATIVE_BUTTON &&
+                    errorCode != BiometricPrompt.ERROR_CANCELED
+                ) {
+                    onError("Biometric authentication unavailable: $errString")
+                }
+            }
+        }
+    )
+
+    val promptInfo = BiometricPrompt.PromptInfo.Builder()
+        .setTitle(title)
+        .setSubtitle(subtitle)
+        .setNegativeButtonText("Use Password")
+        .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
+        .build()
+
+    prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))
 }

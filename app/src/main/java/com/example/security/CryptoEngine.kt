@@ -37,7 +37,9 @@ object CryptoEngine {
     // Inner envelope binary layout:
     // [0..3]   4B Magic "PVE1"
     // [4]      1B slotRoleFlag (0x01 = configured active vault, 0x00 = unconfigured dummy slot)
-    // [5..7]   3B reservedFlags (0x00)
+    // [5]      1B decoyPolicyFlag (for Slot 0: 0x01 = Decoy Mode provisioned/active, 0x00 = Decoy disabled;
+    //                              for Slot 1: always 0x00)
+    // [6..7]   2B reservedFlags (0x00)
     // [8..15]  8B createdAtEpochMs
     // [16..23] 8B rotatedAtEpochMs
     // [24..55] 32B dekBytes
@@ -46,6 +48,9 @@ object CryptoEngine {
 
     const val SLOT_ROLE_DUMMY: Byte = 0x00
     const val SLOT_ROLE_ACTIVE: Byte = 0x01
+
+    const val DECOY_POLICY_DISABLED: Byte = 0x00
+    const val DECOY_POLICY_ENABLED: Byte = 0x01
 
     // Proposed Argon2id parameters (marked as PROPOSED until measured on device via KdfBenchmarkResult)
     const val PROPOSED_STANDARD_MEMORY_KB = 32768 // 32 MiB per slot (64 MiB sequential across 2 slots)
@@ -98,18 +103,21 @@ object CryptoEngine {
         val singleSlotDurationMs: Long,
         val twoSlotUnlockDurationMs: Long,
         val maxHeapMb: Long,
-        val usedHeapMbAfterRun: Long,
-        val measuredAtEpochMs: Long = System.currentTimeMillis()
+        val usedHeapMbAfterRun: Long
     )
 
     data class UnwrappedEnvelopePayload(
         val slotRoleFlag: Byte,
+        val decoyPolicyFlag: Byte = DECOY_POLICY_DISABLED,
         val createdAtEpochMs: Long,
         val rotatedAtEpochMs: Long,
         val dekBytes: ByteArray
     ) {
         val isActiveVault: Boolean
             get() = slotRoleFlag == SLOT_ROLE_ACTIVE
+
+        val isDecoyPolicyEnabled: Boolean
+            get() = decoyPolicyFlag == DECOY_POLICY_ENABLED
 
         fun wipe() {
             Arrays.fill(dekBytes, 0.toByte())
@@ -146,7 +154,7 @@ object CryptoEngine {
 
     /**
      * Derives a 256-bit key using Argon2id v1.3 via BouncyCastle.
-     * Validates KDF bounds prior to memory allocation.
+     * Validates KDF bounds prior to memory allocation and wipes UTF-8 password bytes in finally (R05).
      */
     fun deriveKeyArgon2id(
         passwordChars: CharArray,
@@ -158,6 +166,7 @@ object CryptoEngine {
 
         val passwordBytes = charArrayToUtf8Bytes(passwordChars)
         val output = ByteArray(DEK_BYTES)
+        var succeeded = false
         try {
             val builder = Argon2Parameters.Builder(Argon2Parameters.ARGON2_id)
                 .withVersion(Argon2Parameters.ARGON2_VERSION_13)
@@ -169,53 +178,62 @@ object CryptoEngine {
             val generator = Argon2BytesGenerator()
             generator.init(builder.build())
             generator.generateBytes(passwordBytes, output, 0, output.size)
+            succeeded = true
             return output
         } finally {
             Arrays.fill(passwordBytes, 0.toByte())
+            if (!succeeded) {
+                Arrays.fill(output, 0.toByte())
+            }
         }
     }
 
     /**
      * Benchmarks the current device's single-slot and two-slot Argon2id derivation latency
-     * and records memory telemetry.
+     * and records memory telemetry with guaranteed key wiping (R05, R07).
      */
     fun measureKdfBenchmark(params: KdfParams = KdfParams()): KdfBenchmarkResult {
         val samplePassword = "BenchmarkSamplePassphrase!2026".toCharArray()
         val salt0 = generateSalt()
         val salt1 = generateSalt()
+        var k0: ByteArray? = null
+        var k1: ByteArray? = null
+        try {
+            val startSingle = System.nanoTime()
+            k0 = deriveKeyArgon2id(samplePassword, salt0, params)
+            val singleMs = ((System.nanoTime() - startSingle) / 1_000_000L).coerceAtLeast(1L)
 
-        val startSingle = System.nanoTime()
-        val k0 = deriveKeyArgon2id(samplePassword, salt0, params)
-        val singleMs = ((System.nanoTime() - startSingle) / 1_000_000L).coerceAtLeast(1L)
+            val startSecond = System.nanoTime()
+            k1 = deriveKeyArgon2id(samplePassword, salt1, params)
+            val secondMs = ((System.nanoTime() - startSecond) / 1_000_000L).coerceAtLeast(1L)
 
-        val startSecond = System.nanoTime()
-        val k1 = deriveKeyArgon2id(samplePassword, salt1, params)
-        val secondMs = ((System.nanoTime() - startSecond) / 1_000_000L).coerceAtLeast(1L)
+            val runtime = Runtime.getRuntime()
+            val maxHeapMb = runtime.maxMemory() / (1024 * 1024)
+            val usedHeapMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
+            val modelName = try {
+                "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+            } catch (_: Throwable) {
+                "Local JVM / Android Runtime"
+            }
 
-        Arrays.fill(k0, 0.toByte())
-        Arrays.fill(k1, 0.toByte())
-        Arrays.fill(samplePassword, '\u0000')
-
-        val runtime = Runtime.getRuntime()
-        val maxHeapMb = runtime.maxMemory() / (1024 * 1024)
-        val usedHeapMb = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
-        val modelName = try {
-            "${Build.MANUFACTURER} ${Build.MODEL}".trim()
-        } catch (_: Throwable) {
-            "Local JVM / Android Runtime"
+            return KdfBenchmarkResult(
+                deviceModel = modelName.ifBlank { "Android Device" },
+                androidSdkInt = Build.VERSION.SDK_INT,
+                memoryKbPerSlot = params.memoryKb,
+                iterations = params.iterations,
+                parallelism = params.parallelism,
+                singleSlotDurationMs = singleMs,
+                twoSlotUnlockDurationMs = singleMs + secondMs,
+                maxHeapMb = maxHeapMb,
+                usedHeapMbAfterRun = usedHeapMb
+            )
+        } finally {
+            k0?.let { Arrays.fill(it, 0.toByte()) }
+            k1?.let { Arrays.fill(it, 0.toByte()) }
+            Arrays.fill(samplePassword, '\u0000')
+            Arrays.fill(salt0, 0.toByte())
+            Arrays.fill(salt1, 0.toByte())
         }
-
-        return KdfBenchmarkResult(
-            deviceModel = modelName.ifBlank { "Android Device" },
-            androidSdkInt = Build.VERSION.SDK_INT,
-            memoryKbPerSlot = params.memoryKb,
-            iterations = params.iterations,
-            parallelism = params.parallelism,
-            singleSlotDurationMs = singleMs,
-            twoSlotUnlockDurationMs = singleMs + secondMs,
-            maxHeapMb = maxHeapMb,
-            usedHeapMbAfterRun = usedHeapMb
-        )
     }
 
     /**
@@ -273,7 +291,7 @@ object CryptoEngine {
             buffer.put('E'.code.toByte())
             buffer.put('1'.code.toByte())
             buffer.put(payload.slotRoleFlag)
-            buffer.put(0.toByte())
+            buffer.put(payload.decoyPolicyFlag)
             buffer.put(0.toByte())
             buffer.put(0.toByte())
             buffer.putLong(payload.createdAtEpochMs)
@@ -336,7 +354,7 @@ object CryptoEngine {
                 return null
             }
             val roleFlag = buffer.get()
-            buffer.get() // reserved 1
+            val decoyPolicyFlag = buffer.get() // byte [5]: authenticated decoy policy state for Slot 0
             buffer.get() // reserved 2
             buffer.get() // reserved 3
             val createdAt = buffer.long
@@ -346,6 +364,7 @@ object CryptoEngine {
 
             return UnwrappedEnvelopePayload(
                 slotRoleFlag = roleFlag,
+                decoyPolicyFlag = decoyPolicyFlag,
                 createdAtEpochMs = createdAt,
                 rotatedAtEpochMs = rotatedAt,
                 dekBytes = dek

@@ -1,6 +1,5 @@
 package com.example.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -60,24 +59,12 @@ val VaultShapes = Shapes(
     extraLarge = RoundedCornerShape(28.dp)
 )
 
-enum class AppThemeMode {
-    SYSTEM,
-    DARK,
-    LIGHT
-}
-
 @Composable
 fun PrivateVaultTheme(
-    themeMode: AppThemeMode = AppThemeMode.DARK,
+    darkTheme: Boolean = true,
     content: @Composable () -> Unit
 ) {
-    val useDarkTheme = when (themeMode) {
-        AppThemeMode.SYSTEM -> isSystemInDarkTheme()
-        AppThemeMode.DARK -> true
-        AppThemeMode.LIGHT -> false
-    }
-
-    val colorScheme = if (useDarkTheme) DarkColorScheme else LightColorScheme
+    val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
 
     MaterialTheme(
         colorScheme = colorScheme,

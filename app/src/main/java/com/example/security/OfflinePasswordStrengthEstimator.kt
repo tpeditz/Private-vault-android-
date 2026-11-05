@@ -1,300 +1,379 @@
 package com.example.security
 
-import java.util.Locale
-import kotlin.math.ln
+import kotlin.math.log2
+import kotlin.math.roundToInt
 
 /**
- * 100% Offline Password Strength & Pattern Estimator (Section 10).
- *
- * - Never transmits passwords, hashes, or prefixes over the network.
- * - Evaluates common passwords, dictionary words, l33t-speak substitutions, keyboard walks,
- *   sequential runs, character repetition, date/year patterns, length, and active-vault reuse.
- * - Never marks a short patterned password as Strong merely because it contains an uppercase,
- *   digit, and symbol (e.g. `Pass123!` or `Qwerty1!`).
+ * 100% offline password strength analyzer and password/passphrase generator.
+ * Makes zero network calls and never transmits passwords to external APIs.
  */
 object OfflinePasswordStrengthEstimator {
 
-    enum class StrengthRating(val label: String, val scoreFloor: Int) {
-        VERY_WEAK("Very weak", 0),
-        WEAK("Weak", 1),
-        FAIR("Fair", 2),
-        STRONG("Strong", 3),
-        VERY_STRONG("Very strong", 4)
+    enum class StrengthBand(val label: String, val scoreFloor: Int) {
+        CRITICAL("Critical", 0),
+        WEAK("Weak", 25),
+        FAIR("Fair", 50),
+        STRONG("Strong", 75),
+        FORTRESS("Fortress", 90)
     }
 
     data class StrengthReport(
-        val rating: StrengthRating,
-        val scoreOutOf100: Int,
-        val effectiveEntropyBits: Double,
-        val detectedWeaknesses: List<String>,
+        val score: Int, // 0..100
+        val band: StrengthBand,
+        val estimatedEntropyBits: Int,
+        val length: Int,
+        val hasUppercase: Boolean,
+        val hasLowercase: Boolean,
+        val hasDigits: Boolean,
+        val hasSymbols: Boolean,
+        val warnings: List<String>,
         val suggestions: List<String>,
-        val reusedServiceNames: List<String>,
-        val offlineDisclaimer: String = "Offline estimate only: This analysis runs 100% locally on your device. Because PRIVATE VAULT never connects to online breach services, it cannot check if a password was leaked in an external website breach."
+        val isReusedInVault: Boolean = false
     )
 
-    // Bundled high-risk common passwords, stems, and dictionary roots (permissively curated offline set)
+    data class GeneratorConfig(
+        val length: Int = 20,
+        val includeUppercase: Boolean = true,
+        val includeLowercase: Boolean = true,
+        val includeDigits: Boolean = true,
+        val includeSymbols: Boolean = true,
+        val excludeAmbiguous: Boolean = true
+    )
+
+    private const val UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    private const val LOWER = "abcdefghijklmnopqrstuvwxyz"
+    private const val DIGITS = "0123456789"
+    private const val SYMBOLS = "!@#$%^&*()-_=+[]{};:,.<>?"
+    private const val AMBIGUOUS = "Il1O0|"
+
+    // Curated offline dictionary of common weak passwords, keyboard walks, and frequent stems (R19: fixed "maverick")
     private val COMMON_PASSWORDS_AND_STEMS = setOf(
-        "password", "passw0rd", "p@ssword", "p@ssw0rd", "qwerty", "qwertyuiop",
-        "123456", "12345678", "123456789", "1234567890", "admin", "administrator",
-        "welcome", "letmein", "monkey", "dragon", "baseball", "football", "superman",
-        "batman", "trustno1", "iloveyou", "sunshine", "princess", "starwars", "master",
-        "shadow", "ashley", "michael", "charlie", "andrew", "thomas", "robert", "daniel",
-        "jessica", "jennifer", "computer", "internet", "secret", "private", "vault",
-        "security", "freedom", "whatever", "nothing", "zaq12wsx", "1q2w3e4r", "1qaz2wsx",
-        "abcd1234", "pakistan", "india", "london", "america", "chelsea", "arsenal",
-        "liverpool", "barcelona", "real", "madrid", "loveyou", "forever", "summer",
-        "winter", "autumn", "spring", "january", "february", "august", "october",
-        "november", "december", "monday", "tuesday", "friday", "saturday", "sunday",
-        "company", "service", "account", "banking", "wallet", "crypto", "bitcoin",
-        "pokemon", "naruto", "matrix", "averick", "mustang", "ferrari", "corvette",
-        "harley", "ranger", "hunter", "killer", "buster", "pepper", "ginger", "cookie",
-        "peanut", "orange", "banana", "coffee", "cheese", "access", "system", "server"
+        "password", "123456", "12345678", "123456789", "qwerty", "qwertyuiop",
+        "asdfgh", "zxcvbn", "letmein", "welcome", "admin", "iloveyou", "monkey",
+        "dragon", "baseball", "football", "shadow", "master", "sunshine", "superman",
+        "trustno1", "passw0rd", "secret", "private", "vault", "india", "mumbai",
+        "delhi", "krishna", "shiva", "ganesh", "google", "android", "samsung",
+        "batman", "charlie", "donald", "mustang", "access", "freedom", "whatever",
+        "abc123", "111111", "000000", "654321", "987654321", "maverick", "loveyou"
     )
 
     private val KEYBOARD_ROWS = listOf(
-        "1234567890-=",
-        "qwertyuiop[]",
-        "asdfghjkl;'",
-        "zxcvbnm,./",
-        "0987654321",
-        "poiuytrewq",
-        "lkjhgfdsa",
-        "mnbvcxz"
+        "1234567890",
+        "qwertyuiop",
+        "asdfghjkl",
+        "zxcvbnm"
     )
 
-    private val LEET_MAP = mapOf(
-        '@' to 'a',
-        '4' to 'a',
-        '3' to 'e',
-        '1' to 'i',
-        '!' to 'i',
-        '0' to 'o',
-        '$' to 's',
-        '5' to 's',
-        '7' to 't',
-        '+' to 't'
+    private val EFF_PASSPHRASE_WORDS = listOf(
+        "amber", "anchor", "apollo", "arctic", "arrow", "atlas", "aurora", "avalon",
+        "bamboo", "barium", "beacon", "binary", "bison", "blizzard", "bonsai", "breeze",
+        "canyon", "carbon", "cascade", "cedar", "celestial", "chisel", "cipher", "citadel",
+        "cobalt", "comet", "compass", "condor", "coral", "cosmos", "crimson", "crystal",
+        "cyclone", "dagger", "delta", "desert", "diamond", "dolphin", "dynamo", "eclipse",
+        "emerald", "ember", "enigma", "equinox", "estuary", "everest", "falcon", "fjord",
+        "flint", "forest", "fortress", "fossil", "fusion", "galaxy", "garnet", "gazelle",
+        "geyser", "glacier", "granite", "gravity", "griffin", "harbor", "harvest", "helios",
+        "horizon", "hunter", "iceberg", "indigo", "infinity", "ion", "island", "ivory",
+        "jasper", "javelin", "juniper", "karma", "kestrel", "krypton", "lagoon", "lantern",
+        "LAUREL".lowercase(), "legacy", "legend", "leopard", "liberty", "lightning", "lotus", "lunar",
+        "magnet", "mammoth", "mantis", "marble", "matrix", "meadow", "mercury", "meteor",
+        "mirage", "monarch", "monolith", "monsoon", "mosaic", "nebula", "nectar", "neptune",
+        "nexus", "nimbus", "nomad", "nova", "obsidian", "odyssey", "omega", "onyx",
+        "opal", "orbit", "orchid", "orion", "osprey", "oxygen", "paladin", "panther",
+        "paradox", "pegasus", "pendulum", "phoenix", "pioneer", "planet", "platinum", "polaris",
+        "prism", "pulsar", "pyramid", "quantum", "quartz", "quasar", "quiver", "radon",
+        "raptor", "avenue", "redwood", "relic", "ridge", "ripple", "river", "ruby",
+        "saffron", "sahara", "sapphire", "saturn", "savanna", "scarlet", "scepter", "sequoia",
+        "serenity", "shadow", "sierra", "silicon", "silver", "solstice", "sonnet", "spark",
+        "spectrum", "sphinx", "spiral", "spruce", "starlight", "stellar", "stratus", "summit",
+        "sundial", "supernova", "tempest", "terra", "thistle", "thunder", "titanium", "topaz",
+        "torrent", "trident", "tundra", "twilight", "typhoon", "umbra", "utopia", "valkyrie",
+        "valley", "vanguard", "velvet", "venture", "verdict", "vertex", "VORTEX".lowercase(), "voyager",
+        "warden", "whisper", "wildfire", "willow", "winter", "xenon", "yarrow", "zenith", "zephyr", "zircon"
     )
 
-    /**
-     * Evaluates a password completely offline.
-     *
-     * @param password The candidate password to inspect.
-     * @param existingVaultCredentials Optional list of `(recordId, serviceName, password)` from the
-     *        currently unlocked vault ONLY (never across vaults) to detect local password reuse.
-     * @param excludeRecordId When editing an existing credential, its own recordId so it does not
-     *        trigger a self-reuse warning.
-     */
     fun evaluate(
         password: String,
-        existingVaultCredentials: List<Triple<String, String, String>> = emptyList(),
-        excludeRecordId: String? = null
+        existingVaultPasswords: Collection<String> = emptyList()
     ): StrengthReport {
         if (password.isEmpty()) {
             return StrengthReport(
-                rating = StrengthRating.VERY_WEAK,
-                scoreOutOf100 = 0,
-                effectiveEntropyBits = 0.0,
-                detectedWeaknesses = listOf("Password is empty."),
-                suggestions = listOf("Enter a password or use the Generator to create a 20+ character random password."),
-                reusedServiceNames = emptyList()
+                score = 0,
+                band = StrengthBand.CRITICAL,
+                estimatedEntropyBits = 0,
+                length = 0,
+                hasUppercase = false,
+                hasLowercase = false,
+                hasDigits = false,
+                hasSymbols = false,
+                warnings = listOf("Password is empty."),
+                suggestions = listOf("Use at least 14 characters or a 4-word passphrase."),
+                isReusedInVault = false
             )
         }
 
-        val weaknesses = mutableListOf<String>()
-        val suggestions = mutableListOf<String>()
-        val lower = password.lowercase(Locale.ROOT)
-        val deLeeted = normalizeLeet(lower)
-        val alphaOnly = deLeeted.filter { it in 'a'..'z' }
-
-        // 1. Check active-vault password reuse
-        val reusedServices = existingVaultCredentials
-            .asSequence()
-            .filter { (id, _, savedPassword) ->
-                id != excludeRecordId && savedPassword.isNotEmpty() && savedPassword == password
-            }
-            .map { (_, service, _) -> service.ifBlank { "Unnamed Credential" } }
-            .distinct()
-            .toList()
-
-        if (reusedServices.isNotEmpty()) {
-            weaknesses.add("Reused across ${reusedServices.size} saved account(s) in this vault (${reusedServices.take(3).joinToString(", ")}).")
-            suggestions.add("Generate a unique password for every account so one compromised service cannot unlock others.")
-        }
-
-        // 2. Character classes & base pool estimation
+        val length = password.length
         val hasUpper = password.any { it.isUpperCase() }
         val hasLower = password.any { it.isLowerCase() }
         val hasDigit = password.any { it.isDigit() }
         val hasSymbol = password.any { !it.isLetterOrDigit() }
 
         var poolSize = 0
-        if (hasLower) poolSize += 26
         if (hasUpper) poolSize += 26
+        if (hasLower) poolSize += 26
         if (hasDigit) poolSize += 10
-        if (hasSymbol) poolSize += 30
+        if (hasSymbol) poolSize += 32
+        if (poolSize == 0) poolSize = 26
 
-        val uniqueChars = password.toSet().size
-        val uniquenessRatio = uniqueChars.toDouble() / password.length.toDouble()
+        val rawEntropy = (length * log2(poolSize.toDouble())).roundToInt()
 
-        // Start with raw length * log2(pool), then penalize heavily for predictable patterns
-        var effectiveBits = password.length * (ln(poolSize.coerceAtLeast(2).toDouble()) / ln(2.0))
-        effectiveBits *= (0.45 + 0.55 * uniquenessRatio)
+        val warnings = mutableListOf<String>()
+        val suggestions = mutableListOf<String>()
+        var penaltyBits = 0
 
-        // 3. Length checks
-        when {
-            password.length < 8 -> {
-                weaknesses.add("Critically short (${password.length} characters); vulnerable to rapid brute-force guessing.")
-                suggestions.add("Increase length to at least 16–20 characters.")
-                effectiveBits = effectiveBits.coerceAtMost(22.0)
+        val normalized = password.lowercase()
+        val leetNormalized = normalized
+            .replace('0', 'o')
+            .replace('1', 'i')
+            .replace('3', 'e')
+            .replace('4', 'a')
+            .replace('5', 's')
+            .replace('7', 't')
+            .replace('@', 'a')
+            .replace('$', 's')
+
+        // 1. Check exact common password or embedded dictionary stems across ALL matches (R19)
+        if (normalized in COMMON_PASSWORDS_AND_STEMS || leetNormalized in COMMON_PASSWORDS_AND_STEMS) {
+            penaltyBits += 45
+            warnings.add("Matches a very common dictionary password or l33t substitution.")
+        } else {
+            val matchedStems = COMMON_PASSWORDS_AND_STEMS.filter { stem ->
+                stem.length >= 5 && (normalized.contains(stem) || leetNormalized.contains(stem))
             }
-            password.length < 12 -> {
-                weaknesses.add("Short length (${password.length} characters); modern offline attacks test short combinations quickly.")
-                suggestions.add("Use 16 to 20+ characters for strong long-term protection.")
+            if (matchedStems.isNotEmpty()) {
+                // Accumulate penalty across all distinct dictionary stems present
+                penaltyBits += (18 + (matchedStems.size - 1) * 12).coerceAtMost(48)
+                val preview = matchedStems.take(3).joinToString(", ") { "\"$it\"" }
+                warnings.add("Contains common dictionary stem(s) ($preview).")
             }
         }
 
-        // 4. Exact or stem dictionary / common password detection (including l33t substitutions)
-        val matchedStem = COMMON_PASSWORDS_AND_STEMS.firstOrNull { stem ->
-            stem.length >= 5 && (lower.contains(stem) || deLeeted.contains(stem) || alphaOnly == stem)
-        }
-        if (matchedStem != null) {
-            weaknesses.add("Contains a common dictionary word or password pattern (\"$matchedStem\"), even with symbol/number substitutions.")
-            suggestions.add("Avoid common words with predictable numbers or symbols at the end (like Pass123!). Use random characters or 4+ unrelated words.")
-            effectiveBits -= (matchedStem.length * 3.8)
-            if (alphaOnly == matchedStem && password.length <= matchedStem.length + 4) {
-                // Classic e.g. "Password1!" or "P@ssw0rd1"
-                effectiveBits = effectiveBits.coerceAtMost(26.0)
-            }
+        // 2. Check repeated character runs (e.g. "aaaa", "1111")
+        if (hasRepeatedRun(password, minRun = 3)) {
+            penaltyBits += 16
+            warnings.add("Contains repeated character sequences (e.g., 'aaa' or '111').")
         }
 
-        // 5. Keyboard walk detection
-        if (hasKeyboardWalk(lower)) {
-            weaknesses.add("Contains an adjacent keyboard pattern (such as qwerty, asdf, or 1234).")
-            suggestions.add("Remove keyboard-row sequences that password crackers test first.")
-            effectiveBits -= 18.0
+        // 3. Check sequential ascending/descending characters (e.g. "abcd", "1234")
+        if (hasSequentialRun(normalized, minRun = 4)) {
+            penaltyBits += 18
+            warnings.add("Contains sequential characters (e.g., 'abcd' or '1234').")
         }
 
-        // 6. Sequential alphabetical or numeric runs (e.g. abcd, 1234, 4321)
-        if (hasSequentialRun(lower, minRun = 4)) {
-            weaknesses.add("Contains a predictable sequential run of letters or numbers.")
-            suggestions.add("Break up sequential runs like '1234' or 'abcd'.")
-            effectiveBits -= 15.0
+        // 4. Check keyboard walks (e.g. "qwerty", "asdf")
+        if (hasKeyboardWalk(normalized, minRun = 4)) {
+            penaltyBits += 18
+            warnings.add("Contains adjacent keyboard row patterns (e.g., 'qwerty' or 'asdf').")
         }
 
-        // 7. Repeated characters (e.g. aaaa, 1111, !!)
-        if (hasRepeatedCharacters(password, minRepeat = 3)) {
-            weaknesses.add("Contains repeated identical characters in a row.")
-            suggestions.add("Replace repeated characters with random variety.")
-            effectiveBits -= 12.0
-        }
-
-        // 8. Predictable years or dates (1970..2039 or MMDDYYYY)
+        // 5. Check date / year patterns (19xx or 20xx)
         if (Regex("(19[5-9]\\d|20[0-3]\\d)").containsMatchIn(password)) {
-            weaknesses.add("Contains a recognizable calendar year (1950–2039).")
-            suggestions.add("Avoid birth years, anniversaries, or current years.")
-            effectiveBits -= 10.0
+            penaltyBits += 10
+            warnings.add("Contains a recognizable calendar year pattern.")
         }
 
-        // 9. Single character class check
-        val classCount = listOf(hasUpper, hasLower, hasDigit, hasSymbol).count { it }
-        if (classCount == 1 && password.length < 20) {
-            weaknesses.add("Uses only one type of character.")
-            suggestions.add("Mix uppercase, lowercase, digits, and symbols.")
-            effectiveBits -= 10.0
+        // 6. Check low unique character ratio
+        val uniqueRatio = password.toSet().size.toDouble() / length.toDouble()
+        if (length >= 8 && uniqueRatio < 0.45) {
+            penaltyBits += 15
+            warnings.add("Low character variety (${password.toSet().size} unique characters).")
         }
 
-        // 10. Reuse penalty
-        if (reusedServices.isNotEmpty()) {
-            effectiveBits = effectiveBits.coerceAtMost(35.0)
+        // 7. Check reuse inside active vault
+        val isReused = existingVaultPasswords.any { it.isNotEmpty() && it == password }
+        if (isReused) {
+            penaltyBits += 25
+            warnings.add("Reused password: this exact password is already used in your vault.")
+            suggestions.add("Generate a unique password for every account.")
         }
 
-        effectiveBits = effectiveBits.coerceIn(0.0, 140.0)
-
-        val rating = when {
-            password.length < 8 || effectiveBits < 28.0 -> StrengthRating.VERY_WEAK
-            password.length < 10 || effectiveBits < 45.0 -> StrengthRating.WEAK
-            effectiveBits < 65.0 -> StrengthRating.FAIR
-            effectiveBits < 88.0 -> StrengthRating.STRONG
-            else -> StrengthRating.VERY_STRONG
+        if (length < 12) {
+            warnings.add("Short length ($length characters). Modern offline cracking requires 14+ characters.")
+            suggestions.add("Increase length to at least 16 characters.")
         }
 
-        val scoreOutOf100 = ((effectiveBits / 100.0) * 100.0).toInt().coerceIn(
-            minimumValue = if (password.isNotEmpty()) 5 else 0,
-            maximumValue = 100
-        )
-
-        if (weaknesses.isEmpty()) {
-            weaknesses.add("No obvious offline dictionary words, keyboard walks, or vault reuse detected.")
+        val charClassesCount = listOf(hasUpper, hasLower, hasDigit, hasSymbol).count { it }
+        if (charClassesCount < 3 && length < 18) {
+            suggestions.add("Mix uppercase, lowercase, digits, and symbols—or use a 4+ word passphrase.")
         }
-        if (suggestions.isEmpty()) {
-            if (rating == StrengthRating.VERY_STRONG || rating == StrengthRating.STRONG) {
-                suggestions.add("Keep this password unique to a single service and store it only in your encrypted vault.")
-            } else {
-                suggestions.add("Use the built-in Generator to create a 20-character random password.")
-            }
+
+        val effectiveEntropy = (rawEntropy - penaltyBits).coerceAtLeast(0)
+        val rawScore = ((effectiveEntropy.toDouble() / 95.0) * 100.0).roundToInt()
+        val cappedScore = when {
+            length < 8 -> rawScore.coerceAtMost(24)
+            normalized in COMMON_PASSWORDS_AND_STEMS -> rawScore.coerceAtMost(15)
+            isReused -> rawScore.coerceAtMost(45)
+            else -> rawScore
+        }.coerceIn(0, 100)
+
+        val band = when {
+            cappedScore >= StrengthBand.FORTRESS.scoreFloor -> StrengthBand.FORTRESS
+            cappedScore >= StrengthBand.STRONG.scoreFloor -> StrengthBand.STRONG
+            cappedScore >= StrengthBand.FAIR.scoreFloor -> StrengthBand.FAIR
+            cappedScore >= StrengthBand.WEAK.scoreFloor -> StrengthBand.WEAK
+            else -> StrengthBand.CRITICAL
+        }
+
+        if (suggestions.isEmpty() && band != StrengthBand.FORTRESS) {
+            suggestions.add("Add 4–6 more random characters to reach Fortress grade.")
         }
 
         return StrengthReport(
-            rating = rating,
-            scoreOutOf100 = scoreOutOf100,
-            effectiveEntropyBits = effectiveBits,
-            detectedWeaknesses = weaknesses,
+            score = cappedScore,
+            band = band,
+            estimatedEntropyBits = effectiveEntropy,
+            length = length,
+            hasUppercase = hasUpper,
+            hasLowercase = hasLower,
+            hasDigits = hasDigit,
+            hasSymbols = hasSymbol,
+            warnings = warnings,
             suggestions = suggestions,
-            reusedServiceNames = reusedServices
+            isReusedInVault = isReused
         )
     }
 
-    private fun normalizeLeet(input: String): String {
-        val sb = StringBuilder(input.length)
-        for (c in input) {
-            sb.append(LEET_MAP[c] ?: c)
-        }
-        return sb.toString()
-    }
+    /**
+     * Generates a cryptographically random password using `SecureRandom`, guaranteeing at least
+     * one character from each enabled character class.
+     */
+    fun generatePassword(config: GeneratorConfig): String {
+        val safeLength = config.length.coerceIn(8, 64)
+        val pools = mutableListOf<String>()
 
-    private fun hasKeyboardWalk(lower: String): Boolean {
-        if (lower.length < 4) return false
-        for (row in KEYBOARD_ROWS) {
-            for (i in 0..(row.length - 4)) {
-                val slice = row.substring(i, i + 4)
-                if (lower.contains(slice)) return true
-            }
-        }
-        return false
-    }
-
-    private fun hasSequentialRun(lower: String, minRun: Int): Boolean {
-        if (lower.length < minRun) return false
-        var ascRun = 1
-        var descRun = 1
-        for (i in 1 until lower.length) {
-            val prev = lower[i - 1].code
-            val curr = lower[i].code
-            if (curr == prev + 1 && lower[i].isLetterOrDigit() && lower[i - 1].isLetterOrDigit()) {
-                ascRun++
-                if (ascRun >= minRun) return true
+        fun filterAmbiguous(input: String): String {
+            return if (config.excludeAmbiguous) {
+                input.filterNot { it in AMBIGUOUS }
             } else {
-                ascRun = 1
-            }
-            if (curr == prev - 1 && lower[i].isLetterOrDigit() && lower[i - 1].isLetterOrDigit()) {
-                descRun++
-                if (descRun >= minRun) return true
-            } else {
-                descRun = 1
+                input
             }
         }
-        return false
+
+        if (config.includeUppercase) pools.add(filterAmbiguous(UPPER))
+        if (config.includeLowercase) pools.add(filterAmbiguous(LOWER))
+        if (config.includeDigits) pools.add(filterAmbiguous(DIGITS))
+        if (config.includeSymbols) pools.add(filterAmbiguous(SYMBOLS))
+
+        if (pools.isEmpty()) {
+            pools.add(filterAmbiguous(LOWER))
+            pools.add(filterAmbiguous(DIGITS))
+        }
+
+        val combinedPool = pools.joinToString("")
+        val resultChars = CharArray(safeLength)
+        val randomBytes = CryptoEngine.randomBytes(safeLength * 2)
+
+        // Ensure at least one character from each selected character class
+        for (i in pools.indices) {
+            if (i < safeLength) {
+                val pool = pools[i]
+                val idx = (randomBytes[i].toInt() and 0xFF) % pool.length
+                resultChars[i] = pool[idx]
+            }
+        }
+
+        for (i in pools.size until safeLength) {
+            val idx = (randomBytes[i].toInt() and 0xFF) % combinedPool.length
+            resultChars[i] = combinedPool[idx]
+        }
+
+        // Fisher-Yates shuffle using remaining random bytes
+        for (i in safeLength - 1 downTo 1) {
+            val swapIdx = (randomBytes[safeLength + i].toInt() and 0xFF) % (i + 1)
+            val tmp = resultChars[i]
+            resultChars[i] = resultChars[swapIdx]
+            resultChars[swapIdx] = tmp
+        }
+
+        return String(resultChars)
     }
 
-    private fun hasRepeatedCharacters(input: String, minRepeat: Int): Boolean {
-        if (input.length < minRepeat) return false
-        var run = 1
+    /**
+     * Generates a high-entropy multi-word passphrase from the curated offline wordlist.
+     */
+    fun generatePassphrase(
+        wordCount: Int = 5,
+        separator: String = "-",
+        capitalizeWords: Boolean = true,
+        appendNumber: Boolean = true
+    ): String {
+        val count = wordCount.coerceIn(4, 8)
+        val randomBytes = CryptoEngine.randomBytes(count * 2 + 2)
+        val chosenWords = (0 until count).map { idx ->
+            val wordIndex =
+                (((randomBytes[idx * 2].toInt() and 0xFF) shl 8) or (randomBytes[idx * 2 + 1].toInt() and 0xFF)) %
+                    EFF_PASSPHRASE_WORDS.size
+            val rawWord = EFF_PASSPHRASE_WORDS[wordIndex]
+            if (capitalizeWords) {
+                rawWord.replaceFirstChar { it.uppercaseChar() }
+            } else {
+                rawWord
+            }
+        }
+        val base = chosenWords.joinToString(separator)
+        return if (appendNumber) {
+            val number = ((randomBytes[randomBytes.size - 2].toInt() and 0xFF) % 90) + 10
+            "$base$separator$number"
+        } else {
+            base
+        }
+    }
+
+    private fun hasRepeatedRun(input: String, minRun: Int): Boolean {
+        if (input.length < minRun) return false
+        var currentRun = 1
         for (i in 1 until input.length) {
             if (input[i] == input[i - 1]) {
-                run++
-                if (run >= minRepeat) return true
+                currentRun++
+                if (currentRun >= minRun) return true
             } else {
-                run = 1
+                currentRun = 1
+            }
+        }
+        return false
+    }
+
+    private fun hasSequentialRun(input: String, minRun: Int): Boolean {
+        if (input.length < minRun) return false
+        var ascRun = 1
+        var descRun = 1
+        for (i in 1 until input.length) {
+            val diff = input[i].code - input[i - 1].code
+            if (diff == 1) {
+                ascRun++
+                descRun = 1
+            } else if (diff == -1) {
+                descRun++
+                ascRun = 1
+            } else {
+                ascRun = 1
+                descRun = 1
+            }
+            if (ascRun >= minRun || descRun >= minRun) return true
+        }
+        return false
+    }
+
+    private fun hasKeyboardWalk(input: String, minRun: Int): Boolean {
+        if (input.length < minRun) return false
+        for (row in KEYBOARD_ROWS) {
+            val reversed = row.reversed()
+            for (start in 0..(row.length - minRun)) {
+                val sub = row.substring(start, start + minRun)
+                val revSub = reversed.substring(start, start + minRun)
+                if (input.contains(sub) || input.contains(revSub)) {
+                    return true
+                }
             }
         }
         return false

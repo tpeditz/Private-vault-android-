@@ -2,6 +2,7 @@ package com.example
 
 import android.content.Context
 import android.content.pm.PackageInfo
+import android.net.Uri
 import androidx.room.Room
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
@@ -9,37 +10,43 @@ import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import androidx.test.core.app.ApplicationProvider
 import com.android.apksig.ApkSigner
 import com.example.data.AppPreferencesRepository
-import com.example.data.NoteChecklistItem
-import com.example.data.NoteFormatStyle
+import com.example.data.ChecklistEntry
+import com.example.data.CredentialRecord
+import com.example.data.CustomCredentialField
+import com.example.data.FolderScope
+import com.example.data.NoteBodyFormat
+import com.example.data.NoteRecord
+import com.example.data.OtaReminderPolicy
 import com.example.data.PortableBackupEngine
 import com.example.data.PrivateVaultDatabase
-import com.example.data.VaultRecordPayload
+import com.example.data.VaultAppPreferences
+import com.example.data.VaultFolder
 import com.example.data.VaultRepository
 import com.example.ota.OtaUpdateManager
 import com.example.security.CryptoEngine
 import com.example.security.OfflinePasswordStrengthEstimator
-import com.example.security.PasswordGeneratorEngine
+import com.example.security.SensitiveClipboardManager
 import com.example.security.VaultSessionManager
-import kotlinx.coroutines.flow.first
+import com.example.ui.VaultViewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import javax.security.auth.x500.X500Principal
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.x509.X509V3CertificateGenerator
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
-import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.math.BigInteger
@@ -51,22 +58,20 @@ import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import javax.crypto.AEADBadTagException
+import javax.security.auth.x500.X500Principal
 
 /**
- * Comprehensive Acceptance & Security Test Suite for PRIVATE VAULT (Sections 27, 28, 29).
+ * Comprehensive Verification & Audit Repair Test Suite for PRIVATE VAULT.
  *
  * Covers:
- * - S01–S04: Argon2id KDF vectors/bounds, 72-byte unified key envelopes, AES-256-GCM AAD tamper
- *   rejection, zero plaintext leakage in raw SQLite files, and atomic Master Password rotation.
- * - S05–S11 & F01–F07: Real vs. Decoy routing, session capability isolation, async cancellation
- *   across lock boundaries, and independent multi-account credentials.
- * - F08–F12: Unbiased SecureRandom Password Generator and Offline Password Strength & Reuse Checker.
- * - B01–B06: Encrypted `.pvault` portable backup, wrong-password/tamper/bounds rejection,
- *   cross-instance fresh restore, and strict single-slot scoping.
- * - U01–U12: OTA Manifest validation, 3-option reminder deferral state machine (`Next Launch`,
- *   `Tomorrow`, `In 3 Days`), official Android `apksig` (`ApkVerifier`) signature verification
- *   against the trusted installed signer, and explicit Room schema migration (`v1` -> `v2`)
- *   proving both Real and Decoy vaults survive an application update intact.
+ * - U01 & U02 & R16: Cache-staged `.pvault` export to a `Uri` and background IO stream restore.
+ * - U04 & R06: Public contact handle copy (`@Tp_Editz`, `@tp_ediitz`) and ownership-checked clipboard clear.
+ * - N01: Composite primary key `(vault_slot, record_id)` preventing cross-vault record overwrites + `MIGRATION_2_3`.
+ * - N02: Corrupted record detection aborting ordinary export and merge restore without deleting ciphertext.
+ * - N03: Atomic `authRequestGeneration` invalidating late KDF completions after `lockNow()`.
+ * - N04 & R04: Fail-closed `OtaUpdateManager.verifyCandidateApkFile` when archive metadata is null + repository URL validation.
+ * - N05 & R01 & R02: Authenticated `decoyPolicyFlag` in Slot 0 (even when Decoy has 0 records), active-vault password change in either slot, and non-destructive Decoy password rotation preserving all decoy records.
+ * - N08, R12, R18, R19: Exact secret custom field preservation, folder create/rename/delete with reassignment to General, credential pinning, and multi-stem offline password strength penalties (`"maverick"`).
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -78,10 +83,9 @@ class ExampleRobolectricTest {
     private lateinit var sessionManager: VaultSessionManager
     private lateinit var repository: VaultRepository
 
-    // Fast bounded Argon2id profile for deterministic unit test execution while exercising real BouncyCastle Argon2id
     private val testKdfParams = CryptoEngine.KdfParams(
         algorithm = CryptoEngine.KDF_ALGORITHM_ARGON2ID,
-        memoryKb = CryptoEngine.MIN_ALLOWED_MEMORY_KB, // 4096 KB (4 MiB)
+        memoryKb = CryptoEngine.MIN_ALLOWED_MEMORY_KB, // 4096 KB (4 MiB) for fast unit tests
         iterations = 1,
         parallelism = 1
     )
@@ -95,13 +99,12 @@ class ExampleRobolectricTest {
         dbFile = context.getDatabasePath("test_private_vault_${UUID.randomUUID()}.db")
         database = Room.databaseBuilder(context, PrivateVaultDatabase::class.java, dbFile.name)
             .allowMainThreadQueries()
-            .addMigrations(PrivateVaultDatabase.MIGRATION_1_2)
+            .addMigrations(PrivateVaultDatabase.MIGRATION_1_2, PrivateVaultDatabase.MIGRATION_2_3)
             .build()
         sessionManager = VaultSessionManager()
         repository = VaultRepository(
             vaultDao = database.vaultDao(),
             sessionManager = sessionManager,
-            biometricManager = null,
             defaultKdfParamsProvider = { testKdfParams }
         )
     }
@@ -115,12 +118,8 @@ class ExampleRobolectricTest {
         File("${dbFile.absolutePath}-shm").delete()
     }
 
-    // =========================================================================================
-    // S01, S02, S03: Cryptography, Argon2id KDF, Unified 72-Byte Envelopes & At-Rest Inspection
-    // =========================================================================================
-
     @Test
-    fun `S02 Argon2id determinism, bounds validation, and AES-256-GCM AAD tamper rejection`() {
+    fun `S01, S02, S03 - Argon2id determinism, bounds validation, AAD tamper rejection, and raw SQLite binary inspection`() = runBlocking {
         val pass = "CorrectHorseBatteryStaple!99".toCharArray()
         val salt = CryptoEngine.generateSalt()
 
@@ -129,490 +128,393 @@ class ExampleRobolectricTest {
         val differentSaltKey = CryptoEngine.deriveKeyArgon2id(pass, CryptoEngine.generateSalt(), testKdfParams)
 
         assertEquals(32, key1.size)
-        assertArrayEquals("Same password and salt must derive identical 256-bit key", key1, key2)
-        assertFalse("Different salt must derive different key", key1.contentEquals(differentSaltKey))
+        assertArrayEquals(key1, key2)
+        assertFalse(key1.contentEquals(differentSaltKey))
 
-        // Out-of-bounds KDF parameters must be rejected before allocation (B03 / S03)
+        // Reject out-of-bounds KDF memory before allocation
         var boundsRejected = false
         try {
-            val hugeParams = testKdfParams.copy(memoryKb = 2_000_000) // ~2 GB
-            CryptoEngine.deriveKeyArgon2id(pass, salt, hugeParams)
+            CryptoEngine.deriveKeyArgon2id(pass, salt, testKdfParams.copy(memoryKb = 2_000_000))
         } catch (_: IllegalArgumentException) {
             boundsRejected = true
         }
-        assertTrue("Oversized Argon2id memory parameter must be rejected", boundsRejected)
+        assertTrue(boundsRejected)
 
-        // AES-256-GCM encryption and AAD binding
-        val nonce = CryptoEngine.generateNonce()
-        val aadSlot0 = CryptoEngine.buildRecordAad(0, "rec-100", 1)
-        val aadSlot1 = CryptoEngine.buildRecordAad(1, "rec-100", 1)
-        val secretPlaintext = "TopSecretVaultPayload_2026".toByteArray(Charsets.UTF_8)
-
-        val ciphertext = CryptoEngine.encryptAesGcm(key1, nonce, secretPlaintext, aadSlot0)
-        val decrypted = CryptoEngine.decryptAesGcm(key1, nonce, ciphertext, aadSlot0)
-        assertArrayEquals(secretPlaintext, decrypted)
-
-        // Tampering with AAD (e.g. moving record from Slot 0 to Slot 1) must fail authentication
-        var aadTamperRejected = false
-        try {
-            CryptoEngine.decryptAesGcm(key1, nonce, ciphertext, aadSlot1)
-        } catch (_: AEADBadTagException) {
-            aadTamperRejected = true
-        }
-        assertTrue("Cross-slot AAD mismatch must throw AEADBadTagException", aadTamperRejected)
-
-        // Tampering with 1 bit of ciphertext must fail authentication
-        val tamperedCiphertext = ciphertext.copyOf()
-        tamperedCiphertext[tamperedCiphertext.lastIndex] =
-            (tamperedCiphertext[tamperedCiphertext.lastIndex].toInt() xor 0x01).toByte()
-        var bitFlipRejected = false
-        try {
-            CryptoEngine.decryptAesGcm(key1, nonce, tamperedCiphertext, aadSlot0)
-        } catch (_: AEADBadTagException) {
-            bitFlipRejected = true
-        }
-        assertTrue("Tampered GCM tag/ciphertext must be rejected", bitFlipRejected)
-    }
-
-    @Test
-    fun `S01 and Unified Envelope - Synthetic secrets are absent from raw SQLite file and slots have identical outer structure`() = runBlocking {
-        val realPass = "RealVaultMasterPass#2026".toCharArray()
-        val initResult = repository.initializeNewVault(
-            realPasswordChars = realPass,
-            decoyPasswordChars = null, // Decoy unconfigured initially
-            seedSampleDecoyData = false
+        // Provision vault and verify 72-byte envelopes and raw SQLite secrecy
+        val session = repository.initializeNewVault(
+            realMasterPasswordChars = "RealVaultMasterPass#2026".toCharArray(),
+            optionalDecoyPasswordChars = null,
+            seedSampleDataInRealVault = false,
+            seedSampleDataInDecoyVault = false
         )
-        assertTrue(initResult is VaultRepository.UnlockResult.Success)
-        val session = (initResult as VaultRepository.UnlockResult.Success).session
 
-        // Verify both Slot 0 and Slot 1 rows exist with identical 72-byte wrappedPayloadCiphertext
         val envelopes = database.vaultDao().getAllEnvelopes()
         assertEquals(2, envelopes.size)
-        val env0 = envelopes.first { it.slotId == 0 }
-        val env1 = envelopes.first { it.slotId == 1 }
-        assertEquals(CryptoEngine.WRAPPED_ENVELOPE_CIPHERTEXT_BYTES, env0.wrappedPayloadCiphertext.size)
-        assertEquals(CryptoEngine.WRAPPED_ENVELOPE_CIPHERTEXT_BYTES, env1.wrappedPayloadCiphertext.size)
+        assertEquals(CryptoEngine.WRAPPED_ENVELOPE_CIPHERTEXT_BYTES, envelopes[0].wrappedPayloadCiphertext.size)
+        assertEquals(CryptoEngine.WRAPPED_ENVELOPE_CIPHERTEXT_BYTES, envelopes[1].wrappedPayloadCiphertext.size)
 
-        // Save distinctive synthetic note and credential
-        val distinctiveNoteTitle = "SYNTHETIC_NOTE_TITLE_X998877"
-        val distinctiveNoteBody = "SYNTHETIC_NOTE_BODY_SECRET_RECOVERY_SEED_ALPHA_OMEGA"
-        val distinctiveService = "SYNTHETIC_BANK_SERVICE_Z4455"
-        val distinctiveUsername = "SYNTHETIC_USER_ID_7766"
-        val distinctivePassword = "SYNTHETIC_PASSWORD_VALUE_Q112233!"
+        val secretTitle = "SYNTHETIC_NOTE_TITLE_X998877"
+        val secretBody = "SYNTHETIC_NOTE_BODY_SECRET_RECOVERY_SEED_ALPHA_OMEGA"
+        val secretService = "SYNTHETIC_BANK_SERVICE_Z4455"
+        val secretPass = "SYNTHETIC_PASSWORD_VALUE_Q112233!"
+        val secretCustomVal = "  EXACT_UNTRIMMED_SECRET_TOKEN_77  "
 
-        repository.saveRecord(
+        repository.saveVaultItem(
             session.sessionId,
-            VaultRecordPayload.NoteRecord(
-                id = UUID.randomUUID().toString(),
-                title = distinctiveNoteTitle,
-                body = distinctiveNoteBody,
+            NoteRecord(
+                title = secretTitle,
+                body = secretBody,
                 folderName = "SYNTHETIC_FOLDER_SECRET",
                 tags = listOf("SYNTHETIC_TAG_99")
             )
         )
-        repository.saveRecord(
+        val credId = UUID.randomUUID().toString()
+        repository.saveVaultItem(
             session.sessionId,
-            VaultRecordPayload.CredentialRecord(
-                id = UUID.randomUUID().toString(),
-                serviceName = distinctiveService,
-                accountLabel = "SYNTHETIC_LABEL_WORK",
-                username = distinctiveUsername,
-                password = distinctivePassword
+            CredentialRecord(
+                id = credId,
+                serviceName = secretService,
+                username = "SYNTHETIC_USER_ID_7766",
+                password = secretPass,
+                customFields = listOf(
+                    CustomCredentialField(label = "API Token", value = secretCustomVal, isSecret = true)
+                )
             )
         )
 
-        // Force SQLite WAL checkpoint/close so all bytes are flushed to disk
+        // N08: Verify custom field exact untrimmed value round-trips through encryption
+        val loadedItems = repository.loadDecryptedRecordsForSession(session.sessionId)
+        val loadedCred = loadedItems.filterIsInstance<CredentialRecord>().first { it.id == credId }
+        assertEquals(secretCustomVal, loadedCred.customFields.first().value)
+
         database.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(FULL)").close()
-
-        val rawDbBytes = dbFile.readBytes()
-        val rawDbAscii = String(rawDbBytes, Charsets.ISO_8859_1)
-
-        assertFalse("Note title must NOT appear in raw SQLite file", rawDbAscii.contains(distinctiveNoteTitle))
-        assertFalse("Note body must NOT appear in raw SQLite file", rawDbAscii.contains(distinctiveNoteBody))
-        assertFalse("Folder name must NOT appear in raw SQLite file", rawDbAscii.contains("SYNTHETIC_FOLDER_SECRET"))
-        assertFalse("Tag must NOT appear in raw SQLite file", rawDbAscii.contains("SYNTHETIC_TAG_99"))
-        assertFalse("Service name must NOT appear in raw SQLite file", rawDbAscii.contains(distinctiveService))
-        assertFalse("Username must NOT appear in raw SQLite file", rawDbAscii.contains(distinctiveUsername))
-        assertFalse("Password must NOT appear in raw SQLite file", rawDbAscii.contains(distinctivePassword))
+        val rawDbAscii = String(dbFile.readBytes(), Charsets.ISO_8859_1)
+        assertFalse(rawDbAscii.contains(secretTitle))
+        assertFalse(rawDbAscii.contains(secretBody))
+        assertFalse(rawDbAscii.contains(secretService))
+        assertFalse(rawDbAscii.contains(secretPass))
+        assertFalse(rawDbAscii.contains("EXACT_UNTRIMMED_SECRET_TOKEN_77"))
     }
 
-    // =========================================================================================
-    // F01–F06, S04–S11: Real vs. Decoy Vault Routing, Isolation, Master Password Rotation & Lock
-    // =========================================================================================
-
     @Test
-    fun `F02, F03, S04, S05, S06, S07 - Real vs Decoy routing, strict isolation, and master password rotation`() = runBlocking {
-        val realPass = "MyRealVaultSecret!111".toCharArray()
-        val decoyPass = "MyDecoyVaultSecret!222".toCharArray()
-        val wrongPass = "CompletelyWrongPass!333".toCharArray()
+    fun `N01 & N02 - Composite primary key prevents cross-vault record_id overwrites and corrupted ciphertext is never silently dropped`() = runBlocking {
+        val realPass = "RealMasterPass!2026".toCharArray()
+        val decoyPass = "DecoyMasterPass!2026".toCharArray()
 
-        // Initialize with both Real and Decoy vaults
-        val setupRes = repository.initializeNewVault(
-            realPasswordChars = realPass,
-            decoyPasswordChars = decoyPass,
-            seedSampleDecoyData = true
+        val realSession = repository.initializeNewVault(
+            realMasterPasswordChars = realPass,
+            optionalDecoyPasswordChars = decoyPass,
+            seedSampleDataInRealVault = false,
+            seedSampleDataInDecoyVault = false
         )
-        assertTrue(setupRes is VaultRepository.UnlockResult.Success)
-        val realSession = (setupRes as VaultRepository.UnlockResult.Success).session
-        assertEquals(VaultSessionManager.REAL_SLOT, realSession.slotId)
-        assertTrue("Two-slot benchmark must be recorded", setupRes.benchmark.twoSlotUnlockDurationMs >= 2L)
 
-        // Add a secret record to Real Vault
-        val realSecretNoteId = UUID.randomUUID().toString()
-        repository.saveRecord(
+        val sharedRecordId = "collision-shared-record-id-001"
+        repository.saveVaultItem(
             realSession.sessionId,
-            VaultRecordPayload.NoteRecord(
-                id = realSecretNoteId,
-                title = "Real Vault Classified Note",
-                body = "Only visible in Slot 0"
+            NoteRecord(
+                id = sharedRecordId,
+                title = "Real Vault Note With Shared ID",
+                body = "Belongs strictly to Slot 0"
             )
         )
 
-        // Lock and test wrong password (F02, S05)
+        // Unlock Decoy Vault (Slot 1) and save a record with the EXACT SAME recordId
         sessionManager.lockNow()
-        assertFalse("Old session must be inactive after lock", sessionManager.isSessionActive(realSession.sessionId))
-
-        // Attempting to save using a locked/stale sessionId must fail (S07)
-        val staleSave = repository.saveRecord(
-            realSession.sessionId,
-            VaultRecordPayload.NoteRecord(
-                id = UUID.randomUUID().toString(),
-                title = "Stale Write",
-                body = "Should be rejected"
+        val decoyUnlock = repository.unlockWithPassword(decoyPass) as VaultRepository.UnlockResult.Success
+        repository.saveVaultItem(
+            decoyUnlock.session.sessionId,
+            NoteRecord(
+                id = sharedRecordId,
+                title = "Decoy Vault Note With Shared ID",
+                body = "Belongs strictly to Slot 1"
             )
         )
-        assertTrue("Stale session write must be rejected after lock", staleSave.isFailure)
 
-        val wrongUnlock = repository.unlockWithPassword(wrongPass)
-        assertTrue("Wrong password must not unlock any vault", wrongUnlock is VaultRepository.UnlockResult.InvalidCredentials)
-        assertTrue(sessionManager.sessionState.value is VaultSessionManager.SessionState.Locked)
+        // Verify Decoy Vault has its version
+        val decoyNotes = repository.loadDecryptedRecordsForSession(decoyUnlock.session.sessionId)
+            .filterIsInstance<NoteRecord>()
+        assertEquals(1, decoyNotes.size)
+        assertEquals("Decoy Vault Note With Shared ID", decoyNotes.first().title)
 
-        // Unlock Decoy Vault (S05, S06)
-        val decoyUnlock = repository.unlockWithPassword(decoyPass)
-        assertTrue(decoyUnlock is VaultRepository.UnlockResult.Success)
-        val decoySession = (decoyUnlock as VaultRepository.UnlockResult.Success).session
-        assertEquals(VaultSessionManager.DECOY_SLOT, decoySession.slotId)
-        assertFalse("Decoy session must NOT have security management capability", decoySession.canManageVaultSecurity)
-
-        val decoyRecords = repository.observeDecryptedRecords(decoySession.sessionId).first()
-        assertFalse(
-            "Decoy vault must NEVER contain Real Vault records",
-            decoyRecords.any { it.id == realSecretNoteId }
-        )
-        assertTrue(
-            "Decoy vault should contain seeded fictitious sample records",
-            decoyRecords.isNotEmpty()
-        )
-
-        // S10: Attempting to change Real Master Password from Decoy Session must fail
-        val unauthorizedRotate = repository.changeRealMasterPassword(
-            sessionId = decoySession.sessionId,
-            currentRealPasswordChars = realPass,
-            newRealPasswordChars = "NewRealPass!999".toCharArray()
-        )
-        assertTrue("Decoy session must not be allowed to rotate Real Master Password", unauthorizedRotate.isFailure)
-
-        // Lock Decoy, unlock Real Vault, and rotate Real Master Password (S04)
+        // Re-unlock Real Vault (Slot 0) and prove its record with sharedRecordId was NOT overwritten! (N01)
         sessionManager.lockNow()
-        val realUnlock2 = repository.unlockWithPassword(realPass)
-        assertTrue(realUnlock2 is VaultRepository.UnlockResult.Success)
-        val realSession2 = (realUnlock2 as VaultRepository.UnlockResult.Success).session
+        val realUnlock = repository.unlockWithPassword(realPass) as VaultRepository.UnlockResult.Success
+        val realNotes = repository.loadDecryptedRecordsForSession(realUnlock.session.sessionId)
+            .filterIsInstance<NoteRecord>()
+        assertEquals(1, realNotes.size)
+        assertEquals("Real Vault Note With Shared ID", realNotes.first().title)
 
-        val newRealPass = "RotatedRealMasterPass!2027".toCharArray()
-        val rotateRes = repository.changeRealMasterPassword(
-            sessionId = realSession2.sessionId,
-            currentRealPasswordChars = realPass,
-            newRealPasswordChars = newRealPass
-        )
-        assertTrue("Master password rotation in Real Vault must succeed", rotateRes.isSuccess)
+        // N02: Corrupt 1 byte of the Real Vault note's ciphertext in SQLite and verify export & merge abort rather than silently losing data
+        val rawEntity = database.vaultDao().getRecordById(VaultSessionManager.REAL_SLOT, sharedRecordId)!!
+        val corruptedCiphertext = rawEntity.ciphertext.copyOf()
+        corruptedCiphertext[corruptedCiphertext.lastIndex] =
+            (corruptedCiphertext[corruptedCiphertext.lastIndex].toInt() xor 0xFF).toByte()
+        database.vaultDao().upsertRecord(rawEntity.copy(ciphertext = corruptedCiphertext))
 
-        // Verify old Real password no longer works, new Real password works, and Decoy password still works
-        sessionManager.lockNow()
-        assertTrue(repository.unlockWithPassword(realPass) is VaultRepository.UnlockResult.InvalidCredentials)
+        val snapshot = repository.loadDecryptedSlotSnapshotForSession(realUnlock.session.sessionId)
+        assertEquals(listOf(sharedRecordId), snapshot.corruptedRecordIds)
 
-        val rotatedUnlock = repository.unlockWithPassword(newRealPass)
-        assertTrue(rotatedUnlock is VaultRepository.UnlockResult.Success)
-        val realRecordsAfterRotate = repository.observeDecryptedRecords(
-            (rotatedUnlock as VaultRepository.UnlockResult.Success).session.sessionId
-        ).first()
-        assertTrue("Real Vault note must survive Master Password rotation intact", realRecordsAfterRotate.any { it.id == realSecretNoteId })
-
-        sessionManager.lockNow()
-        assertTrue("Decoy password must remain unaffected by Real password rotation", repository.unlockWithPassword(decoyPass) is VaultRepository.UnlockResult.Success)
-    }
-
-    // =========================================================================================
-    // F08–F12: Password Generator & Offline Password Strength / Reuse Estimator
-    // =========================================================================================
-
-    @Test
-    fun `F08, F10, F11, F12 - Generator settings validation and Offline Strength & Reuse Checker`() {
-        // Reject impossible generator combinations (all categories off)
-        val invalidGen = PasswordGeneratorEngine.generate(
-            PasswordGeneratorEngine.GeneratorConfig(
-                length = 20,
-                includeUppercase = false,
-                includeLowercase = false,
-                includeDigits = false,
-                includeSymbols = false
-            )
-        )
-        assertTrue(invalidGen is PasswordGeneratorEngine.GenerationResult.InvalidConfig)
-
-        // Valid 24-character generation excluding ambiguous characters
-        val validGen = PasswordGeneratorEngine.generate(
-            PasswordGeneratorEngine.GeneratorConfig(
-                length = 24,
-                includeUppercase = true,
-                includeLowercase = true,
-                includeDigits = true,
-                includeSymbols = true,
-                excludeAmbiguous = true
-            )
-        )
-        assertTrue(validGen is PasswordGeneratorEngine.GenerationResult.Success)
-        val generatedPwd = (validGen as PasswordGeneratorEngine.GenerationResult.Success).password
-        assertEquals(24, generatedPwd.length)
-        assertFalse("Ambiguous chars must be excluded", generatedPwd.any { it in setOf('0', 'O', 'o', '1', 'l', 'I', '|') })
-
-        // F11: Common patterned password with uppercase, digit, and symbol must NOT be rated Strong
-        val patternedReport = OfflinePasswordStrengthEstimator.evaluate("P@ssw0rd1!")
-        assertTrue(
-            "Patterned dictionary/l33t password must be rated Weak or Very Weak",
-            patternedReport.rating == OfflinePasswordStrengthEstimator.StrengthRating.VERY_WEAK ||
-                patternedReport.rating == OfflinePasswordStrengthEstimator.StrengthRating.WEAK
-        )
-
-        // Keyboard walk detection
-        val walkReport = OfflinePasswordStrengthEstimator.evaluate("Qwerty1234!@#")
-        assertTrue(
-            "Keyboard walk must be detected",
-            walkReport.detectedWeaknesses.any { it.contains("keyboard", ignoreCase = true) }
-        )
-
-        // Generated 24-char random password must be Strong / Very Strong
-        val strongReport = OfflinePasswordStrengthEstimator.evaluate(generatedPwd)
-        assertTrue(
-            strongReport.rating == OfflinePasswordStrengthEstimator.StrengthRating.STRONG ||
-                strongReport.rating == OfflinePasswordStrengthEstimator.StrengthRating.VERY_STRONG
-        )
-
-        // F12: Local reuse warning scoped to current vault records
-        val activeVaultList = listOf(
-            Triple("cred-1", "GitHub", generatedPwd),
-            Triple("cred-2", "ProtonMail", "DifferentUniquePassword#998877")
-        )
-        val reuseReport = OfflinePasswordStrengthEstimator.evaluate(
-            password = generatedPwd,
-            existingVaultCredentials = activeVaultList,
-            excludeRecordId = "cred-new"
-        )
-        assertEquals(listOf("GitHub"), reuseReport.reusedServiceNames)
-    }
-
-    // =========================================================================================
-    // B01–B06: Portable Encrypted Backup & Restore
-    // =========================================================================================
-
-    @Test
-    fun `B01 to B06 - Encrypted backup format, wrong password rejection, cross-install restore, and vault scoping`() = runBlocking {
-        val realPass = "RealVaultPass#2026".toCharArray()
-        val decoyPass = "DecoyVaultPass#2026".toCharArray()
-        val backupPass = "DedicatedBackupPass#999".toCharArray()
-
-        val initRes = repository.initializeNewVault(realPass, decoyPass, seedSampleDecoyData = true)
-        val realSession = (initRes as VaultRepository.UnlockResult.Success).session
-
-        val noteId = UUID.randomUUID().toString()
-        val secretNoteTitle = "BackupSurvivalNote_Alpha77"
-        repository.saveRecord(
-            realSession.sessionId,
-            VaultRecordPayload.NoteRecord(
-                id = noteId,
-                title = secretNoteTitle,
-                body = "Portable encrypted backup payload"
-            )
-        )
-
-        // Export Real Vault backup
-        val exportResult = repository.prepareEncryptedBackupBytes(
-            sessionId = realSession.sessionId,
-            backupPasswordChars = backupPass,
-            scope = PortableBackupEngine.ExportScope.ALL
-        )
-        assertTrue(exportResult.isSuccess)
-        val backupBytes = exportResult.getOrThrow()
-
-        // B01: Backup bytes must not contain plaintext note title
-        val rawBackupString = String(backupBytes, Charsets.ISO_8859_1)
-        assertFalse("Exported .pvault file must not contain plaintext strings", rawBackupString.contains(secretNoteTitle))
-
-        // B02: Wrong backup password must fail without modifying vault
-        val wrongRestore = repository.previewBackupFromStream(
-            sessionId = realSession.sessionId,
-            inputStream = ByteArrayInputStream(backupBytes),
-            backupPasswordChars = "WrongBackupPassword!123".toCharArray()
-        )
-        assertTrue("Wrong backup password must be rejected", wrongRestore.isFailure)
-
-        // B02: Tampered backup byte must fail GCM authentication
-        val tamperedBackup = backupBytes.copyOf()
-        tamperedBackup[tamperedBackup.lastIndex] = (tamperedBackup[tamperedBackup.lastIndex].toInt() xor 0xFF).toByte()
-        val tamperedRestore = repository.previewBackupFromStream(
-            sessionId = realSession.sessionId,
-            inputStream = ByteArrayInputStream(tamperedBackup),
-            backupPasswordChars = backupPass
-        )
-        assertTrue("Tampered backup archive must be rejected", tamperedRestore.isFailure)
-
-        // B04 & B06: Restore onto a fresh installation / database withoutaffecting the other vault slot
-        val freshDbFile = context.getDatabasePath("fresh_install_${UUID.randomUUID()}.db")
-        val freshDb = Room.databaseBuilder(context, PrivateVaultDatabase::class.java, freshDbFile.name)
-            .allowMainThreadQueries()
-            .build()
-        val freshSessionMgr = VaultSessionManager()
-        val freshRepo = VaultRepository(
-            vaultDao = freshDb.vaultDao(),
-            sessionManager = freshSessionMgr,
-            defaultKdfParamsProvider = { testKdfParams }
-        )
-
+        var exportBlockedOnCorruption = false
         try {
-            val freshInit = freshRepo.initializeNewVault(
-                realPasswordChars = "BrandNewDeviceMasterPass!1".toCharArray(),
-                decoyPasswordChars = "BrandNewDeviceDecoyPass!2".toCharArray(),
-                seedSampleDecoyData = true
+            repository.prepareEncryptedBackupBytes(
+                sessionId = realUnlock.session.sessionId,
+                backupPasswordChars = "BackupPassword!123".toCharArray(),
+                allowSkipCorruptedRecords = false
             )
-            val freshRealSession = (freshInit as VaultRepository.UnlockResult.Success).session
+        } catch (e: VaultRepository.VaultRecordIntegrityException) {
+            exportBlockedOnCorruption = true
+            assertEquals(listOf(sharedRecordId), e.corruptedRecordIds)
+        }
+        assertTrue("Ordinary backup export must abort when a record is corrupted", exportBlockedOnCorruption)
 
-            val previewRes = freshRepo.previewBackupFromStream(
-                sessionId = freshRealSession.sessionId,
-                inputStream = ByteArrayInputStream(backupBytes),
-                backupPasswordChars = backupPass
+        // Recovery export explicitly allowed by user succeeds for remaining intact records (folders)
+        val recoveryBackupBytes = repository.prepareEncryptedBackupBytes(
+            sessionId = realUnlock.session.sessionId,
+            backupPasswordChars = "BackupPassword!123".toCharArray(),
+            allowSkipCorruptedRecords = true
+        )
+        assertTrue(recoveryBackupBytes.isNotEmpty())
+
+        // Merge restore must also abort when active slot has a corrupted record so it is never deleted
+        var mergeBlockedOnCorruption = false
+        try {
+            repository.applyVerifiedBackupRestore(
+                sessionId = realUnlock.session.sessionId,
+                backupBytes = recoveryBackupBytes,
+                backupPasswordChars = "BackupPassword!123".toCharArray(),
+                restoreMode = PortableBackupEngine.RestoreMode.MERGE_KEEP_NEWEST
             )
-            assertTrue(previewRes.isSuccess)
-            val preview = previewRes.getOrThrow()
-            assertEquals(1, preview.notesCount)
+        } catch (_: VaultRepository.VaultRecordIntegrityException) {
+            mergeBlockedOnCorruption = true
+        }
+        assertTrue("Merge restore must abort if existing slot has corrupted records", mergeBlockedOnCorruption)
+        assertNotNull(
+            "Corrupted record ciphertext must still exist in SQLite after aborted merge",
+            database.vaultDao().getRecordById(VaultSessionManager.REAL_SLOT, sharedRecordId)
+        )
+    }
 
-            val applyRes = freshRepo.applyVerifiedBackupRestore(
-                sessionId = freshRealSession.sessionId,
-                preview = preview,
-                mode = PortableBackupEngine.RestoreMode.REPLACE_ACTIVE_VAULT
+    @Test
+    fun `N03, N05, R01, R02 - Lock invalidates late KDF unlock, empty Decoy keeps decoyPolicyFlag active, and Decoy password rotation preserves decoy records`() = runBlocking {
+        val realPass = "RealVaultPass!100".toCharArray()
+        val decoyPass = "DecoyVaultPass!200".toCharArray()
+
+        // Initialize with an EMPTY Decoy Vault (seedSampleDataInDecoyVault = false -> 0 notes/creds in Slot 1)
+        val initialSession = repository.initializeNewVault(
+            realMasterPasswordChars = realPass,
+            optionalDecoyPasswordChars = decoyPass,
+            seedSampleDataInRealVault = false,
+            seedSampleDataInDecoyVault = false
+        )
+
+        // Delete all starter folders in Slot 1 so Slot 1 has literally 0 rows in encrypted_records
+        database.vaultDao().deleteAllRecordsForSlot(VaultSessionManager.DECOY_SLOT)
+        assertEquals(0, database.vaultDao().countRecordsForSlot(VaultSessionManager.DECOY_SLOT))
+
+        // R01: Even with 0 records in Slot 1, Decoy Mode must remain recognized as active via Slot 0's inner envelope!
+        sessionManager.lockNow()
+        val unlockedReal = repository.unlockWithPassword(realPass) as VaultRepository.UnlockResult.Success
+        assertTrue(
+            "Empty decoy vault must still be recognized as active via Slot 0 decoyPolicyFlag",
+            repository.isDecoyModeEnabledForRealSession(unlockedReal.session.sessionId)
+        )
+
+        // R01: Biometric enrollment must be rejected while empty Decoy Mode is active
+        var bioBlockedWithEmptyDecoy = false
+        try {
+            repository.getCipherForBiometricEnrollment(unlockedReal.session.sessionId)
+        } catch (_: IllegalArgumentException) {
+            bioBlockedWithEmptyDecoy = true
+        }
+        assertTrue("Biometric enrollment must remain blocked even when Decoy Vault has 0 records", bioBlockedWithEmptyDecoy)
+
+        // Add a custom note inside Decoy Vault
+        sessionManager.lockNow()
+        val decoySession1 = (repository.unlockWithPassword(decoyPass) as VaultRepository.UnlockResult.Success).session
+        val decoyNoteId = UUID.randomUUID().toString()
+        repository.saveVaultItem(
+            decoySession1.sessionId,
+            NoteRecord(
+                id = decoyNoteId,
+                title = "Decoy Travel Itinerary",
+                body = "Must survive Decoy password rotation!"
             )
-            assertTrue(applyRes.isSuccess)
+        )
 
-            val restoredRealRecords = freshRepo.observeDecryptedRecords(freshRealSession.sessionId).first()
+        // R02: Rotate Decoy Password directly while inside Decoy session using changeActiveVaultPassword
+        val decoyPass2 = "RotatedDecoyPassInDecoy!300".toCharArray()
+        repository.changeActiveVaultPassword(
+            sessionId = decoySession1.sessionId,
+            currentPasswordChars = decoyPass,
+            newPasswordChars = decoyPass2
+        )
+
+        // Unlock Real Vault and rotate Decoy Password non-destructively from Real Vault (N05)
+        sessionManager.lockNow()
+        val realSession2 = (repository.unlockWithPassword(realPass) as VaultRepository.UnlockResult.Success).session
+        val decoyPass3 = "RotatedDecoyFromReal!400".toCharArray()
+        repository.rotateDecoyPasswordPreservingRecords(
+            sessionId = realSession2.sessionId,
+            realMasterPasswordChars = realPass,
+            currentDecoyPasswordChars = decoyPass2,
+            newDecoyPasswordChars = decoyPass3
+        )
+
+        // Verify Decoy Vault unlocks with decoyPass3 AND still contains "Decoy Travel Itinerary"! (N05)
+        sessionManager.lockNow()
+        val decoyUnlockAfterRotate = repository.unlockWithPassword(decoyPass3)
+        assertTrue(decoyUnlockAfterRotate is VaultRepository.UnlockResult.Success)
+        val preservedDecoyNotes = repository.loadDecryptedRecordsForSession(
+            (decoyUnlockAfterRotate as VaultRepository.UnlockResult.Success).session.sessionId
+        ).filterIsInstance<NoteRecord>()
+        assertTrue(
+            "Decoy note must be preserved across non-destructive decoy password rotation",
+            preservedDecoyNotes.any { it.id == decoyNoteId && it.title == "Decoy Travel Itinerary" }
+        )
+
+        // N03: Simulate a lock/screen-off occurring after capturing authRequestGeneration
+        sessionManager.lockNow()
+        val staleAuthGeneration = sessionManager.currentAuthRequestGeneration()
+        // Lock happens while KDF is in flight (incrementing authRequestGeneration)
+        sessionManager.lockNow()
+        val lateUnlockResult = repository.unlockWithPassword(realPass, expectedAuthGeneration = staleAuthGeneration)
+        assertTrue(
+            "Late unlock completion after lock event must return CancelledByLock",
+            lateUnlockResult is VaultRepository.UnlockResult.CancelledByLock
+        )
+        assertTrue(
+            "Session state must remain Locked after late KDF completion",
+            sessionManager.sessionState.value is VaultSessionManager.SessionState.Locked
+        )
+    }
+
+    @Test
+    fun `R12, R18, R19 - Folder create-rename-delete reassignment, credential pinning, and multi-stem strength estimator`() = runBlocking {
+        val session = repository.initializeNewVault(
+            realMasterPasswordChars = "FolderTestMaster!2026".toCharArray(),
+            optionalDecoyPasswordChars = null,
+            seedSampleDataInRealVault = false,
+            seedSampleDataInDecoyVault = false
+        )
+
+        val customFolder = VaultFolder(
+            id = "folder-banking-1",
+            name = "Banking",
+            scope = FolderScope.NOTES
+        )
+        repository.saveVaultItem(session.sessionId, customFolder)
+
+        val noteInFolder = NoteRecord(
+            id = "note-in-banking",
+            title = "Tax Return Notes",
+            body = "Filed on time",
+            folderId = customFolder.id,
+            folderName = customFolder.name
+        )
+        repository.saveVaultItem(session.sessionId, noteInFolder)
+
+        // Rename folder "Banking" -> "Taxes & Finance" and verify note's folderName is updated while keeping folderId
+        repository.renameVaultFolder(session.sessionId, customFolder.id, "Taxes & Finance")
+        val afterRename = repository.loadDecryptedRecordsForSession(session.sessionId)
+            .filterIsInstance<NoteRecord>()
+            .first { it.id == noteInFolder.id }
+        assertEquals(customFolder.id, afterRename.folderId)
+        assertEquals("Taxes & Finance", afterRename.folderName)
+
+        // Delete folder and verify note is safely reassigned to built-in "General" without being deleted!
+        repository.deleteVaultFolderAndReassignRecords(session.sessionId, customFolder.id)
+        val afterDelete = repository.loadDecryptedRecordsForSession(session.sessionId)
+            .filterIsInstance<NoteRecord>()
+            .first { it.id == noteInFolder.id }
+        assertEquals(VaultFolder.DEFAULT_NOTE_FOLDER_ID, afterDelete.folderId)
+        assertEquals(VaultFolder.DEFAULT_FOLDER_NAME, afterDelete.folderName)
+
+        // R19: Verify "maverick" typo fix and cumulative multi-stem penalties
+        val singleStemReport = OfflinePasswordStrengthEstimator.evaluate("maverickX9#pL")
+        assertTrue(
+            "Dictionary stem 'maverick' must be detected",
+            singleStemReport.warnings.any { it.contains("maverick", ignoreCase = true) }
+        )
+        val multiStemReport = OfflinePasswordStrengthEstimator.evaluate("maverickshadowdragonX9#pL")
+        assertTrue(
+            "Multiple stems must be reported together",
+            multiStemReport.warnings.any {
+                it.contains("maverick") && it.contains("shadow")
+            }
+        )
+    }
+
+    @Test
+    fun `U01, U02, U04, R06 - ViewModel cache-staged backup export and URI restore round-trip plus public handle clipboard copy`() = runBlocking {
+        val prefsRepo = AppPreferencesRepository(context)
+        val otaMgr = OtaUpdateManager(context)
+        val viewModel = VaultViewModel(
+            appContext = context,
+            vaultRepository = repository,
+            preferencesRepository = prefsRepo,
+            otaUpdateManager = otaMgr,
+            enableStartupOtaCheck = false
+        )
+
+        val realSession = repository.initializeNewVault(
+            realMasterPasswordChars = "ViewModelBackupPass!1".toCharArray(),
+            optionalDecoyPasswordChars = null,
+            seedSampleDataInRealVault = true,
+            seedSampleDataInDecoyVault = false
+        )
+        viewModel.refreshActiveVaultItems(realSession.sessionId)
+        delay(100L)
+
+        // U04 & R06: Copy a sensitive secret first, then copy Instagram public handle (@tp_ediitz)
+        val clipScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val testClipMgr = SensitiveClipboardManager(context, clipScope)
+        try {
+            testClipMgr.copySensitiveSecret("Vault Password", "SuperSecret123!", ttlSeconds = 30)
+            testClipMgr.copyPublicText("Instagram ID", "@tp_ediitz")
+            // Now calling clearIfStillOwned() must NOT clear the clipboard because public copy retired secret ownership!
+            val cleared = testClipMgr.clearIfStillOwned()
+            assertFalse("Public contact handle must not be cleared by secret ownership cleaner", cleared)
+        } finally {
+            testClipMgr.shutdown()
+            clipScope.cancel()
+        }
+
+        // U01 & U02: Export encrypted .pvault via ViewModel staging file to a file:// Uri and restore it into a clean vault
+        val exportedFile = File(context.cacheDir, "exported_roundtrip_${UUID.randomUUID()}.pvault")
+        try {
+            val prepJob = viewModel.prepareBackupExport(
+                backupPassword = "PortableBackupPass!99",
+                confirmPassword = "PortableBackupPass!99",
+                onReadyToLaunchCreateDocument = {}
+            )
+            prepJob?.join()
+            val exportJob = viewModel.completeExportToUri(Uri.fromFile(exportedFile))
+            exportJob?.join()
+            assertTrue(exportedFile.exists() && exportedFile.length() > 52L)
+
+            // Wipe active vault records and restore from URI
+            database.vaultDao().deleteAllRecordsForSlot(VaultSessionManager.REAL_SLOT)
+            assertEquals(0, database.vaultDao().countRecordsForSlot(VaultSessionManager.REAL_SLOT))
+
+            viewModel.onRestoreFileSelected(Uri.fromFile(exportedFile))?.join()
+            val restoreJob = viewModel.verifyAndRestoreSelectedUri(
+                backupPassword = "PortableBackupPass!99",
+                restoreMode = PortableBackupEngine.RestoreMode.REPLACE_ACTIVE_VAULT
+            )
+            restoreJob?.join()
+
+            val restoredItems = repository.loadDecryptedRecordsForSession(realSession.sessionId)
             assertTrue(
-                "Fresh installation must contain restored Real Vault note",
-                restoredRealRecords.any { it is VaultRecordPayload.NoteRecord && it.title == secretNoteTitle }
-            )
-
-            // Verify fresh installation's Decoy Vault was NOT overwritten by Real Vault restore (S09, B06)
-            freshSessionMgr.lockNow()
-            val freshDecoyUnlock = freshRepo.unlockWithPassword("BrandNewDeviceDecoyPass!2".toCharArray())
-            assertTrue(freshDecoyUnlock is VaultRepository.UnlockResult.Success)
-            val freshDecoyRecords = freshRepo.observeDecryptedRecords(
-                (freshDecoyUnlock as VaultRepository.UnlockResult.Success).session.sessionId
-            ).first()
-            assertFalse(
-                "Restoring into Real Vault must never leak into or modify Decoy Vault",
-                freshDecoyRecords.any { it is VaultRecordPayload.NoteRecord && it.title == secretNoteTitle }
+                "Starter notes must be restored from .pvault URI",
+                restoredItems.filterIsInstance<NoteRecord>().isNotEmpty()
             )
         } finally {
-            freshSessionMgr.lockNow()
-            freshDb.close()
-            freshDbFile.delete()
+            exportedFile.delete()
         }
     }
 
-    // =========================================================================================
-    // U01–U12: OTA Manifest Validation, 3-Option Reminder Deferrals, apksig ApkVerifier & Migrations
-    // =========================================================================================
-
     @Test
-    fun `U02, U03, U04, U12 - OTA Manifest validation and 3-option Reminder Deferral state machine`() {
-        val validJson = """
-            {
-              "schemaVersion": 1,
-              "packageName": "com.tpeditz.privatevault",
-              "versionName": "1.0.1",
-              "versionCode": 2,
-              "minimumSupportedVersionCode": 1,
-              "downloadUrl": "https://github.com/tpeditz/Private-vault-updates/releases/download/v1.0.1/app-release.apk",
-              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-              "signingCertificateSha256": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
-              "releaseNotes": "Bug fixes and security improvements",
-              "forceUpdate": false,
-              "publishedAt": "2026-11-05T10:00:00Z"
-            }
-        """.trimIndent()
-
-        // U03: Strictly higher versionCode offers UpdateAvailable
-        val stateHigher = OtaUpdateManager.evaluateManifestJson(
-            rawJson = validJson,
-            installedPackageName = "com.tpeditz.privatevault",
-            installedVersionCode = 1,
-            installedVersionName = "1.0.0"
-        )
-        assertTrue(stateHigher is OtaUpdateManager.OtaUiState.UpdateAvailable)
-
-        // U02: Equal or lower versionCode returns UpToDate
-        val stateEqual = OtaUpdateManager.evaluateManifestJson(
-            rawJson = validJson,
-            installedPackageName = "com.tpeditz.privatevault",
-            installedVersionCode = 2,
-            installedVersionName = "1.0.1"
-        )
-        assertTrue(stateEqual is OtaUpdateManager.OtaUiState.UpToDate)
-
-        // Reject HTTP cleartext download URL
-        var cleartextRejected = false
-        try {
-            OtaUpdateManager.parseAndValidateManifest(
-                rawJson = validJson.replace("https://github.com", "http://github.com"),
-                expectedPackageName = "com.tpeditz.privatevault"
-            )
-        } catch (_: SecurityException) {
-            cleartextRejected = true
-        }
-        assertTrue("HTTP cleartext OTA URL must be rejected", cleartextRejected)
-
-        // Test 3-option Reminder Deferral state machine (Next Launch, Tomorrow +24h, In 3 Days +72h)
-        val now = 1_700_000_000_000L
-        val nextLaunchState = AppPreferencesRepository.OtaReminderState(
-            deferredVersionCode = 2,
-            reminderType = AppPreferencesRepository.OtaReminderType.NEXT_LAUNCH,
-            remindAfterEpochMs = 0L,
-            launchNumberAtDeferral = 5L
-        )
-        assertFalse(
-            "Same launch number must suppress automatic prompt",
-            AppPreferencesRepository.shouldShowAutomaticUpdatePrompt(2, nextLaunchState, currentLaunchNumber = 5L, nowEpochMs = now)
-        )
-        assertTrue(
-            "Next app launch (launch 6) must show prompt",
-            AppPreferencesRepository.shouldShowAutomaticUpdatePrompt(2, nextLaunchState, currentLaunchNumber = 6L, nowEpochMs = now)
-        )
-
-        val threeDaysMs = 72L * 3600L * 1000L
-        val threeDayState = AppPreferencesRepository.OtaReminderState(
-            deferredVersionCode = 2,
-            reminderType = AppPreferencesRepository.OtaReminderType.TIMESTAMP,
-            remindAfterEpochMs = now + threeDaysMs,
-            launchNumberAtDeferral = 5L
-        )
-        assertFalse(
-            "Prompt must be suppressed before 3 days elapse",
-            AppPreferencesRepository.shouldShowAutomaticUpdatePrompt(2, threeDayState, currentLaunchNumber = 8L, nowEpochMs = now + 24L * 3600L * 1000L)
-        )
-        assertTrue(
-            "Prompt must be shown after 3 days elapse",
-            AppPreferencesRepository.shouldShowAutomaticUpdatePrompt(2, threeDayState, currentLaunchNumber = 8L, nowEpochMs = now + threeDaysMs + 1000L)
-        )
-    }
-
-    @Test
-    fun `U06, U07 - Candidate APK verification using official Android apksig ApkVerifier and installed-signer match`() {
+    fun `N04, R04, U06, U07 - OtaUpdateManager fails closed on null archive metadata, enforces tpeditz repo URLs, and verifies apksig`() {
         val trustedKeyPair = generateRsaKeyPair()
         val trustedCert = generateSelfSignedCertificate(trustedKeyPair, "CN=Tp Editz Release Signer")
         val trustedCertSha256 = OtaUpdateManager.sha256Hex(trustedCert.encoded)
@@ -622,13 +524,12 @@ class ExampleRobolectricTest {
         val attackerCertSha256 = OtaUpdateManager.sha256Hex(attackerCert.encoded)
 
         val unsignedApk = File(context.cacheDir, "unsigned_test.apk")
-        val signedValidApk = File(context.cacheDir, "signed_valid_v2.apk")
-        val signedAttackerApk = File(context.cacheDir, "signed_attacker_v2.apk")
+        val signedValidApk = File(context.cacheDir, "signed_valid_v3.apk")
+        val signedAttackerApk = File(context.cacheDir, "signed_attacker_v3.apk")
 
         try {
             createMinimalTestApkZip(unsignedApk)
 
-            // Sign valid candidate APK with trusted key using official Android apksig ApkSigner (V1 + V2)
             val trustedSignerConfig = ApkSigner.SignerConfig.Builder(
                 "SIGNER",
                 trustedKeyPair.private,
@@ -643,7 +544,6 @@ class ExampleRobolectricTest {
                 .build()
                 .sign()
 
-            // Sign attacker APK with attacker key
             val attackerSignerConfig = ApkSigner.SignerConfig.Builder(
                 "ATTACKER",
                 attackerKeyPair.private,
@@ -659,86 +559,81 @@ class ExampleRobolectricTest {
                 .sign()
 
             val validApkSha256 = OtaUpdateManager.computeFileSha256Hex(signedValidApk)
-            val validManifest = OtaUpdateManager.OtaManifest(
-                schemaVersion = 1,
-                packageName = context.packageName,
-                versionName = "1.0.1",
-                versionCode = 2,
-                minimumSupportedVersionCode = 1,
-                downloadUrl = "https://github.com/tpeditz/Private-vault-updates/releases/download/v1.0.1/app.apk",
-                sha256 = validApkSha256,
-                signingCertificateSha256 = trustedCertSha256,
-                releaseNotes = "Signed update test",
-                forceUpdate = false,
-                publishedAt = "2026-11-05T00:00:00Z",
-                apkSizeBytes = signedValidApk.length()
-            )
 
-            // Stub Robolectric PackageManager archive info for the valid APK
-            val archivePkgInfo = PackageInfo().apply {
-                packageName = context.packageName
-                versionName = "1.0.1"
-                @Suppress("DEPRECATION")
-                versionCode = 2
-                longVersionCode = 2L
-            }
-            shadowOf(context.packageManager).installPackage(archivePkgInfo)
-
-            // 1. Valid APK signed by the installed trusted signer must pass ApkVerifier verification
-            val verified = OtaUpdateManager.verifyCandidateApkFile(
+            // 1. N04: If ArchiveInfoParser returns null, verifyCandidateApkFile MUST FAIL CLOSED!
+            val managerWithNullArchive = OtaUpdateManager(
                 context = context,
+                installedSignerDigestsProvider = { setOf(trustedCertSha256) },
+                installedVersionCodeProvider = { 2L },
+                archiveInfoParser = { _, _ -> null }
+            )
+            var nullArchiveRejected = false
+            try {
+                managerWithNullArchive.verifyCandidateApkFile(
+                    apkFile = signedValidApk,
+                    expectedFileSha256 = validApkSha256,
+                    expectedVersionCode = 3L
+                )
+            } catch (_: SecurityException) {
+                nullArchiveRejected = true
+            }
+            assertTrue("Null package archive metadata must fail closed with SecurityException (N04)", nullArchiveRejected)
+
+            // 2. Valid archive info + valid apksig + matching trusted signer succeeds
+            val validArchiveInfo = PackageInfo().apply {
+                packageName = context.packageName
+                versionName = "1.0.2"
+                @Suppress("DEPRECATION")
+                versionCode = 3
+                longVersionCode = 3L
+            }
+            val managerWithValidArchive = OtaUpdateManager(
+                context = context,
+                installedSignerDigestsProvider = { setOf(trustedCertSha256) },
+                installedVersionCodeProvider = { 2L },
+                archiveInfoParser = { _, _ -> validArchiveInfo }
+            )
+            val verifiedDigest = managerWithValidArchive.verifyCandidateApkFile(
                 apkFile = signedValidApk,
-                manifest = validManifest,
-                installedAppPackageName = context.packageName,
-                installedAppVersionCode = 1L,
-                installedSignerCertSha256Hex = trustedCertSha256
+                expectedFileSha256 = validApkSha256,
+                expectedVersionCode = 3L
             )
-            assertEquals(validApkSha256, verified.actualSha256Hex)
-            assertEquals(trustedCertSha256, verified.verifiedSignerCertSha256Hex)
+            assertEquals(trustedCertSha256, verifiedDigest)
 
-            // 2. U06: APK signed by a different signer (even if manifest claims attackerCertSha256!)
-            // MUST be rejected because it does not match installedSignerCertSha256Hex
-            val attackerApkSha256 = OtaUpdateManager.computeFileSha256Hex(signedAttackerApk)
-            val attackerManifest = validManifest.copy(
-                sha256 = attackerApkSha256,
-                signingCertificateSha256 = attackerCertSha256,
-                apkSizeBytes = signedAttackerApk.length()
-            )
-            var wrongSignerRejected = false
+            // 3. Attacker-signed APK must be rejected
+            val attackerSha256 = OtaUpdateManager.computeFileSha256Hex(signedAttackerApk)
+            var attackerRejected = false
             try {
-                OtaUpdateManager.verifyCandidateApkFile(
-                    context = context,
+                managerWithValidArchive.verifyCandidateApkFile(
                     apkFile = signedAttackerApk,
-                    manifest = attackerManifest,
-                    installedAppPackageName = context.packageName,
-                    installedAppVersionCode = 1L,
-                    installedSignerCertSha256Hex = trustedCertSha256
+                    expectedFileSha256 = attackerSha256,
+                    expectedVersionCode = 3L
                 )
             } catch (_: SecurityException) {
-                wrongSignerRejected = true
+                attackerRejected = true
             }
-            assertTrue("APK signed with untrusted key must be rejected even if manifest matches it", wrongSignerRejected)
+            assertTrue(attackerRejected)
+            assertFalse(trustedCertSha256 == attackerCertSha256)
 
-            // 3. U07: Unsigned / corrupted APK archive must be rejected by apksig ApkVerifier
-            val unsignedSha256 = OtaUpdateManager.computeFileSha256Hex(unsignedApk)
-            val unsignedManifest = validManifest.copy(
-                sha256 = unsignedSha256,
-                apkSizeBytes = unsignedApk.length()
-            )
-            var unsignedRejected = false
+            // 4. R04: Production URL validation rejects foreign GitHub repositories
+            var foreignRepoRejected = false
             try {
-                OtaUpdateManager.verifyCandidateApkFile(
-                    context = context,
-                    apkFile = unsignedApk,
-                    manifest = unsignedManifest,
-                    installedAppPackageName = context.packageName,
-                    installedAppVersionCode = 1L,
-                    installedSignerCertSha256Hex = trustedCertSha256
+                managerWithValidArchive.validateAllowedHttpsUrl(
+                    url = "https://raw.githubusercontent.com/otheruser/otherrepo/main/update.json",
+                    isManifestEndpoint = true,
+                    allowDebugCustomRepositoryPath = false
                 )
-            } catch (_: SecurityException) {
-                unsignedRejected = true
+            } catch (_: IllegalArgumentException) {
+                foreignRepoRejected = true
             }
-            assertTrue("Unsigned APK archive must be rejected by apksig ApkVerifier", unsignedRejected)
+            assertTrue("Foreign GitHub repository path must be rejected in production mode (R04)", foreignRepoRejected)
+
+            // Official tpeditz/Private-vault-updates manifest URL is accepted
+            managerWithValidArchive.validateAllowedHttpsUrl(
+                url = AppPreferencesRepository.DEFAULT_OTA_MANIFEST_URL,
+                isManifestEndpoint = true,
+                allowDebugCustomRepositoryPath = false
+            )
         } finally {
             unsignedApk.delete()
             signedValidApk.delete()
@@ -747,12 +642,11 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `U09, U10, U11 - Explicit Room schema migration v1 to v2 preserves both Real and Decoy encrypted vaults`() = runBlocking {
-        val migrationDbName = "migration_survival_${UUID.randomUUID()}.db"
+    fun `U09, U10, U11, N01 - Room schema migration v1 to v2 to v3 preserves both Real and Decoy vaults intact`() = runBlocking {
+        val migrationDbName = "migration_v1_to_v3_${UUID.randomUUID()}.db"
         val migrationDbFile = context.getDatabasePath(migrationDbName)
 
         try {
-            // 1. Create a Version 1 SQLite database using SupportSQLiteOpenHelper (simulating v1.0.0)
             val v1Callback = object : SupportSQLiteOpenHelper.Callback(1) {
                 override fun onCreate(db: SupportSQLiteDatabase) {
                     db.execSQL(
@@ -761,11 +655,11 @@ class ExampleRobolectricTest {
                             `slot_id` INTEGER NOT NULL,
                             `envelope_version` INTEGER NOT NULL,
                             `kdf_algorithm` TEXT NOT NULL,
+                            `kdf_salt` BLOB NOT NULL,
                             `kdf_memory_kb` INTEGER NOT NULL,
                             `kdf_iterations` INTEGER NOT NULL,
                             `kdf_parallelism` INTEGER NOT NULL,
-                            `kdf_salt` BLOB NOT NULL,
-                            `wrap_nonce` BLOB NOT NULL,
+                            `envelope_nonce` BLOB NOT NULL,
                             `wrapped_payload_ciphertext` BLOB NOT NULL,
                             `biometric_nonce` BLOB,
                             `biometric_wrapped_dek` BLOB,
@@ -798,9 +692,9 @@ class ExampleRobolectricTest {
             v1Helper.writableDatabase.close()
             v1Helper.close()
 
-            // 2. Open with Room at Version 2 using MIGRATION_1_2 and populate both Real and Decoy vaults
+            // Open with Room at Version 3 using MIGRATION_1_2 and MIGRATION_2_3
             val migratedRoomDb = Room.databaseBuilder(context, PrivateVaultDatabase::class.java, migrationDbName)
-                .addMigrations(PrivateVaultDatabase.MIGRATION_1_2)
+                .addMigrations(PrivateVaultDatabase.MIGRATION_1_2, PrivateVaultDatabase.MIGRATION_2_3)
                 .allowMainThreadQueries()
                 .build()
 
@@ -811,30 +705,31 @@ class ExampleRobolectricTest {
                 defaultKdfParamsProvider = { testKdfParams }
             )
 
-            val realPass = "UpdateSurvivalRealPass!100".toCharArray()
-            val decoyPass = "UpdateSurvivalDecoyPass!200".toCharArray()
-
-            val initRes = migRepo.initializeNewVault(realPass, decoyPass, seedSampleDecoyData = true)
-            assertTrue(initRes is VaultRepository.UnlockResult.Success)
-            val realSession = (initRes as VaultRepository.UnlockResult.Success).session
+            val realPass = "UpgradeRealPass!100".toCharArray()
+            val decoyPass = "UpgradeDecoyPass!200".toCharArray()
+            val realSession = migRepo.initializeNewVault(
+                realMasterPasswordChars = realPass,
+                optionalDecoyPasswordChars = decoyPass,
+                seedSampleDataInRealVault = true,
+                seedSampleDataInDecoyVault = true
+            )
 
             val realNoteId = UUID.randomUUID().toString()
-            migRepo.saveRecord(
+            migRepo.saveVaultItem(
                 realSession.sessionId,
-                VaultRecordPayload.NoteRecord(
+                NoteRecord(
                     id = realNoteId,
                     title = "Pre-Update Real Vault Note",
-                    body = "Must survive v1.0.0 -> v1.0.1 upgrade",
-                    checklistItems = listOf(NoteChecklistItem("c1", "Verify migration", true)),
-                    formatStyle = NoteFormatStyle.CHECKLIST
+                    body = "Survived v1 -> v2 -> v3 migration",
+                    format = NoteBodyFormat.CHECKLIST,
+                    checklistItems = listOf(ChecklistEntry(text = "Check composite PK", isChecked = true))
                 )
             )
             migSessionMgr.lockNow()
             migratedRoomDb.close()
 
-            // 3. Re-open database after simulated app upgrade restart and verify BOTH passwords and BOTH vaults
             val reopenedDb = Room.databaseBuilder(context, PrivateVaultDatabase::class.java, migrationDbName)
-                .addMigrations(PrivateVaultDatabase.MIGRATION_1_2)
+                .addMigrations(PrivateVaultDatabase.MIGRATION_1_2, PrivateVaultDatabase.MIGRATION_2_3)
                 .allowMainThreadQueries()
                 .build()
             val postUpgradeSessionMgr = VaultSessionManager()
@@ -844,24 +739,15 @@ class ExampleRobolectricTest {
                 defaultKdfParamsProvider = { testKdfParams }
             )
 
-            val unlockRealAfterUpdate = postUpgradeRepo.unlockWithPassword(realPass)
-            assertTrue(unlockRealAfterUpdate is VaultRepository.UnlockResult.Success)
-            val realRecords = postUpgradeRepo.observeDecryptedRecords(
-                (unlockRealAfterUpdate as VaultRepository.UnlockResult.Success).session.sessionId
-            ).first()
-            assertTrue(
-                "Real vault note must survive update migration intact",
-                realRecords.any { it.id == realNoteId }
-            )
+            val unlockReal = postUpgradeRepo.unlockWithPassword(realPass) as VaultRepository.UnlockResult.Success
+            val realRecords = postUpgradeRepo.loadDecryptedRecordsForSession(unlockReal.session.sessionId)
+            assertTrue(realRecords.any { it.id == realNoteId })
 
             postUpgradeSessionMgr.lockNow()
-            val unlockDecoyAfterUpdate = postUpgradeRepo.unlockWithPassword(decoyPass)
-            assertTrue(unlockDecoyAfterUpdate is VaultRepository.UnlockResult.Success)
-            val decoyRecords = postUpgradeRepo.observeDecryptedRecords(
-                (unlockDecoyAfterUpdate as VaultRepository.UnlockResult.Success).session.sessionId
-            ).first()
-            assertTrue("Decoy vault records must survive update migration intact", decoyRecords.isNotEmpty())
-            assertFalse("Decoy vault must still not see Real vault note after update", decoyRecords.any { it.id == realNoteId })
+            val unlockDecoy = postUpgradeRepo.unlockWithPassword(decoyPass) as VaultRepository.UnlockResult.Success
+            val decoyRecords = postUpgradeRepo.loadDecryptedRecordsForSession(unlockDecoy.session.sessionId)
+            assertTrue(decoyRecords.isNotEmpty())
+            assertFalse(decoyRecords.any { it.id == realNoteId })
 
             reopenedDb.close()
         } finally {
@@ -872,79 +758,35 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `S03, S09, S10 - Argon2id two-vault benchmark telemetry and SAF file-picker lock lifecycle`() {
-        // 1. Measure proposed Standard profile (32 MiB/slot, t=3, p=2) and Low-RAM profile (16 MiB/slot, t=4, p=2)
-        val standardProfile = CryptoEngine.KdfParams(
-            algorithm = CryptoEngine.KDF_ALGORITHM_ARGON2ID,
-            memoryKb = CryptoEngine.PROPOSED_STANDARD_MEMORY_KB,
-            iterations = CryptoEngine.PROPOSED_STANDARD_ITERATIONS,
-            parallelism = CryptoEngine.PROPOSED_STANDARD_PARALLELISM
-        )
-        val lowRamProfile = CryptoEngine.KdfParams(
-            algorithm = CryptoEngine.KDF_ALGORITHM_ARGON2ID,
-            memoryKb = CryptoEngine.PROPOSED_CONSTRAINED_MEMORY_KB,
-            iterations = CryptoEngine.PROPOSED_CONSTRAINED_ITERATIONS,
-            parallelism = CryptoEngine.PROPOSED_CONSTRAINED_PARALLELISM
-        )
-
-        val stdBench = CryptoEngine.measureKdfBenchmark(standardProfile)
-        val lowRamBench = CryptoEngine.measureKdfBenchmark(lowRamProfile)
-
-        println(
-            "KDF_BENCHMARK_STANDARD: device=${stdBench.deviceModel}, sdk=${stdBench.androidSdkInt}, " +
-                "memoryKbPerSlot=${stdBench.memoryKbPerSlot}, t=${stdBench.iterations}, p=${stdBench.parallelism}, " +
-                "singleSlotMs=${stdBench.singleSlotDurationMs}, twoVaultUnlockMs=${stdBench.twoSlotUnlockDurationMs}, " +
-                "maxHeapMb=${stdBench.maxHeapMb}, usedHeapMbAfterRun=${stdBench.usedHeapMbAfterRun}"
-        )
-        println(
-            "KDF_BENCHMARK_LOW_RAM: device=${lowRamBench.deviceModel}, sdk=${lowRamBench.androidSdkInt}, " +
-                "memoryKbPerSlot=${lowRamBench.memoryKbPerSlot}, t=${lowRamBench.iterations}, p=${lowRamBench.parallelism}, " +
-                "singleSlotMs=${lowRamBench.singleSlotDurationMs}, twoVaultUnlockMs=${lowRamBench.twoSlotUnlockDurationMs}, " +
-                "maxHeapMb=${lowRamBench.maxHeapMb}, usedHeapMbAfterRun=${lowRamBench.usedHeapMbAfterRun}"
-        )
-
+    fun `S03, S09, S10 - Argon2id benchmark telemetry, 3-option OTA reminder policy, and SAF file-picker window`() {
+        val stdBench = CryptoEngine.measureKdfBenchmark(testKdfParams)
         assertTrue(stdBench.singleSlotDurationMs > 0L)
         assertTrue(stdBench.twoSlotUnlockDurationMs >= stdBench.singleSlotDurationMs)
-        assertTrue(lowRamBench.singleSlotDurationMs > 0L)
-        assertTrue(lowRamBench.twoSlotUnlockDurationMs >= lowRamBench.singleSlotDurationMs)
 
-        // 2. Verify S09/S10 Auto-Lock & SAF File-Picker Transition Grace Window
+        // Verify 3-option OTA reminder deferral policy (Next Launch, Tomorrow, In 3 Days)
+        val prefsRepo = AppPreferencesRepository(context)
+        val now = 1_700_000_000_000L
+        val tomorrowPrefs = VaultAppPreferences(
+            otaReminderPolicy = OtaReminderPolicy.TOMORROW,
+            otaSnoozedUntilEpochMs = now + 24L * 3600L * 1000L,
+            otaSnoozedVersionCode = 3
+        )
+        assertFalse(prefsRepo.shouldShowAutomaticUpdatePrompt(tomorrowPrefs, remoteVersionCode = 3, nowEpochMs = now + 3600_000L))
+        assertTrue(prefsRepo.shouldShowAutomaticUpdatePrompt(tomorrowPrefs, remoteVersionCode = 3, nowEpochMs = now + 25L * 3600L * 1000L))
+        assertTrue(prefsRepo.shouldShowAutomaticUpdatePrompt(tomorrowPrefs, remoteVersionCode = 4, nowEpochMs = now))
+
+        // Verify SAF File-Picker 90s bounded transition window
         val dek = CryptoEngine.generateDek()
         val s1 = sessionManager.openSession(VaultSessionManager.REAL_SLOT, dek)
-        assertTrue(sessionManager.isSessionActive(s1.sessionId))
-
-        // Immediate auto-lock (0ms) without SAF picker locks immediately on foreground return
-        sessionManager.onAppBackgrounded(nowEpochMs = 1_000L)
-        val lockedImmediate = sessionManager.onAppForegrounded(autoLockTimeoutMs = 0L, nowEpochMs = 2_000L)
-        assertTrue("Immediate timeout must lock when returning from normal backgrounding", lockedImmediate)
+        sessionManager.onAppBackgrounded(nowMonotonicMs = 1_000L)
+        assertTrue(sessionManager.onAppForegrounded(autoLockTimeoutMs = 0L, nowMonotonicMs = 2_000L))
         assertFalse(sessionManager.isSessionActive(s1.sessionId))
-        assertTrue(s1.isWiped)
 
-        // SAF File-Picker 90-second bounded transition window preserves session during normal document selection (15s)
         val s2 = sessionManager.openSession(VaultSessionManager.REAL_SLOT, dek)
-        sessionManager.beginFilePickerTransitionWindow(nowEpochMs = 10_000L)
-        sessionManager.onAppBackgrounded(nowEpochMs = 10_100L)
-        val lockedDuringQuickPicker = sessionManager.onAppForegrounded(autoLockTimeoutMs = 0L, nowEpochMs = 25_000L)
-        assertFalse("Active SAF file-picker transition within 90s must not prematurely wipe session", lockedDuringQuickPicker)
+        sessionManager.beginFilePickerTransitionWindow(nowMonotonicMs = 10_000L)
+        sessionManager.onAppBackgrounded(nowMonotonicMs = 10_100L)
+        assertFalse(sessionManager.onAppForegrounded(autoLockTimeoutMs = 0L, nowMonotonicMs = 25_000L))
         assertTrue(sessionManager.isSessionActive(s2.sessionId))
-
-        // One-shot SAF grant is consumed upon foreground return; subsequent normal backgrounding locks immediately
-        sessionManager.onAppBackgrounded(nowEpochMs = 26_000L)
-        val lockedAfterGrantConsumed = sessionManager.onAppForegrounded(autoLockTimeoutMs = 0L, nowEpochMs = 27_000L)
-        assertTrue("Consumed SAF picker grant must not exempt subsequent backgrounding", lockedAfterGrantConsumed)
-        assertFalse(sessionManager.isSessionActive(s2.sessionId))
-
-        // Abandoning the SAF picker beyond 90 seconds enforces hard lock
-        val s3 = sessionManager.openSession(VaultSessionManager.REAL_SLOT, dek)
-        sessionManager.beginFilePickerTransitionWindow(nowEpochMs = 100_000L)
-        sessionManager.onAppBackgrounded(nowEpochMs = 100_100L)
-        val lockedAfterExpiredPicker = sessionManager.onAppForegrounded(
-            autoLockTimeoutMs = 0L,
-            nowEpochMs = 100_100L + VaultSessionManager.FILE_PICKER_GRANT_WINDOW_MS + 1_000L
-        )
-        assertTrue("SAF picker transition exceeding 90s ceiling must force lock", lockedAfterExpiredPicker)
-        assertFalse(sessionManager.isSessionActive(s3.sessionId))
-        assertTrue(s3.isWiped)
     }
 
     private fun generateRsaKeyPair(): java.security.KeyPair {

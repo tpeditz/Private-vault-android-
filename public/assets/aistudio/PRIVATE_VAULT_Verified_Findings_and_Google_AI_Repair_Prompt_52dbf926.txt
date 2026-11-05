@@ -1,0 +1,845 @@
+PRIVATE VAULT
+SOURCE REVIEW, BUG TRIAGE AND COMPLETE GOOGLE AI REPAIR PROMPT
+Prepared: 05 November 2026
+Developer: Tp Editz
+Telegram: @Tp_Editz
+Instagram to add: @tp_ediitz
+
+COPY THIS ENTIRE FILE INTO THE SAME GOOGLE AI CONVERSATION THAT BUILT THE APP.
+Provide the source project alongside it. This file tells the coding AI what to
+investigate, repair and test. It does not say that those repairs are already done.
+
+========================================================================
+1. TASK AND EVIDENCE BOUNDARY
+========================================================================
+
+You are repairing my existing native Android application, PRIVATE VAULT. Act as
+the Android engineer, security reviewer, Compose designer and test engineer.
+Implement the repairs in my actual project. Preserve existing user data and
+features. Do not replace it with a new demo or merely restyle the broken screens.
+
+I am a beginner. Explain owner actions in simple English, one step at a time.
+Perform the development work your environment supports. Do not ask me to solve
+Kotlin, cryptographic or Android lifecycle details myself.
+
+Inputs reviewed for this handover:
+- Private-vault-android--main.zip: Android source project, not a new APK.
+- private_vault_full_security_and_bug_report.txt: supplied 20-issue audit.
+- The owner's direct observations of export/restore crashes and keyboard-related
+  black/blank screen areas.
+
+Source ZIP SHA-256:
+566ec5ae9dca64d8ca6c8e83f1d907cc6531ba0e08975244117110be6029996b
+
+Supplied report SHA-256:
+ae0dbbcc9606da4a01b7a970e282946918d979e7ba9283542ab57584d9c048f6
+
+Source paths below are relative to the extracted project root. Unless otherwise
+stated, Kotlin paths begin app/src/main/java/com/example/. Line numbers refer to
+this uploaded snapshot and may move after changes. Verify symbols and current
+code instead of applying patches by line number alone.
+
+Evidence categories used in this file:
+USER-REPORTED: Seen by the owner on their phone; no crash stack trace supplied.
+SOURCE-CONFIRMED: The stated implementation pattern exists in the uploaded code.
+ISOLATED REPRODUCTION: A focused host-side SQLite demonstration was performed.
+HYPOTHESIS: A plausible cause requiring logs/device reproduction before claiming
+it is the explanation for the observed crash or visual defect.
+
+This review examined the supplied report and relevant source flows. It is not a
+complete security certification. No Android emulator or physical-device run was
+performed for this review. The Gradle/Robolectric/instrumentation suites were
+not run here. Existing tests in the ZIP are source evidence, not passing results.
+The ZIP lacks gradlew and gradle/wrapper/gradle-wrapper.jar; do not report a local
+wrapper build as successful until the build environment is actually restored.
+
+Do not assume this source ZIP exactly matches the installed APK. First identify
+the build/commit being reproduced and record device/Android/keyboard versions.
+
+========================================================================
+2. PRESERVE THE PRODUCT CONTRACT
+========================================================================
+
+Keep applicationId com.tpeditz.privatevault. The uploaded build configuration is
+versionName 1.0.0, versionCode 1, minSdk 24 and targetSdk 36. Preserve the installed
+identity. Choose a higher release versionCode when preparing a genuine update.
+The source namespace com.example is different from applicationId; that alone is
+not an Android security defect and does not justify changing the application ID.
+
+Keep all four main tools:
+1. Private Notes.
+2. Saved Passwords / Password Vault.
+3. Cryptographically secure Password Generator.
+4. Offline Password Strength Checker and local suggestions/reuse checks.
+
+Preserve strong local encryption, independent real/decoy vaults, master-password
+unlock, secure session locking, properly controlled biometric convenience,
+encrypted portable manual backup/restore, premium light/dark/system themes,
+accessibility and developer credits.
+
+No cloud sync, Firebase account, analytics, runtime AI, remote password checking
+or online breach lookup. Built-in networking is limited to OTA metadata/APKs.
+User-chosen external Telegram/Instagram/browser navigation is a deliberate
+external action, not background permission to transmit vault data.
+
+Keep source development private. Public update repository:
+https://github.com/tpeditz/Private-vault-updates
+Permanent manifest address:
+https://raw.githubusercontent.com/tpeditz/Private-vault-updates/main/update.json
+
+Keep Update Now, Update Later and Remind Me Later. Reminders include next launch,
+tomorrow and three days, remembered locally for the relevant version. No download
+until Update Now is selected. Offline vault access must remain available when
+updates are postponed, cancelled or unavailable.
+
+Do not fix the keyboard or file picker by disabling encryption, turning off
+FLAG_SECURE, bypassing authentication, keeping secrets in plaintext temporary
+files, adding broad storage access or disabling auto-lock globally.
+
+========================================================================
+3. OWNER'S IMMEDIATE BUGS: FIX THESE FIRST
+========================================================================
+
+U01 - BACKUP EXPORT DOES NOT OPEN A SAVE LOCATION / APP CLOSES
+Priority: P0 functional failure. Status: USER-REPORTED, with SOURCE-CONFIRMED
+unsafe edges; exact observed crash root cause is not yet established.
+
+Owner's reproduction:
+1. Unlock PRIVATE VAULT and open Backup & Restore.
+2. Enter the backup password/confirmation and choose export.
+3. Expect Android's Save As document picker and a location/filename choice.
+4. Instead the app closes or disappears before completing the save flow.
+
+Relevant source:
+- ui/SecondaryScreens.kt:269-274 opens the destination OutputStream directly
+  inside the activity-result UI callback, outside error handling.
+- ui/SecondaryScreens.kt:410-422 calls prepareBackupForExport and later launches
+  CreateDocument through a callback captured by the current composable.
+- ui/VaultViewModel.kt:734-789 prepares bytes, opens a picker transition window
+  and calls that callback. Launcher failure is not handled at this boundary.
+- ui/VaultViewModel.kt:792-827 accepts an already-open stream and can return early
+  without closing it when pending bytes are absent.
+- ui/VaultViewModel.kt:219-253 clears pending backup bytes on session lock.
+- data/VaultRepository.kt:864-876 writes/flushes/closes the stream, but the UI
+  currently describes this as 'written and verified' without readback validation.
+
+Required repair:
+- Reproduce the actual failure and capture the FATAL EXCEPTION/stack trace with
+  synthetic data. Identify whether it occurs before launch, inside the system
+  picker, during result delivery, during provider I/O or while auto-locking.
+- Use ACTION_CREATE_DOCUMENT / ActivityResultContracts.CreateDocument to let the
+  user choose a .pvault filename and location. A normal Save As picker is enough;
+  requesting access to an entire directory is not required for one backup file.
+- Own launcher registration at a stable Activity/root-composition boundary so
+  locking, navigation or recreation cannot orphan a pending result. Route
+  results to an explicit pending operation, not a stale screen lambda.
+- Guard launcher launch and provider access. Handle cancellation, absent document
+  provider, null URI, denied/revoked grants, provider exceptions, full storage,
+  read-only destination and activity destruction without a process crash.
+- Pass URI/operation identity to the ViewModel/service. Open/write/flush/close
+  streams inside Dispatchers.IO with use/finally and clear ownership.
+- Finish encryption before exposing bytes to the external provider. Keep staging
+  encrypted; use unique private staging names if files are used. Remove staging
+  on success, cancellation, expiry and safe startup cleanup.
+- Preserve only the encrypted operation state needed across locking. Lock must
+  remove access to the live DEK and plaintext while permitting an explicitly
+  authorised already-encrypted file write where safe. Bind it to the originating
+  task/session identity; never write a different vault's later pending bytes.
+- Do not save master/backup passwords in a Bundle, SavedStateHandle, URI, filename,
+  exception message or log. Handle process death by safe cancellation or explicit
+  re-authentication/restart; never invent recovery of lost in-memory keys.
+- A short picker transition must not create an indefinite unlocked window. Manual
+  lock and screen-off override it. Define result ordering, cancellation and
+  elapsed-time expiry clearly; use a monotonic clock for elapsed durations.
+- Enforce backup size and memory limits while building the snapshot, not only
+  when importing it. Avoid several simultaneous full-vault plaintext copies.
+- Report success after actual provider completion. If doing independent readback
+  integrity verification, implement/test it; otherwise say 'Backup saved' rather
+  than falsely claiming it was fully verified. Explain provider limitations.
+
+Acceptance:
+Export opens Android's picker, lets the user choose local storage, writes a
+non-empty valid encrypted .pvault file and returns safely. Cancelling the picker,
+screen-off, an expired session, rotation, low storage and provider failure do not
+crash or damage either vault. Exported data can actually be restored.
+
+U02 - RESTORE CRASHES WITH ANDROID 'THIS APP KEEPS STOPPING'
+Priority: P0 functional failure. Status: USER-REPORTED with SOURCE-CONFIRMED
+unsafe file-access paths. A stack trace is still required for exact diagnosis.
+
+Relevant source:
+- ui/SecondaryScreens.kt:276-280 registers OpenDocument in the conditional backup
+  screen and keeps selectedRestoreUri only in remember state.
+- ui/SecondaryScreens.kt:451-455 launches the picker without guarded launch.
+- ui/SecondaryScreens.kt:485-490 opens InputStream on the main thread before
+  entering ViewModel validation/handling; FileNotFoundException,
+  SecurityException or provider failure can escape this UI callback.
+- ui/VaultViewModel.kt:834-847 can reject an empty password or locked session
+  after the stream is already open, leaving that stream without an owner.
+- data/VaultRepository.kt:882-896 uses the stream after a session check; early
+  failure before entering use must also have well-defined cleanup ownership.
+
+Required repair:
+- Diagnose separately: tap Select File; picker opens; select file; tap Verify;
+  decrypt preview; confirm Merge/Replace. Do not collapse all stages into one
+  assumed crash cause.
+- Register stable launchers and handle URI results even if the original screen
+  is gone. Cancel or resume through the intended authenticated context.
+- Pass a URI rather than a UI-opened stream. Open it on IO inside use after
+  operation/session validation. Close descriptors on every path.
+- Support documented URI grant lifetime; request persistable access only when
+  actually needed and supported. Avoid persistent plaintext filenames/paths that
+  reveal a real-vault backup in a decoy context.
+- Check framing, versions, algorithm IDs, byte sizes, record counts, per-field
+  lengths, nesting/JSON limits, duplicate IDs and KDF cost bounds before costly
+  allocations or database mutation. Correct AEAD verification is mandatory.
+- Wrong password, corruption, unsupported format, cancelled selection and revoked
+  access must produce a clear recoverable message, not crash or clear the vault.
+- Validate all records, stage destination encryption and transactionally commit
+  only after verification and target-session checks. See N01/N02 below before
+  trusting the current merge/replace implementation.
+- A preview must belong to one target session/generation and backup operation.
+  After lock or switching vaults, invalidate it or require deliberate full
+  revalidation in the new target; no stale real-vault preview in decoy mode.
+- Cancellation must propagate as coroutine cancellation, not be swallowed and
+  converted into a misleading success/failure state in another session.
+
+Acceptance:
+Export synthetic data, restore it into a compatible fresh installation and
+verify the records. Exercise both Merge and Replace, both vaults, corrupt/wrong
+password files and picker interruption. A failed restore leaves existing data
+unchanged and the application usable.
+
+U03 - KEYBOARD OPENS AND HALF THE SCREEN BECOMES BLACK/BLANK
+Priority: P0 usability failure. Status: USER-REPORTED. Insets/theme interaction
+is a SOURCE-SUPPORTED HYPOTHESIS, not a reproduced device diagnosis.
+
+Affected owner examples: master-password setup/unlock, credential input, notes
+and other text fields when the Android keyboard appears.
+
+Relevant source:
+- MainActivity.kt:110 enables edge-to-edge rendering.
+- MainActivity.kt:300-301 uses Scaffold(contentWindowInsets = safeDrawing).
+- MainActivity.kt:498-503 applies padding(innerPadding) to child content without
+  consumeWindowInsets(innerPadding).
+- ui/NotesScreen.kt:169 and ui/PasswordsScreen.kt:205 add nested Scaffolds.
+- Note/credential editors and secondary screens independently use imePadding.
+- ui/SetupAndUnlockScreens.kt:99-111 and 470-482 apply imePadding, scrollable
+  content and different vertical positioning.
+- AndroidManifest.xml already specifies adjustResize. Do not claim adding that
+  existing value alone fixes the bug.
+- res/values/themes.xml uses a platform DeviceDefault window theme; Compose
+  theme colouring does not by itself guarantee a matching whole-window backdrop.
+
+Required repair:
+- Reproduce on the owner's Realme 11 Pro+ / Android 15 if available, and record
+  whether blackness appears physically on the screen or only in screenshots/
+  recordings affected by FLAG_SECURE. Do not confuse capture redaction with a
+  visible rendering failure.
+- Inspect root/Scaffold/child constraints, IME height and inset consumption with
+  synthetic data. Check layout bounds rather than guessing arbitrary spacer
+  heights or hard-coding a particular phone's keyboard size.
+- Define one owner for each system-bar/IME inset. Apply and consume Scaffold
+  padding correctly; prevent nested Scaffolds/child imePadding from accounting
+  for the same space repeatedly. Do not blindly remove all padding everywhere.
+- Draw a full-window Material background/Surface consistently, including areas
+  exposed while the IME animates. Align window background, light/dark theme and
+  system-bar icon appearance.
+- Keep the focused field visible and the remaining screen useful through
+  scrolling/bring-into-view and correct constraints. Controls must not collapse
+  to one text-field line or be pushed into an inaccessible region.
+- Handle portrait/landscape, gesture/three-button navigation, large fonts,
+  keyboard suggestion rows and floating/resized keyboards where supported.
+- Test setup, unlock, note editing, credential editing, generator/checker input
+  and backup-password fields. Check both keyboard show and hide transitions.
+- Preserve screenshot protection and encrypted/session-scoped draft handling.
+  Do not use disabling FLAG_SECURE as the production layout fix.
+
+Acceptance:
+No unexplained blank/black panel, double keyboard-sized gap, clipped form or
+inaccessible save action when the IME opens/closes. Drafts persist across allowed
+configuration changes and are protected/cleared according to the lock policy.
+
+U04 - ADD INSTAGRAM TO PROFESSIONAL DEVELOPER CREDITS
+Priority: P2 requested addition. Existing About screen: ui/SecondaryScreens.kt,
+AboutVaultScreen beginning at line 1444; Telegram controls around 1513-1554.
+
+Preserve:
+Developed by Tp Editz
+Telegram: @Tp_Editz
+https://t.me/Tp_Editz
+
+Add:
+Instagram: @tp_ediitz
+https://www.instagram.com/tp_ediitz/
+
+The owner supplied a longer Instagram URL with a tracking query. Use the clean
+canonical profile address above; keep the exact username spelling.
+
+Add matching premium Instagram label/icon, Copy Instagram ID and Open Instagram
+actions. Make layout wrap/stack on narrow screens and large font settings. Use
+bundled assets rather than fetching a profile photo or remote icon.
+
+Open the profile only after an explicit tap/confirmation through a safe external
+ACTION_VIEW flow; handle absence of a handler. Lock before leaving according to
+the existing external-navigation security policy. Send no vault data, credential
+content or sensitive extras. Do not add an Instagram SDK, login, tracker or
+automatic profile network fetch.
+
+Copying a public developer handle should use an ordinary public-text clipboard
+path, not pretend that it is a saved password. Keep sensitive clipboard ownership
+tracking correct when a public copy replaces a prior sensitive clip.
+
+========================================================================
+4. ADDITIONAL FINDINGS FROM THIS SOURCE REVIEW
+========================================================================
+
+N01 - CROSS-VAULT RECORD-ID COLLISIONS CAN REPLACE ANOTHER VAULT'S DATA
+Priority: P0 integrity/isolation defect.
+Status: SOURCE-CONFIRMED plus ISOLATED SQLITE REPRODUCTION; no Android run.
+
+Evidence:
+- data/VaultEntities.kt:76-82 makes recordId alone the global primary key;
+  vaultSlot is a separate column, not part of that key.
+- data/PrivateVaultDatabase.kt:40-44 inserts with OnConflictStrategy.REPLACE.
+- data/PrivateVaultDatabase.kt:52-57 deletes only the selected slot, then inserts
+  incoming rows whose global IDs may already belong to the other slot.
+- data/VaultRepository.kt:902-939 preserves backup record IDs during restore.
+
+Example: a record with ID X is in slot 0. Restoring a backup containing X into
+slot 1 inserts X with REPLACE and replaces the slot-0 row. This breaks the promise
+that a restore into one vault never touches the other. It does not show that the
+decoy can decrypt the real vault; it demonstrates a cross-vault integrity risk.
+
+The isolated SQLite check created a table with the same global-key/conflict
+semantics, inserted ('same-backup-record-id', slot 0), then inserted/replaced the
+same ID for slot 1. The only remaining row belonged to slot 1; slot-0 count was 0.
+This confirms SQLite conflict behaviour, not a complete Android exploit test.
+
+Repair:
+- Enforce per-vault record identity at the database boundary: a composite key
+  (vault_slot, record_id), or a reviewed opaque storage-ID mapping that cannot
+  replace another slot's record.
+- Add an explicit non-destructive Room migration preserving all existing rows
+  and ciphertext/AAD compatibility. Do not change payload IDs blindly.
+- Review every insert, update, lookup, delete, merge and replace for slot scoping.
+- Validate incoming backup IDs and folder relationships. Remap only according to
+  a documented import policy, preserving references and authenticated identity.
+- Test intentionally identical IDs across both slots, not just fresh random UUIDs.
+
+N02 - CORRUPTED RECORDS CAN BE SILENTLY OMITTED, THEN LOST
+Priority: P0 data integrity defect. Status: SOURCE-CONFIRMED.
+
+Evidence:
+- data/VaultRepository.kt:982-1007 turns decryption/authentication/parsing failures
+  into null through decryptEntityOrNull.
+- prepareEncryptedBackupBytes:839-844 uses mapNotNull, so export can silently
+  omit an unreadable record and still report success.
+- merge restore:922-939 also uses mapNotNull for existing records, then replaces
+  the entire target slot with the surviving/merged records. This can delete the
+  unreadable original ciphertext even when the owner selected Merge.
+
+Repair:
+- Treat record-authentication/format errors as explicit integrity results.
+- Abort ordinary export/merge on unexpected corruption and preserve original
+  ciphertext. An optional recovery export must explicitly disclose incomplete
+  data and require a separate choice; never silently call it a full backup.
+- Do not rewrite/drop records that could not be authenticated.
+- Test a tampered existing record, an ordinary merge and unchanged database bytes
+  after rejection. Do not log decrypted record contents in diagnostics.
+
+N03 - LATE UNLOCK COMPLETION CAN REOPEN A VAULT AFTER A LOCK EVENT
+Priority: P1 session-race risk. Status: SOURCE-CONFIRMED missing guard; the race
+must be reproduced deterministically in tests before claiming device impact.
+
+Evidence:
+- ui/VaultViewModel.kt:379-435 launches a password unlock job.
+- lockVaultNow:438-442 cancels autosave, not the unlock job.
+- data/VaultRepository.kt:291-300 opens a new session after password derivation
+  without checking whether the unlock request was invalidated by screen-off,
+  manual lock, a new request or another session.
+
+Repair:
+- Serialize unlock/KDF work and bind every authentication operation to a request
+  generation that lock/screen-off invalidates.
+- Recheck that generation at the atomic session-open boundary. Coroutine
+  cancellation alone is insufficient if synchronous KDF work keeps running.
+- A stale successful derivation must wipe temporary material and leave Locked.
+- Test blocking the KDF, firing screen-off/manual lock, releasing the KDF and
+  asserting that no new unlocked session or secret UI appears.
+- Extend operation generation checks to autosave, backup preview, decoy changes
+  and biometric callbacks. Serialize validation/commit where a check-then-write
+  race could otherwise cross a lock boundary.
+
+N04 - PRODUCTION APK VERIFICATION FAILS OPEN WHEN ARCHIVE METADATA IS UNAVAILABLE
+Priority: P1 updater verification defect. Status: SOURCE-CONFIRMED.
+
+Evidence: ota/OtaUpdateManager.kt:651-699. If getPackageArchiveInfo returns null,
+the code returns VerifiedCandidateApk anyway and substitutes manifest version
+values. A comment describes this as support for headless JVM tests, but the
+fallback is in normal production code.
+
+Repair:
+- Fail closed when actual package/version metadata cannot be read and verified.
+- Use proper test doubles/injected metadata parsers in tests. Do not weaken the
+  production verification pipeline to make JVM fixtures pass.
+- Retain the existing actual apksig signature verification and installed-signer
+  match. This finding is not a claim that arbitrary unsigned APKs are accepted.
+- Test a validly signed candidate whose metadata parser returns null: no
+  ReadyToInstall state and no installer handoff.
+
+N05 - 'UPDATE DECOY PASSWORD' FLOW DELETES EXISTING DECOY RECORDS
+Priority: P1 avoidable data loss. Status: SOURCE-CONFIRMED.
+
+Evidence:
+- ui/SecondaryScreens.kt:948-949 describes configuring or updating the password.
+- data/VaultRepository.kt:525-577 creates a fresh decoy DEK, replaces its envelope,
+  deletes all slot-1 records, then creates default/sample data.
+
+Repair:
+- Separate first-time provisioning, password change and destructive reset.
+- Changing a configured decoy password must preserve its data through a reviewed
+  authenticated rewrap/rotation flow. Require its existing password where needed;
+  a real-vault session does not magically know the independent decoy DEK.
+- A real-authorised reset that cannot preserve the decoy must explicitly warn of
+  permanent decoy-data loss and require a separate deliberate confirmation.
+- Update envelopes/records atomically. Do not delete a slot as a side effect of
+  an action labelled only as changing or updating a password.
+
+N06 - KEY/CONFIGURATION MUTATIONS ARE NOT ONE ATOMIC DATABASE OPERATION
+Priority: P1 crash/interruption integrity risk. Status: SOURCE-CONFIRMED.
+
+Evidence: initialization around VaultRepository.kt:175-188, decoy configuration
+around 569-578 and decoy disable around 666-668 perform several DAO calls without
+one encompassing transaction. Individual inserts can be atomic while the whole
+logical operation is still only partially applied.
+
+Repair:
+- Precompute and validate all intended encrypted state, then commit each logical
+  setup/configuration/reset in one tested database transaction.
+- Coordinate non-transactional Keystore side effects with a recoverable ordering
+  strategy. Never lose a working password path because an enrollment was aborted.
+- Inject failures between steps and prove existing data remains usable or setup
+  resumes safely. Do not solve partial initialization by silently recreating keys.
+
+N07 - INCOMPLETE BUILD REPRODUCIBILITY AND TEST/RELEASE SEPARATION
+Priority: P1 release-process reliability. Status: SOURCE-CONFIRMED.
+
+The ZIP includes gradle/wrapper/gradle-wrapper.properties but no gradlew script
+or wrapper JAR. The CI uses a separately installed Gradle 9.3.1 and assembles only
+debug APKs. It generates a temporary debug key on a clean runner, publishes a
+debug release to GITHUB_REPOSITORY on pushes and labels it latest. That is not the
+owner-controlled direct-release process required for durable OTA updates.
+
+Restore a complete compatible verified Gradle wrapper, document tool versions
+and keep the private source project buildable. Separate debug CI artifacts from
+an owner-authorised release job. Do not automatically publish repair builds or
+make source public. Check key continuity before calling an artifact an update.
+
+N08 - CUSTOM FIELD VALUES ARE TRIMMED AND SECRET FIELDS ARE SHOWN AS PLAIN TEXT
+Priority: P1/P2 credential correctness and screen privacy.
+Status: SOURCE-CONFIRMED.
+
+ui/PasswordsScreen.kt:1071-1076 calls trim on newCustomValue when adding a field;
+leading/trailing spaces may be meaningful for a secret. Around 1031-1040 the UI
+prints field.label and field.value directly, regardless of isSecret.
+
+Preserve the exact value of a secret; trim labels only where intended. Honour
+isSecret with masking, deliberate reveal/copy controls and no secret previews.
+All custom fields still require encryption at rest, whether masked or not.
+
+========================================================================
+5. DISPOSITION OF THE SUPPLIED 20-ISSUE REPORT
+========================================================================
+
+Do not blindly copy the severity labels or proposed fixes. Maintain a traceable
+20-row issue checklist and record what is confirmed, changed, rejected or still
+requires evidence. The following is the corrected implementation direction.
+
+R01 - Decoy detection and database observability.
+SOURCE-CONFIRMED: isDecoyModeEnabled uses decoy row count, and biometric enrollment
+also uses whether decoy records exist. Deleting records must not disable the
+policy for a still-valid decoy password. Store/derive an authoritative protected
+configuration state, migrate it safely and test an active empty decoy. However,
+adding a few fake rows or changing slot labels to HMACs does not establish
+forensic invisibility. Record counts, sizes and filesystem history remain limits.
+Treat the incorrect configuration/biometric policy as actionable; do not promise
+that filler records make a coercion feature undetectable.
+
+R02 - Settings exposes real/decoy differences.
+SOURCE-CONFIRMED: SecondaryScreens.kt:810 conditionally hides real-only cards,
+and the real settings explicitly name 'Real Vault' and 'Decoy Policy Active'.
+Reduce obvious real/decoy fingerprints in normal UI. Use generic active-vault
+settings, independently scoped password changes where supported, and protected
+real-only management navigation. Do not copy real credentials/settings into the
+decoy, show a revealing badge or create a fake biometric button that opens the
+real vault. Biometrics for real unlock remain disabled while decoy is configured.
+Document that UI similarity does not prove plausible deniability.
+
+R03 - Unlock concurrency and local backoff.
+SOURCE-CONFIRMED: missing in-progress guard and repository serialization allow
+multiple expensive KDF requests; failure count is RAM-only. Add a single-flight
+gate/Mutex and generation-aware cancellation at the repository boundary, not
+just a disabled button. Persist a bounded coarse cooldown policy if desired,
+address clock/reboot behaviour and explain that local delays do not prevent
+offline guessing on copied ciphertext. Do not add destructive auto-wipe or a
+permanent lockout. Avoid recording unnecessarily precise unlock-history data.
+
+R04 - OTA origin and ephemeral signing.
+SOURCE-CONFIRMED: URL validation restricts hosts but not the approved owner/repo;
+the UI offers a custom manifest URL. Production must use the approved manifest
+and release repository. Keep developer overrides in debug/test builds. Validate
+normalised URL origin/path and HTTPS redirects, retaining needed asset-delivery
+hosts. Keep notes as bounded untrusted plain text. Existing signer validation
+reduces installation risk; do not claim a changed manifest alone can install an
+attacker-signed APK. Repair release-key continuity and explicit release approval.
+
+R05 - Immutable strings and memory lifetime.
+SOURCE-CONFIRMED: UI/model/JSON flows create Strings containing secrets. Reduce
+copies/lifetimes, use wipeable arrays for appropriate crypto boundaries, redact
+toString/logs and clear active UI/drafts on lock. Streaming can reduce large
+whole-vault copies but can still create strings/buffers. Do not promise perfect
+JVM memory erasure or rewrite Compose fields into an untested homemade input
+system. Managed-runtime and compromised-device limits must remain explicit.
+
+R06 - Clipboard ownership tracking lost on restricted/null read.
+SOURCE-CONFIRMED: SensitiveClipboardManager.kt:85-97 clears lastCopiedDigest
+before knowing whether the clip can be inspected/cleared. Background clipboard
+access is restricted on modern Android. Retain a short-lived pending clear
+intent and retry when foreground/focus permits, with verified ownership and
+proper expiry/cleanup. Mark secrets sensitive. Do not blindly clear any clipboard
+on null or exception: it may erase a newer unrelated clip, and null is not proof
+of ownership. Do not promise every OEM/version permits exact 30-second clearing
+or that a clip remains forever; newer Android also has platform auto-clearing.
+
+R07 - Unnecessary unlock telemetry persisted in plaintext preferences.
+SOURCE-CONFIRMED: unlock paths save KDF benchmark results/timestamps in DataStore
+(VaultViewModel.kt:392,403; AppPreferencesRepository.kt:200 onward). Stop treating
+every unlock/failure as a permanent telemetry event. Keep optional diagnostics
+manual/minimal and vault-safe; remove unnecessary stored exact timestamps. Keep
+only non-secret update/reminder preferences and the minimum cooldown metadata
+needed by the approved policy. App-private DataStore is not readable by every
+ordinary third-party app; articulate the filesystem/compromised-device threat.
+
+R08 - Password rewrapping and biometric failure handling.
+MIXED: rewrapping an existing random DEK on an ordinary master-password change
+is a normal key-hierarchy design, not automatically a cryptographic bug. It
+does not revoke a DEK an attacker already obtained from an older compromised
+copy. Explain that limitation; any explicit 'rotate encryption key after
+compromise' feature needs crash-safe re-encryption and a versioned migration.
+Do not force a risky full re-encryption simply because the report demands it.
+SOURCE-CONFIRMED: biometric errors are swallowed in MainActivity.kt:230-278.
+Handle cancellation, missing keys and invalidation visibly; retire only invalid
+biometric wrappers/keys and preserve the password unlock path. Test strong
+authenticator/CryptoObject configuration on supported Android versions.
+
+R09 - Global screenshot setting can weaken another session.
+SOURCE-CONFIRMED: a global preference controls FLAG_SECURE, and a decoy session
+can modify that preference. Enforce a secure default for locked/setup/secret
+screens. A decoy must not weaken real-vault capture policy. Any opt-out must be
+deliberate, appropriately authenticated/scoped and accurately described. Never
+turn it off to conceal the IME layout defect. FLAG_SECURE has platform limits.
+
+R10 - Draft/configuration-change loss.
+SOURCE-CONFIRMED: note/credential editors, setup inputs and URI selections use
+remember-only state. Keep active session-scoped editor state in a lifecycle
+ViewModel where appropriate, cleared on genuine lock. Preserve non-secret
+operation IDs safely. Do not put plaintext passwords or note bodies into
+rememberSaveable/SavedStateHandle/Bundles as a blanket fix. ViewModels survive
+configuration changes, not guaranteed process death. Specify secure recovery.
+
+R11 - Save/close flow and pending autosave.
+SOURCE-CONFIRMED: NotesScreen.kt:934-936 closes immediately after requesting a
+save; validation/I/O failure can leave no visible editor. VaultViewModel.saveNote
+already has an onComplete(Boolean) parameter; wire it through instead of
+claiming a callback must be invented from scratch. Close only after success,
+or offer explicit discard while keeping the draft on failure. Back/Close must
+handle pending edits/checklist text consistently. Losing the last 350 ms is a
+race risk when work is cancelled/replaced/locked, not a guaranteed consequence
+of every Close: the ViewModel coroutine can outlive that composable.
+
+R12 - Folder identity and management.
+The current name-based filtering/createFolder flow permits ambiguity. Use stable
+folder IDs for new data with a safe migration of existing folderName references.
+Make 'All' a distinct filter state, not a colliding user folder string. Define
+case/whitespace duplicate rules, show validation errors and add create/rename/
+delete in both main record areas. Deleting a folder must move/reassign records
+according to an explicit policy, not delete secrets. Handle duplicate old names
+without discarding records. Do not silently truncate names into collisions.
+
+R13 - Pending checklist/custom field text and secret visibility.
+SOURCE-CONFIRMED: currentDraft/buildCurrentRecord omit pending new-item buffers.
+Commit complete pending items once on Save or clearly require completion; show
+validation for partial label/value pairs instead of silently dropping text.
+Avoid duplicate appends during autosave/recomposition. Honour isSecret and
+preserve exact secret values, including leading/trailing spaces (see N08).
+
+R14 - Locked updater lacks progress and permission handoff is awkward.
+SOURCE-CONFIRMED: the launch update dialog can start downloads while locked but
+only opens the Updates destination if unlocked. Add a non-secret app-level
+download/verify/install surface usable while vaults remain locked. Resume the
+pending installer workflow after returning from unknown-source settings and
+recheck permission/candidate validity. Keep locking before external settings/
+installer transitions. Do not fix this by reusing a file-picker grace period to
+keep the real vault unlocked. Updating must not require revealing vault data.
+
+R15 - Duplicate startup request.
+SOURCE-CONFIRMED: VaultViewModel.kt:194-212 checks once, then fetches the same
+manifest again just to show the dialog. Reuse validated discovery state and
+change prompt visibility locally. Retain rate limiting and per-version reminder
+policy. Avoid showing stale/changed metadata without validation.
+
+R16 - Streams, UI state and encrypted backup buffers.
+SOURCE-CONFIRMED unsafe stream opening/early-return ownership, addressed in
+U01/U02. pendingEncryptedBackupBytes contains encrypted backup bytes, not raw
+passwords, so dropping it without zeroing is primarily resource/lifetime hygiene,
+not proof of a plaintext breach. ByteArray uses reference-style equality in
+Kotlin data-class fields; that is a state-design concern, not 'broken Kotlin'.
+Use a private bounded task-owned buffer/file and small immutable UI status.
+
+R17 - R8 and source namespace.
+SOURCE-CONFIRMED release minification is off. Enable shrinking/obfuscation only
+with tested keep rules and a fully tested minified release. R8 is defence in
+depth/size optimisation, not encryption and not proof of security. Retain private
+mapping files for diagnostics. Do not rename applicationId or the whole project
+as a cosmetic fix; com.example namespace alone is not an exploit.
+
+R18 - Credential pinning.
+Reconcile model/persistence support with the actual UI and sorting. Implement
+the requested pin/unpin behaviour consistently, with stable favourite/pinned
+ordering and preservation across backups/updates. Do not remove user-requested
+behaviour merely to eliminate a field. Validate this with focused UI tests.
+
+R19 - Strength estimator quality and stale reuse state.
+SOURCE-CONFIRMED compact ad hoc scoring and the dictionary typo 'averick'.
+The supplied report also flags limited stem matching and insufficient remember
+keys. Fix the typo and evaluate multiple patterns conservatively, or use a vetted
+compatible offline estimator with bundled licensed data. Recompute when relevant
+active-vault credentials change. Merely subtracting one penalty per word does
+not establish accurate guessability. Label scores as estimates; no breach API,
+password/hash upload or precise unsupported cracking-time promises.
+
+R20 - Unmanaged coroutine scope.
+SOURCE-CONFIRMED: VaultViewModel.Factory:1282 creates a SupervisorJob/Main scope
+for SensitiveClipboardManager with no visible onCleared cancellation. Give it
+explicit ownership/cleanup or an appropriate lifecycle-owned scope. Cancel jobs,
+detach listeners and clear retained secret ownership metadata at the correct
+boundary without clearing unrelated clipboard content.
+
+========================================================================
+6. REPAIR IMPLEMENTATION RULES
+========================================================================
+
+First match this source snapshot to the actual current repository and reproduce
+the owner's critical flows. Work on a private repair branch/checkpoint. Preserve
+the originals and record changes. Do not push/publish externally without the
+owner's relevant authorisation.
+
+Repair order:
+Stage A: Diagnose and fix export/restore crash boundaries and operation ownership.
+Stage B: Fix cross-vault identity collisions, silent corruption loss and partial
+         transactions; create safe migrations before altering persistent state.
+Stage C: Fix IME layout and configuration-safe secure drafts.
+Stage D: Fix session/unlock/decoy policy, biometric and clipboard issues.
+Stage E: Finish folder/editor/checker/update UX repairs and Instagram credit.
+Stage F: Run targeted tests, release checks and actual device flows.
+
+Do not weaken an existing cryptographic boundary to make Stage A appear fixed.
+Preserve Argon2id, authenticated encryption, nonce discipline, envelope versions
+and independent vault keys. Keep test-only fast KDF settings in tests; review
+production creation/import cost policy with measured memory/time data. Bounds
+must not become an excuse to accept any arbitrarily cheap production profile.
+Retain explicit compatibility for existing legitimate vaults/backups and plan
+safe upgrades rather than making older user data unreadable overnight.
+
+Use structured operation results and explicit Idle/Preparing/Picking/Writing/
+Verifying/Previewing/Restoring/Completed/Cancelled/Failed states. Prevent double
+taps from starting concurrent exports/restores/KDF jobs. Reject stale operation
+IDs and session generations before both persistence and UI state publication.
+
+Audit try/finally boundaries: allocated password-derived keys must be cleaned
+even if the second KDF, cancellation, parsing or provider access fails. In the
+current unlock flow, sensitive intermediate allocations precede the final cleanup
+block. Wipe mutable material wherever feasible and keep managed-memory limits
+honest. Never dump passwords, full decrypted payloads or backup contents in logs.
+
+The UI must show useful failure messages without dismissing editable data or
+crashing. Do not swallow every exception and say 'done'. Rethrow cancellation
+where appropriate. Do not attempt to continue normal processing after serious
+memory exhaustion; prevent excessive allocation/concurrency beforehand.
+
+No destructive migration fallback, no automatic database reset, no regeneration
+of existing encryption keys to cure an exception, no silent deletion of corrupt
+records and no repair instructions that require uninstalling a populated vault.
+Use explicit reviewed recovery/export paths if a signing change prevents an
+in-place transition from an old debug build.
+
+Crash diagnostics must be private, synthetic and scoped to relevant stack
+traces. If the owner cannot collect logs themselves, guide a supported developer
+log collection flow in simple steps. Do not require remote analytics or upload
+their real passwords to reproduce a failure.
+
+========================================================================
+7. REQUIRED VALIDATION MATRIX
+========================================================================
+
+Create a report with PASS / FAIL / BLOCKED / NOT TESTED for each item, naming
+actual device/emulator/OS/build, test method and concise evidence. A compile,
+simulation or source inspection must not be called a physical-device pass.
+
+Backup and restore:
+B01. Export opens Android's Save As picker and writes a real .pvault file.
+B02. Cancel export before choosing a location: no crash, stale task or false success.
+B03. Missing picker, denied URI, null stream, provider exception and full storage
+     yield recoverable errors and close descriptors.
+B04. Local file export/restore works in airplane mode.
+B05. OpenDocument opens, selection returns safely and Verify shows an authentic
+     preview after the correct backup password.
+B06. Wrong password, corrupt/truncated/unsupported file and excessive size/cost
+     parameters leave current data intact.
+B07. Merge and Replace work with correct per-vault isolation.
+B08. Same record IDs in both vaults survive a restore into either slot without
+     touching the other; test inserts and migrations at the DAO boundary.
+B09. A corrupt existing ciphertext causes safe failure, not omission/data deletion.
+B10. Rotation, navigation, process recreation, picker timeout and screen-off have
+     documented safe outcomes without plaintext saved state.
+B11. A late callback cannot write a later task's bytes or show an old preview in
+     another vault/session.
+B12. Exported file restores in a compatible fresh installation using its backup
+     password without the old phone's Keystore key.
+B13. Large-vault and repeated-tap cases do not multiply expensive KDF/JSON copies.
+B14. Partial writes do not display 'verified'; staging is cleaned and failed
+     output is reported accurately.
+
+Keyboard and editor behaviour:
+K01. On Realme 11 Pro+ / Android 15 where available, show/hide the keyboard on
+     setup, unlock, notes, credentials, checker and backup-password fields.
+K02. No half-screen unexplained black/blank panel or double IME-sized spacing.
+K03. Focused fields and Save actions remain reachable via sensible scrolling.
+K04. Test portrait/landscape, light/dark/system theme, large fonts, gesture and
+     three-button navigation and more than one keyboard configuration.
+K05. Rotation preserves allowed drafts; genuine lock clears/protects secrets.
+K06. Failed Save & Done keeps the editor and displays validation/I/O errors.
+K07. Back/Close handles pending autosave and checklist/custom-field buffers
+     without silent loss or duplicate appended items.
+K08. Secret custom fields preserve exact spaces and mask/reveal intentionally.
+
+Session, privacy and integrity:
+S01. Repeated rapid unlock attempts create at most one active KDF operation.
+S02. Lock/screen-off during blocked KDF completion leaves the app locked.
+S03. Active empty decoy remains configured and continues to prohibit real-vault
+     biometric unlock regardless of decoy record count.
+S04. Decoy settings never weaken real capture policy or expose real entries.
+S05. Biometric cancellation/invalidation gives a clear safe password fallback
+     without resetting vault data or silently deleting the only working path.
+S06. Clipboard timeout/lock retains safe ownership checks; copying unrelated
+     text afterward prevents PRIVATE VAULT from erasing that new clip.
+S07. Background/focus-restricted clipboard reads do not silently discard all
+     retry tracking or promise unsupported guaranteed clearing.
+S08. No routine unlock-history telemetry, plaintext draft backup or secret logs.
+S09. Initial setup, decoy enable/disable/change and schema migration survive
+     injected failures without mixed envelopes/records or hidden data resets.
+S10. Decoy password changes preserve data; destructive reset is a separate
+     explicit action with clear warning.
+S11. Security checks cover stale callbacks, stale session IDs and check/commit
+     races, not just sequential unlock/lock tests.
+
+Updates, credits and release:
+O01. Update Now, Update Later and per-version Remind Me Later behave as requested.
+O02. Download/verification/install status is visible while the vault is locked.
+O03. No download before Update Now and no repeated prompts before the reminder.
+O04. One startup manifest request is enough to discover and present an update.
+O05. Production rejects unapproved manifest/release repository paths and unsafe
+     URL schemes/redirects without rejecting legitimate asset-delivery redirects.
+O06. Wrong hash, signer, package/version and null metadata parser fail closed.
+O07. The unknown-source settings return flow resumes without exposing vault data;
+     Android installation still requires user confirmation.
+O08. A genuine signed APK update preserves both vaults and all relevant settings.
+O09. About shows Tp Editz, @Tp_Editz and @tp_ediitz with exact clean external URLs.
+O10. Instagram copy/open actions are deliberate, accessible and resilient when
+     no handler is available; no background social-network requests.
+O11. Release build is non-debuggable, uses the retained owner key, has tested
+     minification if enabled, and excludes simulator/test UI.
+O12. Source/private test evidence/keys are absent from the public OTA repository.
+
+Use targeted automated regression tests for the identified invariants and
+device/instrumentation tests for SAF, IME, Keystore and installer behaviour.
+Retain useful existing tests. Expand them for the actual failures; do not merely
+add tests that repeat implementation details and miss the system interactions.
+
+========================================================================
+8. REQUIRED DELIVERABLES FROM THE CODING AI
+========================================================================
+
+Return:
+1. Repaired private source project with a complete build setup.
+2. A concise change list mapped to U01-U04, N01-N08 and R01-R20, including justified
+   changes to the supplied audit recommendations.
+3. Redacted actual crash diagnosis and the code path repaired. If logs/device
+   reproduction are unavailable, state that limitation and distinguish hardening
+   changes from confirmed resolution of the owner's original crash.
+4. Test matrix with honest outcomes, actual commands/devices where used and all
+   failures/blocked/unperformed checks.
+5. Non-destructive migration plan and verified recovery/backup compatibility.
+6. Working visual evidence of the keyboard/form repairs using synthetic data;
+   protect secrets and do not disable release screenshot controls for convenience.
+7. Debug test APK if actually built, clearly labelled for testing, and a signed
+   release APK only when built with the approved retained signing identity.
+8. Actual APK hash, package ID, version values and public signing-certificate
+   fingerprint for any release candidate that is genuinely produced.
+9. Simple owner instructions for testing export, restore, keyboard, Instagram
+   and updates on their phone.
+
+The owner currently has no confirmed retained release signing key. Guide its
+secure creation/retention before first public distribution, keep two independent
+backups and never request the key/password in chat or commit it to GitHub. Do not
+generate a new identity for each release. Do not call a temporary-key debug APK
+the finished official update.
+
+Do not publish a GitHub Release, update.json, social post or source visibility
+change as a side effect of these repairs. Prepare a concrete reviewable release
+candidate and respect the owner's separate publication authorisation.
+
+Do not claim 'all bugs fixed', 'secure', 'unhackable', 'no leakage' or 'tested on
+Android 15' without supporting evidence and accurately stated limitations.
+
+========================================================================
+9. PRIMARY ENGINEERING REFERENCES
+========================================================================
+
+Recheck current platform/dependency behaviour during implementation. These
+references guide research; they do not certify this app or replace testing.
+
+Android document picker and URI-based file access:
+https://developer.android.com/training/data-storage/shared/documents-files
+
+Activity Result registration and recreation:
+https://developer.android.com/training/basics/intents/result
+
+Compose window insets and consumption:
+https://developer.android.com/develop/ui/compose/system/insets-ui
+https://developer.android.com/develop/ui/compose/system/insets
+
+Compose state saving:
+https://developer.android.com/develop/ui/compose/state-saving
+
+Android clipboard privacy restrictions and sensitive content:
+https://developer.android.com/about/versions/10/privacy/changes#clipboard-data
+https://developer.android.com/develop/ui/views/touch-and-input/copy-paste
+
+Room conflict semantics:
+https://developer.android.com/reference/androidx/room/OnConflictStrategy
+
+APK verification/signing:
+https://developer.android.com/tools/apksigner
+https://developer.android.com/studio/publish/app-signing
+
+FINAL INSTRUCTION
+
+Implement and verify these repairs in the existing PRIVATE VAULT project. Give
+the owner a reliable Save As/restore experience, usable keyboard layouts, safer
+real/decoy isolation and the requested Instagram credit. Preserve encrypted data,
+offline functionality and signing continuity. Use honest evidence and complete
+the work before presenting a release candidate for publication.
+
+END OF REPORT AND REPAIR PROMPT

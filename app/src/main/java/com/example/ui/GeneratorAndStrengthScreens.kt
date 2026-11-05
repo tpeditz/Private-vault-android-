@@ -1,5 +1,6 @@
 package com.example.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,30 +10,20 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Save
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -41,272 +32,184 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.security.OfflinePasswordStrengthEstimator
-import com.example.security.PasswordGeneratorEngine
-import com.example.ui.theme.JetBrainsMonoFontFamily
-import com.example.ui.theme.StatusFair
-import com.example.ui.theme.StatusStrong
-import com.example.ui.theme.StatusVeryStrong
-import com.example.ui.theme.StatusVeryWeak
-import com.example.ui.theme.StatusWeak
-import kotlin.math.roundToInt
 
 @Composable
-fun GeneratorTabScreen(
+fun GeneratorAndStrengthScreen(
     uiState: VaultUiState,
     viewModel: VaultViewModel
 ) {
-    var showGeneratedValue by remember { mutableStateOf(true) }
     val config = uiState.generatorConfig
-    val result = uiState.generatedPasswordResult
+    val candidate = uiState.generatedCandidate
+    val existingPasswords = remember(uiState.credentials) {
+        uiState.credentials.map { it.password }
+    }
+    val report = remember(candidate, existingPasswords) {
+        OfflinePasswordStrengthEstimator.evaluate(candidate, existingPasswords)
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Text(
-            text = "Cryptographic Password Generator",
-            style = MaterialTheme.typography.headlineMedium
+            text = "Cryptographic Password & Passphrase Generator",
+            style = MaterialTheme.typography.headlineSmall
         )
         Text(
-            text = "Generates unbiased random passwords using Android OS SecureRandom and Fisher-Yates shuffling. Values are never automatically saved or written to history.",
+            text = "100% offline CSPRNG generation via SecureRandom. Never leaves your device.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        // Output Card
+        // Generated Candidate Display Card
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                when (result) {
-                    is PasswordGeneratorEngine.GenerationResult.Success -> {
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            shape = MaterialTheme.shapes.medium,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    text = if (showGeneratedValue) result.password else "•".repeat(result.password.length),
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontFamily = JetBrainsMonoFontFamily,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .semantics {
-                                            contentDescription = if (showGeneratedValue) {
-                                                "Generated password visible"
-                                            } else {
-                                                "Generated password masked"
-                                            }
-                                        }
-                                        .testTag("generator_output_text")
-                                )
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = candidate,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .padding(16.dp)
+                            .testTag("generated_password_display")
+                    )
+                }
 
-                                IconButton(
-                                    onClick = { showGeneratedValue = !showGeneratedValue },
-                                    modifier = Modifier.testTag("generator_toggle_visibility_button")
-                                ) {
-                                    Icon(
-                                        imageVector = if (showGeneratedValue) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                        contentDescription = if (showGeneratedValue) "Mask generated password" else "Reveal generated password"
-                                    )
-                                }
+                PasswordStrengthInlineBar(report = report)
 
-                                IconButton(
-                                    onClick = viewModel::regeneratePassword,
-                                    modifier = Modifier.testTag("generator_regenerate_button")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Filled.Refresh,
-                                        contentDescription = "Regenerate password"
-                                    )
-                                }
-                            }
-                        }
-
-                        Text(
-                            text = "${result.configExplanation} • Entropy: ~${result.estimatedEntropyBits.roundToInt()} bits",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = JetBrainsMonoFontFamily,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = {
-                                    viewModel.copySecretToClipboard("Generated Password", result.password)
-                                },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("generator_copy_button")
-                            ) {
-                                Icon(imageVector = Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Copy Secret")
-                            }
-
-                            Button(
-                                onClick = {
-                                    viewModel.sendGeneratedPasswordToNewCredential(result.password)
-                                },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("generator_save_to_passwords_button")
-                            ) {
-                                Icon(imageVector = Icons.Filled.Save, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Save to Passwords")
-                            }
-                        }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            viewModel.copySecretToClipboard("Generated Password", candidate)
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("generator_copy_button")
+                    ) {
+                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Copy")
                     }
 
-                    is PasswordGeneratorEngine.GenerationResult.InvalidConfig -> {
-                        Surface(
-                            color = MaterialTheme.colorScheme.errorContainer,
-                            shape = MaterialTheme.shapes.small,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("generator_error_banner")
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Filled.ErrorOutline,
-                                    contentDescription = "Invalid generator settings",
-                                    tint = MaterialTheme.colorScheme.onErrorContainer
-                                )
-                                Text(
-                                    text = result.reason,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onErrorContainer
-                                )
-                            }
-                        }
+                    OutlinedButton(
+                        onClick = viewModel::regeneratePasswordCandidate,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("generator_regenerate_button")
+                    ) {
+                        Icon(Icons.Filled.Refresh, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Random Password")
                     }
+                }
+
+                OutlinedButton(
+                    onClick = { viewModel.generatePassphraseCandidate(uiState.passphraseWordCount) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("generator_passphrase_button")
+                ) {
+                    Text("Generate ${uiState.passphraseWordCount}-Word High-Entropy Passphrase")
                 }
             }
         }
 
-        // Controls Card
+        // Character Set Controls
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
                         text = "Password Length",
-                        style = MaterialTheme.typography.titleMedium
+                        style = MaterialTheme.typography.titleSmall
                     )
                     Text(
-                        text = "${config.length} chars",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontFamily = JetBrainsMonoFontFamily,
-                        color = MaterialTheme.colorScheme.primary
+                        text = "${config.length} characters",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
                     )
                 }
 
                 Slider(
                     value = config.length.toFloat(),
                     onValueChange = { newLen ->
-                        viewModel.updateGeneratorConfig(
-                            config.copy(length = newLen.roundToInt().coerceIn(8, 64))
-                        )
+                        viewModel.updateGeneratorConfig(config.copy(length = newLen.toInt()))
                     },
                     valueRange = 8f..64f,
                     steps = 55,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("generator_length_slider")
+                    modifier = Modifier.testTag("generator_length_slider")
                 )
 
-                HorizontalDivider()
-
                 GeneratorToggleRow(
-                    title = "Uppercase Letters (A–Z)",
+                    label = "Uppercase Letters (A–Z)",
                     checked = config.includeUppercase,
-                    tag = "generator_uppercase_switch",
                     onCheckedChange = {
                         viewModel.updateGeneratorConfig(config.copy(includeUppercase = it))
                     }
                 )
-
                 GeneratorToggleRow(
-                    title = "Lowercase Letters (a–z)",
+                    label = "Lowercase Letters (a–z)",
                     checked = config.includeLowercase,
-                    tag = "generator_lowercase_switch",
                     onCheckedChange = {
                         viewModel.updateGeneratorConfig(config.copy(includeLowercase = it))
                     }
                 )
-
                 GeneratorToggleRow(
-                    title = "Digits (0–9)",
+                    label = "Digits (0–9)",
                     checked = config.includeDigits,
-                    tag = "generator_digits_switch",
                     onCheckedChange = {
                         viewModel.updateGeneratorConfig(config.copy(includeDigits = it))
                     }
                 )
-
                 GeneratorToggleRow(
-                    title = "Symbols (!@#\$%^&*...)",
+                    label = "Symbols (!@#$%^&*…)",
                     checked = config.includeSymbols,
-                    tag = "generator_symbols_switch",
                     onCheckedChange = {
                         viewModel.updateGeneratorConfig(config.copy(includeSymbols = it))
                     }
                 )
-
-                HorizontalDivider()
-
                 GeneratorToggleRow(
-                    title = "Exclude Visually Ambiguous Characters (0, O, 1, l, I, |)",
+                    label = "Exclude Ambiguous Characters (I, l, 1, O, 0)",
                     checked = config.excludeAmbiguous,
-                    tag = "generator_ambiguous_switch",
                     onCheckedChange = {
                         viewModel.updateGeneratorConfig(config.copy(excludeAmbiguous = it))
                     }
@@ -318,242 +221,212 @@ fun GeneratorTabScreen(
 
 @Composable
 private fun GeneratorToggleRow(
-    title: String,
+    label: String,
     checked: Boolean,
-    tag: String,
     onCheckedChange: (Boolean) -> Unit
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
     ) {
         Text(
-            text = title,
+            text = label,
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.weight(1f)
         )
         Switch(
             checked = checked,
-            onCheckedChange = onCheckedChange,
-            modifier = Modifier.testTag(tag)
+            onCheckedChange = onCheckedChange
         )
     }
 }
 
 @Composable
-fun StrengthCheckTabScreen(
+fun StrengthAuditTabScreen(
     uiState: VaultUiState,
     viewModel: VaultViewModel
 ) {
-    var showInput by remember { mutableStateOf(false) }
-    val candidate = uiState.strengthCheckerInput
-    val report = remember(candidate, uiState.credentials) {
-        viewModel.evaluatePasswordStrengthInActiveVault(candidate)
+    val existingPasswords = remember(uiState.credentials) {
+        uiState.credentials.map { it.password }
+    }
+    val interactiveReport = remember(uiState.strengthCheckerInput, existingPasswords) {
+        OfflinePasswordStrengthEstimator.evaluate(uiState.strengthCheckerInput, existingPasswords)
     }
 
-    val ratingColor = when (report.rating) {
-        OfflinePasswordStrengthEstimator.StrengthRating.VERY_WEAK -> StatusVeryWeak
-        OfflinePasswordStrengthEstimator.StrengthRating.WEAK -> StatusWeak
-        OfflinePasswordStrengthEstimator.StrengthRating.FAIR -> StatusFair
-        OfflinePasswordStrengthEstimator.StrengthRating.STRONG -> StatusStrong
-        OfflinePasswordStrengthEstimator.StrengthRating.VERY_STRONG -> StatusVeryStrong
+    // Vault-wide offline audit summary
+    val auditSummary = remember(uiState.credentials) {
+        val reports = uiState.credentials.map { cred ->
+            val others = uiState.credentials.filter { it.id != cred.id }.map { it.password }
+            cred to OfflinePasswordStrengthEstimator.evaluate(cred.password, others)
+        }
+        val weakCount = reports.count { it.second.score < 50 }
+        val reusedCount = reports.count { it.second.isReusedInVault }
+        val strongCount = reports.count { it.second.score >= 75 }
+        Triple(weakCount, reusedCount, strongCount)
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .imePadding()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Text(
-            text = "Offline Password Strength Checker",
-            style = MaterialTheme.typography.headlineMedium
+            text = "Offline Password Strength & Vault Audit",
+            style = MaterialTheme.typography.headlineSmall
         )
         Text(
-            text = "Inspect any password locally in Airplane Mode. Checks dictionary roots, l33t substitutions, keyboard walks, sequential runs, dates, and reuse across your currently unlocked vault.",
+            text = "Evaluates entropy, keyboard walks, repeated sequences, common dictionary stems, and local reuse with zero network calls.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
+        // Vault Audit Summary Card
         Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                Text(
+                    text = "Active Vault Credential Health (${uiState.credentials.size} total)",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    AuditMetricPill(
+                        label = "Strong / Fortress",
+                        count = auditSummary.third,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                    AuditMetricPill(
+                        label = "Weak (<50)",
+                        count = auditSummary.first,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                    AuditMetricPill(
+                        label = "Reused",
+                        count = auditSummary.second,
+                        color = MaterialTheme.colorScheme.tertiary
+                    )
+                }
+            }
+        }
+
+        // Interactive Offline Strength Sandbox
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "Test Any Password Offline",
+                    style = MaterialTheme.typography.titleMedium
+                )
+
                 OutlinedTextField(
-                    value = candidate,
-                    onValueChange = viewModel::updateStrengthCheckerInput,
-                    label = { Text("Type or paste password to inspect offline") },
+                    value = uiState.strengthCheckerInput,
+                    onValueChange = viewModel::setStrengthCheckerInput,
+                    label = { Text("Enter password to analyze") },
                     singleLine = true,
-                    visualTransformation = if (showInput) VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.None,
-                        autoCorrectEnabled = false,
-                        keyboardType = KeyboardType.Password
-                    ),
-                    trailingIcon = {
-                        IconButton(
-                            onClick = { showInput = !showInput },
-                            modifier = Modifier.semantics {
-                                contentDescription = if (showInput) {
-                                    "Checked password visible. Tap to mask."
-                                } else {
-                                    "Checked password masked. Tap to reveal."
-                                }
-                            }
-                        ) {
-                            Icon(
-                                imageVector = if (showInput) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                contentDescription = null
-                            )
-                        }
-                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("strength_checker_input")
                 )
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.Security,
-                            contentDescription = null,
-                            tint = ratingColor
-                        )
-                        Text(
-                            text = "Rating: ${report.rating.label}",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = ratingColor,
-                            fontWeight = FontWeight.Bold,
-                            modifier = Modifier.testTag("strength_checker_rating_text")
-                        )
-                    }
+                PasswordStrengthInlineBar(report = interactiveReport)
+
+                HorizontalDivider()
+
+                Text(
+                    text = "Character Classes: " +
+                        listOfNotNull(
+                            if (interactiveReport.hasUppercase) "Upper" else null,
+                            if (interactiveReport.hasLowercase) "Lower" else null,
+                            if (interactiveReport.hasDigits) "Digits" else null,
+                            if (interactiveReport.hasSymbols) "Symbols" else null
+                        ).joinToString(", ").ifEmpty { "None" },
+                    style = MaterialTheme.typography.bodySmall
+                )
+
+                if (interactiveReport.warnings.isNotEmpty()) {
                     Text(
-                        text = "${report.scoreOutOf100}/100 (~${report.effectiveEntropyBits.roundToInt()} bits)",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = JetBrainsMonoFontFamily
+                        text = "Detected Vulnerabilities:",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.error
                     )
-                }
-
-                LinearProgressIndicator(
-                    progress = { (report.scoreOutOf100 / 100f).coerceIn(0.04f, 1f) },
-                    color = ratingColor,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(8.dp)
-                )
-
-                HorizontalDivider()
-
-                Text(
-                    text = "Detected Characteristics & Weaknesses",
-                    style = MaterialTheme.typography.titleSmall
-                )
-                report.detectedWeaknesses.forEach { item ->
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        Icon(
-                            imageVector = if (report.rating == OfflinePasswordStrengthEstimator.StrengthRating.STRONG ||
-                                report.rating == OfflinePasswordStrengthEstimator.StrengthRating.VERY_STRONG
-                            ) Icons.Filled.CheckCircle else Icons.Filled.Warning,
-                            contentDescription = null,
-                            tint = ratingColor,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = item,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                    }
-                }
-
-                HorizontalDivider()
-
-                Text(
-                    text = "Offline Improvement Suggestions",
-                    style = MaterialTheme.typography.titleSmall
-                )
-                report.suggestions.forEach { tip ->
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.Top
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.AutoFixHigh,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Text(
-                            text = tip,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
-                if (candidate.isNotEmpty()) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = { viewModel.updateStrengthCheckerInput("") },
-                            modifier = Modifier.weight(1f)
+                    interactiveReport.warnings.forEach { warn ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Text("Clear Input")
+                            Icon(
+                                Icons.Filled.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                            Text(text = warn, style = MaterialTheme.typography.bodySmall)
                         }
-                        Button(
-                            onClick = {
-                                viewModel.sendGeneratedPasswordToNewCredential(candidate)
-                                viewModel.updateStrengthCheckerInput("")
-                            },
-                            modifier = Modifier.weight(1f)
+                    }
+                }
+
+                if (interactiveReport.suggestions.isNotEmpty()) {
+                    Text(
+                        text = "Recommendations:",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                    interactiveReport.suggestions.forEach { sug ->
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Text("Save to Passwords")
+                            Icon(
+                                Icons.Filled.CheckCircle,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                            Text(text = sug, style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
             }
         }
+    }
+}
 
-        // Honest Offline Limitation Disclosure (Section 10)
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
-            shape = MaterialTheme.shapes.small,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(
-                modifier = Modifier.padding(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.Info,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(20.dp)
-                )
-                Text(
-                    text = "${report.offlineDisclaimer} Never saves checked inputs or history; input is cleared automatically when the vault locks.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
+@Composable
+private fun AuditMetricPill(
+    label: String,
+    count: Int,
+    color: androidx.compose.ui.graphics.Color
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = count.toString(),
+            style = MaterialTheme.typography.headlineMedium,
+            color = color,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
