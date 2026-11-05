@@ -3,6 +3,7 @@ package com.example
 import android.content.Context
 import android.content.pm.PackageInfo
 import android.net.Uri
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.room.Room
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
@@ -45,6 +46,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
@@ -787,6 +789,240 @@ class ExampleRobolectricTest {
         sessionManager.onAppBackgrounded(nowMonotonicMs = 10_100L)
         assertFalse(sessionManager.onAppForegrounded(autoLockTimeoutMs = 0L, nowMonotonicMs = 25_000L))
         assertTrue(sessionManager.isSessionActive(s2.sessionId))
+    }
+
+    @Test
+    fun `T01, T02, T05 - MainActivity FragmentActivity 1_8_6 launches CreateDocument and OpenDocument without 16-bit requestCode crash`() {
+        Robolectric.buildActivity(MainActivity::class.java).setup().use { controller ->
+            val activity = controller.get()
+            val createLauncher = activity.activityResultRegistry.register(
+                "test_create_backup_doc",
+                ActivityResultContracts.CreateDocument("application/octet-stream")
+            ) { }
+            val openLauncher = activity.activityResultRegistry.register(
+                "test_open_restore_doc",
+                ActivityResultContracts.OpenDocument()
+            ) { }
+
+            try {
+                // In fragment:1.2.5 this threw IllegalArgumentException: Can only use lower 16 bits for requestCode
+                createLauncher.launch("private-vault-backup-test.pvault")
+                openLauncher.launch(arrayOf("*/*"))
+            } finally {
+                createLauncher.unregister()
+                openLauncher.unregister()
+            }
+        }
+    }
+
+    @Test
+    fun `T03, T04, T10, T31 - Backup preview, clean export status, cross-slot export guard, and Trash lifecycle`() = runBlocking {
+        val realPass = "RealVaultPass#500".toCharArray()
+        val decoyPass = "DecoyVaultPass#600".toCharArray()
+        val realSession = repository.initializeNewVault(
+            realMasterPasswordChars = realPass,
+            optionalDecoyPasswordChars = decoyPass,
+            seedSampleDataInRealVault = true,
+            seedSampleDataInDecoyVault = true
+        )
+        repository.saveVaultItem(
+            realSession.sessionId,
+            CredentialRecord(
+                serviceName = "Example Service",
+                username = "alice@example.com",
+                password = "AlicePassword!123"
+            )
+        )
+
+        val viewModel = VaultViewModel(
+            appContext = context,
+            vaultRepository = repository,
+            preferencesRepository = AppPreferencesRepository(context),
+            otaUpdateManager = OtaUpdateManager(context),
+            enableStartupOtaCheck = false
+        )
+
+        val exportDestFile = File(context.cacheDir, "v5_export_${UUID.randomUUID()}.pvault")
+        try {
+            // 1. T03: Export produces clean "Backup saved (X KB)." status without raw content:// or file:// URI
+            var launchedFileName: String? = null
+            viewModel.prepareBackupExport(
+                backupPassword = "BackupPass!555",
+                confirmPassword = "BackupPass!555",
+                onReadyToLaunchCreateDocument = { suggested -> launchedFileName = suggested }
+            )?.join()
+            assertNotNull(launchedFileName)
+            val stagedPath = viewModel.uiState.value.stagedBackupMetadata?.stagedFilePath
+            assertNotNull(stagedPath)
+
+            viewModel.completeExportToUri(Uri.fromFile(exportDestFile))?.join()
+            assertTrue(exportDestFile.exists() && exportDestFile.length() > 0L)
+            assertFalse(File(stagedPath!!).exists())
+            val statusMsg = viewModel.uiState.value.statusBannerMessage.orEmpty()
+            assertTrue("Expected 'Backup saved (... KB).' but got '$statusMsg'", statusMsg.startsWith("Backup saved ("))
+            assertFalse(statusMsg.contains("file://") || statusMsg.contains("content://"))
+
+            // 2. T04: Authenticated backup preview populates VerifiedRestorePreviewState without altering vault
+            viewModel.onRestoreFileSelected(Uri.fromFile(exportDestFile))?.join()
+            viewModel.verifyAndPreviewSelectedUri("BackupPass!555")?.join()
+            val preview = viewModel.uiState.value.verifiedRestorePreview
+            assertNotNull("Expected authenticated restore preview to be populated (T04)", preview)
+            assertTrue(preview!!.notesCount >= 1)
+            assertTrue(preview.credentialsCount >= 1)
+
+            // 3. T10: Cross-slot export callback guard rejects writing a Slot 0 staged backup after switching to Slot 1
+            val crossSlotDestFile = File(context.cacheDir, "cross_slot_${UUID.randomUUID()}.pvault")
+            viewModel.prepareBackupExport(
+                backupPassword = "BackupPass!555",
+                confirmPassword = "BackupPass!555",
+                onReadyToLaunchCreateDocument = { }
+            )?.join()
+            val crossSlotStagedPath = viewModel.uiState.value.stagedBackupMetadata?.stagedFilePath
+            assertNotNull(crossSlotStagedPath)
+
+            // Simulate user switching directly to Slot 1 (Decoy Vault) before CreateDocument callback returns
+            val decoyUnlock = repository.unlockWithPassword(decoyPass) as VaultRepository.UnlockResult.Success
+            assertEquals(VaultSessionManager.DECOY_SLOT, decoyUnlock.session.slotId)
+
+            viewModel.completeExportToUri(Uri.fromFile(crossSlotDestFile))
+            assertFalse("Cross-slot export must be rejected (T10)", crossSlotDestFile.exists())
+            assertFalse("Staged file must be deleted on cross-slot rejection", File(crossSlotStagedPath!!).exists())
+            assertTrue(viewModel.uiState.value.errorBannerMessage.orEmpty().contains("aborted", ignoreCase = true))
+
+            // 4. T31: Trash soft-delete and restore lifecycle
+            val noteToTrash = NoteRecord(title = "Trashable Note", body = "Soft delete check")
+            repository.saveVaultItem(decoyUnlock.session.sessionId, noteToTrash)
+            val trashedCopy = noteToTrash.copy(isTrashed = true)
+            repository.saveVaultItem(decoyUnlock.session.sessionId, trashedCopy)
+            val loadedAfterTrash = repository.loadDecryptedRecordsForSession(decoyUnlock.session.sessionId)
+                .filterIsInstance<NoteRecord>()
+                .first { it.id == noteToTrash.id }
+            assertTrue("Expected isTrashed = true to persist in encrypted record (T31)", loadedAfterTrash.isTrashed)
+        } finally {
+            exportDestFile.delete()
+        }
+    }
+
+    @Test
+    fun `T25, T26, T28 - OTA manifest dual-schema compatibility, duplicate key rejection, and redirect URL validation`() {
+        val otaManager = OtaUpdateManager(context)
+
+        // 1. T25 & T28: Dual-schema generator emits both apkUrl and downloadUrl and parses cleanly
+        val expectedUrl = "https://github.com/tpeditz/Private-vault-updates/releases/download/v1.0.3-b4/PRIVATE-VAULT-v1.0.3-b4.apk"
+        val generatedJson = OtaUpdateManager.generateCompatibleManifestJson(
+            OtaUpdateManager.UpdateManifest(
+                versionCode = 4,
+                versionName = "1.0.3",
+                apkDownloadUrl = expectedUrl,
+                sha256Checksum = "a".repeat(64),
+                releaseNotes = "Version 5 release",
+                publishedAt = "2026-11-05T00:00:00Z",
+                fileSizeBytes = 12_345_678L
+            )
+        )
+        assertTrue(generatedJson.contains("\"apkUrl\""))
+        assertTrue(generatedJson.contains("\"downloadUrl\""))
+        val parsed = otaManager.parseAndValidateManifestJson(generatedJson, allowDebugCustomRepositoryPath = false)
+        assertEquals(4, parsed.versionCode)
+        assertEquals("1.0.3", parsed.versionName)
+        assertEquals(expectedUrl, parsed.apkDownloadUrl)
+
+        // Legacy downloadUrl-only manifest is also accepted
+        val legacyDownloadUrlOnly = """
+            {
+              "schemaVersion": 1,
+              "versionCode": 4,
+              "versionName": "1.0.3",
+              "downloadUrl": "https://github.com/tpeditz/Private-vault-updates/releases/download/v1.0.3-b4/PRIVATE-VAULT-v1.0.3-b4.apk",
+              "sha256": "${"b".repeat(64)}",
+              "fileSizeBytes": 5000000,
+              "releaseNotes": "Legacy field test",
+              "publishedAt": "2026-11-05T00:00:00Z",
+              "minSupportedVersionCode": 1
+            }
+        """.trimIndent()
+        val parsedLegacy = otaManager.parseAndValidateManifestJson(legacyDownloadUrlOnly, allowDebugCustomRepositoryPath = false)
+        assertEquals(4, parsedLegacy.versionCode)
+
+        // Conflicting apkUrl and downloadUrl must be rejected
+        var conflictRejected = false
+        try {
+            otaManager.parseAndValidateManifestJson(
+                """
+                {
+                  "schemaVersion": 1,
+                  "versionCode": 4,
+                  "versionName": "1.0.3",
+                  "apkUrl": "https://github.com/tpeditz/Private-vault-updates/releases/download/v1.0.3-b4/a.apk",
+                  "downloadUrl": "https://github.com/tpeditz/Private-vault-updates/releases/download/v1.0.3-b4/b.apk",
+                  "sha256": "${"c".repeat(64)}",
+                  "fileSizeBytes": 5000000,
+                  "releaseNotes": "Conflict",
+                  "publishedAt": "2026-11-05T00:00:00Z",
+                  "minSupportedVersionCode": 1
+                }
+                """.trimIndent(),
+                allowDebugCustomRepositoryPath = false
+            )
+        } catch (_: IllegalArgumentException) {
+            conflictRejected = true
+        }
+        assertTrue("Conflicting apkUrl and downloadUrl must be rejected (T25)", conflictRejected)
+
+        // Duplicate top-level JSON keys must be rejected
+        var duplicateKeyRejected = false
+        try {
+            otaManager.parseAndValidateManifestJson(
+                """
+                {
+                  "schemaVersion": 1,
+                  "versionCode": 2,
+                  "versionCode": 4,
+                  "versionName": "1.0.3",
+                  "apkUrl": "https://github.com/tpeditz/Private-vault-updates/releases/download/v1.0.3-b4/a.apk",
+                  "sha256": "${"d".repeat(64)}",
+                  "fileSizeBytes": 5000000,
+                  "releaseNotes": "Duplicate key",
+                  "publishedAt": "2026-11-05T00:00:00Z",
+                  "minSupportedVersionCode": 1
+                }
+                """.trimIndent(),
+                allowDebugCustomRepositoryPath = false
+            )
+        } catch (_: IllegalArgumentException) {
+            duplicateKeyRejected = true
+        }
+        assertTrue("Duplicate top-level JSON keys must be rejected (T25)", duplicateKeyRejected)
+
+        // 2. T26: URL validation rejects userInfo, custom ports, path traversal, and untrusted hosts
+        val invalidUrls = listOf(
+            "http://raw.githubusercontent.com/tpeditz/Private-vault-updates/main/update.json",
+            "https://user:pass@raw.githubusercontent.com/tpeditz/Private-vault-updates/main/update.json",
+            "https://raw.githubusercontent.com:8443/tpeditz/Private-vault-updates/main/update.json",
+            "https://raw.githubusercontent.com/tpeditz/Private-vault-updates/../other/update.json",
+            "https://evil.example.com/tpeditz/Private-vault-updates/main/update.json"
+        )
+        for (badUrl in invalidUrls) {
+            var rejected = false
+            try {
+                otaManager.validateAllowedHttpsUrl(
+                    url = badUrl,
+                    isManifestEndpoint = true,
+                    allowDebugCustomRepositoryPath = false
+                )
+            } catch (_: IllegalArgumentException) {
+                rejected = true
+            }
+            assertTrue("Expected invalid URL '$badUrl' to be rejected (T26)", rejected)
+        }
+
+        // Valid GitHub release asset CDN redirect hop is accepted when isManifestEndpoint = false and isRedirectHop = true
+        otaManager.validateAllowedHttpsUrl(
+            url = "https://objects.githubusercontent.com/github-production-release-asset-2e65be/12345/asset.apk",
+            isManifestEndpoint = false,
+            allowDebugCustomRepositoryPath = false,
+            isRedirectHop = true
+        )
     }
 
     private fun generateRsaKeyPair(): java.security.KeyPair {

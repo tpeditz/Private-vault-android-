@@ -145,10 +145,12 @@ fun NotesTabScreen(
         uiState.selectedNoteCategory,
         uiState.selectedNoteFolderId,
         uiState.notesSortOrder,
-        uiState.notesFavoritesOnly
+        uiState.notesFavoritesOnly,
+        uiState.notesTrashOnly
     ) {
         val q = uiState.notesSearchQuery.trim().lowercase(Locale.US)
         val filtered = uiState.notes.filter { note ->
+            val matchesTrash = if (uiState.notesTrashOnly) note.isTrashed else !note.isTrashed
             val matchesQuery = if (q.isEmpty()) {
                 true
             } else {
@@ -164,7 +166,7 @@ fun NotesTabScreen(
             val matchesFolder = uiState.selectedNoteFolderId == null ||
                 note.folderId == uiState.selectedNoteFolderId
             val matchesFav = !uiState.notesFavoritesOnly || note.isFavorite
-            matchesQuery && matchesCat && matchesFolder && matchesFav
+            matchesTrash && matchesQuery && matchesCat && matchesFolder && matchesFav
         }
 
         val comparator = when (uiState.notesSortOrder) {
@@ -303,6 +305,21 @@ fun NotesTabScreen(
                     },
                     label = { Text("Sort: ${uiState.notesSortOrder.label}") }
                 )
+
+                val trashedCount = uiState.notes.count { it.isTrashed }
+                FilterChip(
+                    selected = uiState.notesTrashOnly,
+                    onClick = { viewModel.setNotesTrashOnly(!uiState.notesTrashOnly) },
+                    label = { Text(if (trashedCount > 0) "Trash ($trashedCount)" else "Trash") },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Filled.Delete,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    modifier = Modifier.testTag("notes_trash_chip")
+                )
             }
 
             if (filteredNotes.isEmpty()) {
@@ -339,7 +356,9 @@ fun NotesTabScreen(
                             note = note,
                             onClick = { viewModel.openExistingNoteDraft(note) },
                             onTogglePin = { viewModel.toggleNotePin(note) },
-                            onToggleFavorite = { viewModel.toggleNoteFavorite(note) }
+                            onToggleFavorite = { viewModel.toggleNoteFavorite(note) },
+                            onToggleTrash = { viewModel.toggleNoteTrash(note) },
+                            onPermanentDelete = { viewModel.deleteNote(note.id) }
                         )
                     }
                 }
@@ -353,7 +372,9 @@ private fun NoteItemCard(
     note: NoteRecord,
     onClick: () -> Unit,
     onTogglePin: () -> Unit,
-    onToggleFavorite: () -> Unit
+    onToggleFavorite: () -> Unit,
+    onToggleTrash: () -> Unit,
+    onPermanentDelete: () -> Unit
 ) {
     val dateFormat = remember { SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.US) }
     val accentBg = NoteCardAccents.getOrElse(note.colorAccentIndex) { MaterialTheme.colorScheme.surface }
@@ -396,27 +417,62 @@ private fun NoteItemCard(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = onTogglePin,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (note.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
-                            contentDescription = if (note.isPinned) "Unpin Note" else "Pin Note",
-                            tint = if (note.isPinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    IconButton(
-                        onClick = onToggleFavorite,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (note.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
-                            contentDescription = if (note.isFavorite) "Remove Favorite" else "Mark Favorite",
-                            tint = if (note.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
+                    if (!note.isTrashed) {
+                        IconButton(
+                            onClick = onTogglePin,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (note.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
+                                contentDescription = if (note.isPinned) "Unpin Note" else "Pin Note",
+                                tint = if (note.isPinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onToggleFavorite,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (note.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                                contentDescription = if (note.isFavorite) "Remove Favorite" else "Mark Favorite",
+                                tint = if (note.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onToggleTrash,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("trash_note_${note.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Delete,
+                                contentDescription = "Move Note to Trash",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    } else {
+                        TextButton(
+                            onClick = onToggleTrash,
+                            modifier = Modifier.testTag("restore_note_${note.id}")
+                        ) {
+                            Text("Restore")
+                        }
+                        IconButton(
+                            onClick = onPermanentDelete,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("perm_delete_note_${note.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Delete,
+                                contentDescription = "Delete Permanently",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
             }

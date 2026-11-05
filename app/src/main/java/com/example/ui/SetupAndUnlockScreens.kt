@@ -74,16 +74,16 @@ fun SetupVaultScreen(
         seedStarterSamples: Boolean
     ) -> Unit
 ) {
-    // R10 Fix: Use rememberSaveable for non-secret toggles and state so keyboard or orientation
-    // changes during initial setup do not reset the setup screen layout.
-    var realPassword by rememberSaveable { mutableStateOf("") }
-    var confirmRealPassword by rememberSaveable { mutableStateOf("") }
-    var showRealPassword by rememberSaveable { mutableStateOf(false) }
+    // Section 05, BUG 02, BUG 12 & T09 Fix: Never persist plaintext password strings in
+    // Android's SavedInstanceState Bundle; keep password buffers strictly in non-saveable memory.
+    var realPassword by remember { mutableStateOf("") }
+    var confirmRealPassword by remember { mutableStateOf("") }
+    var showRealPassword by remember { mutableStateOf(false) }
 
     var enableDecoy by rememberSaveable { mutableStateOf(false) }
-    var decoyPassword by rememberSaveable { mutableStateOf("") }
-    var confirmDecoyPassword by rememberSaveable { mutableStateOf("") }
-    var showDecoyPassword by rememberSaveable { mutableStateOf(false) }
+    var decoyPassword by remember { mutableStateOf("") }
+    var confirmDecoyPassword by remember { mutableStateOf("") }
+    var showDecoyPassword by remember { mutableStateOf(false) }
 
     var seedStarterSamples by rememberSaveable { mutableStateOf(true) }
 
@@ -367,8 +367,9 @@ fun UnlockVaultScreen(
     onUnlockWithPassword: (String) -> Unit,
     onRequestBiometricUnlock: () -> Unit
 ) {
-    var password by rememberSaveable { mutableStateOf("") }
-    var showPassword by rememberSaveable { mutableStateOf(false) }
+    // Section 05, BUG 12 & T09 Fix: Keep unlock password strictly in non-saveable memory.
+    var password by remember { mutableStateOf("") }
+    var showPassword by remember { mutableStateOf(false) }
 
     // U03 Fix: Full-bleed background + single systemBarsPadding + imePadding + verticalScroll
     // so opening the keyboard smoothly scrolls the unlock card without black or blank regions.

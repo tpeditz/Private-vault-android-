@@ -1,0 +1,757 @@
+PRIVATE VAULT - VERSION 5 CONSOLIDATED UPGRADE AND REPAIR PROMPT
+Prepared: 05 November 2026
+Developer: Tp Editz
+Telegram: @Tp_Editz
+Instagram: @tp_ediitz
+
+COPY THIS COMPLETE TXT FILE TO THE SAME GOOGLE AI / GEMINI CONVERSATION THAT
+BUILT PRIVATE VAULT. PROVIDE THE LATEST SOURCE PROJECT OR AUTHORISED PRIVATE
+REPOSITORY ACCESS. THE TWO ORIGINAL REPORTS MAY BE ATTACHED AS SUPPORTING EVIDENCE.
+
+MASTER IMPLEMENTATION PROMPT - BEGIN
+
+========================================================================
+01. YOUR JOB
+========================================================================
+
+Act as my senior Android engineer, security engineer, Compose UI/UX designer,
+test engineer and release engineer. Upgrade and repair the existing PRIVATE
+VAULT application as the next development iteration, called Version 5 / Build 5.
+
+Do the actual implementation in the current private project, run the checks your
+environment supports and provide the repaired project and a genuinely built APK
+when possible. Do not give me only another proposal, replace the app with a demo,
+rewrite it in another framework or mark untested changes as verified fixes.
+
+I do not know coding. Explain only the actions I genuinely need to perform in
+simple English, a few steps at a time. Do not repeatedly ask for requirements
+already specified here. Continue reversible development work while a separate
+credential or publication decision remains pending.
+
+This prompt consolidates:
+A. PRIVATE_VAULT_VERSION_5_AI_HANDOFF_PROMPT.txt: later build/signing/OTA history.
+B. private_vault_complete_bug_and_security_report.txt: backup/restore failure and
+   a 20-item application audit, labelled as covering version 1.0.0/code 1.
+C. Previously identified additional integrity/session issues and my explicit
+   keyboard-layout, Instagram-credit and update-reminder requirements.
+
+The files describe different snapshots. Treat historical run IDs, line numbers,
+versions and reported root causes as investigation leads until matched to the
+current source, actual dependency graph and available logs. Do not claim you have
+inspected private repositories, CI logs or a phone unless you actually have.
+
+Use this consolidated prompt to resolve conflicts in the earlier instructions.
+In particular, preserve clipboard ownership, do not weaken lock policy for the
+updater, distinguish ordinary password rewrapping from compromise recovery and
+do not publish an exposed-key build as a production-ready vault.
+
+========================================================================
+02. IDENTITY, REPOSITORIES AND FEATURES TO PRESERVE
+========================================================================
+
+Application: PRIVATE VAULT.
+Permanent applicationId: com.tpeditz.privatevault.
+Preferred existing stack: Kotlin, Jetpack Compose, Material 3, MVVM-style layers,
+Room, coroutines/StateFlow, Android Keystore/BiometricPrompt, Argon2id,
+authenticated encryption and a separate OTA component.
+
+Private source repository reported by the handoff:
+https://github.com/tpeditz/Private-vault-android-
+Note the trailing hyphen. Verify the actual repository; do not silently substitute
+a similarly named repository or change its private visibility.
+
+Public OTA repository:
+https://github.com/tpeditz/Private-vault-updates
+
+Permanent manifest endpoint:
+https://raw.githubusercontent.com/tpeditz/Private-vault-updates/main/update.json
+
+Keep the four main destinations:
+1. Private Notes.
+2. Saved Passwords / Password Vault.
+3. Cryptographically secure Password Generator.
+4. Offline Password Strength Checker with local suggestions and reuse checking.
+
+Preserve encrypted local storage, independent real and decoy vault keys,
+master-password authentication, secure auto-lock, encrypted manual backup/restore,
+folders/tags/favourites/pinning/trash, optional biometric convenience under the
+decoy policy, professional About credits and accessible premium design.
+
+Normal vault features must operate offline. Do not add Firebase accounts, cloud
+sync, runtime Gemini/AI, ads, analytics, remote password dictionaries, favicon
+downloads, cloud crash uploads or online breach services. App-managed networking
+is limited to OTA metadata/APK requests. Explicit user-opened external social or
+website links are separate actions and must never carry vault secrets.
+
+Source namespace com.example differs from applicationId; that alone is not a
+security defect. Preserve installed identity and avoid a sweeping package rename
+that adds migration risk without addressing a verified bug.
+
+========================================================================
+03. ESTABLISH THE ACTUAL BASELINE AND VERSION POLICY
+========================================================================
+
+The later handoff reports, but this consolidated document has not independently
+reverified, the following:
+- Installed Build 3: versionName 1.0.1, versionCode 2; owner said it opens.
+- Later source/normal Build 4: versionName 1.0.2, versionCode 3.
+- Successful normal build run: 41982996232.
+- Failed OTA publication run: 41983802119, job 127099742355.
+- Commit associated with OTA setup:
+  d9fef3c14cd91f8e22efe370f73e8032dddeb2d2.
+
+Reference links:
+https://github.com/tpeditz/Private-vault-android-/actions/runs/41982996232
+https://github.com/tpeditz/Private-vault-android-/actions/runs/41983802119
+https://github.com/tpeditz/Private-vault-android-/commit/d9fef3c14cd91f8e22efe370f73e8032dddeb2d2
+
+Before editing, record the actual current source commit, versionName/versionCode,
+installed baseline where available, resolved dependency versions and signer.
+Determine which reported bugs remain present and which were already repaired.
+Do not apply old line-number patches to unrelated newer code.
+
+Build 5 is a development label, not an instruction to set Android versionCode to
+5. Use a release code strictly above all previously distributed compatible
+releases. If code 3 is truly the latest, code 4/name 1.0.3 may be appropriate;
+verify first. Do not downgrade, reuse an already published release code, overwrite
+a release asset or confuse a GitHub run number with the Android version.
+
+The two documents mention different OTA schemas: the later handoff describes
+apkUrl/fileSizeBytes, while earlier specifications used downloadUrl and other
+fields. Inspect the updater in the ALREADY INSTALLED baseline as well as the new
+source. Its parser must understand the published manifest before it can download
+the new app. Do not break that bootstrap path by updating only the new parser.
+Document a compatible manifest contract and test it with both relevant clients.
+
+========================================================================
+04. HANDLE SIGNING MATERIAL AND THE REPORTED EXPOSURE
+========================================================================
+
+The handoff reports a persistent debug keystore stored as DEBUG_KEYSTORE_BASE64
+in private-repository Actions secrets, using the conventional androiddebugkey
+alias and conventional debug credentials. It gives this reference public
+certificate SHA-256 fingerprint:
+
+12:94:3A:91:69:28:04:92:69:C0:2D:8D:97:1B:59:67:A0:41:FB:6C:7D:B2:5A:12:79:D3:41:4E:45:CF:B5:61
+
+This is a reference to verify against actual artifacts, not a new trust root to
+blindly accept. Earlier debug APKs may have different certificates. Compare with
+the specific installed baseline intended for the upgrade.
+
+The handoff also says private keystore material was pasted into an earlier AI
+conversation. Treat that reported key as exposed. Moving it into GitHub Secrets
+later does not restore confidentiality. Never reproduce/request the key, its
+Base64 content, PATs, vault passwords or private encryption keys in chat/logs.
+
+Separate two workstreams:
+1. Controlled debug compatibility testing: preserve the baseline identity only
+   as needed for deliberate tests with synthetic data and clear limitations.
+2. Production distribution: prepare an owner-controlled uncompromised release
+   key and a tested migration/distribution plan before approval to publish.
+
+Do not silently generate a replacement signer and tell the owner to uninstall a
+populated vault. A different key is not automatically an in-place update. Any
+signing-lineage/rotation strategy requires platform and updater compatibility
+analysis, including this app's own signer checks; do not assume it will work.
+An alternative secure backup/restore transition must itself be verified and
+explicitly chosen, with the original installation/data retained until recovery
+is proven. Never waive signature checks to get around a mismatch.
+
+Keep APK signing keys distinct from vault DEKs, password-derived keys and backup
+keys. Never use the release key to encrypt user vaults. Keep private signing
+material out of both repositories, project ZIPs, APKs and ordinary reports. Guide
+two safe independent key backups through an appropriate secure owner-controlled
+process. Do not generate a different release key every time CI runs.
+
+Security exposure is a production-release gate; it should not stop unrelated
+source repairs and synthetic-data tests that need no production signing secret.
+
+========================================================================
+05. FIRST USER-VISIBLE BLOCKER: BACKUP/RESTORE PICKER FAILURE
+========================================================================
+
+Owner symptoms:
+- Export fails to open Android's Save As destination picker or the app closes.
+- Restore/Choose File fails or Android reports 'This app keeps stopping'.
+- The newer report quotes:
+  'Can only use lower 16 bits for requestCode'.
+
+The report's proposed cause is a legacy FragmentActivity resolved transitively
+through biometric:1.1.0 combined with a modern Activity Result registry. It
+suggests an explicit compatible Fragment dependency. This is a concrete lead,
+but verify the resolved build graph and stack trace before calling it proven.
+
+Inspect:
+- gradle/libs.versions.toml.
+- app/build.gradle.kts.
+- MainActivity superclass and Activity Result integration.
+- CreateDocument/OpenDocument launchers in ui/SecondaryScreens.kt.
+- Export/restore task and lifecycle code in ui/VaultViewModel.kt.
+- data/PortableBackupEngine.kt and data/VaultRepository.kt.
+
+Required actions:
+A. Run the supported equivalent of:
+   ./gradlew :app:dependencyInsight --dependency androidx.fragment --configuration debugRuntimeClasspath
+   ./gradlew :app:dependencyInsight --dependency androidx.activity --configuration debugRuntimeClasspath
+   Also inspect releaseRuntimeClasspath and relevant biometric dependencies.
+   If the wrapper is missing, restore the compatible verified wrapper first.
+B. Pin a maintained compatible Fragment/Activity/Biometric combination in the
+   actual catalog/build. The report's fragment-ktx 1.8.6 is an example, not a
+   permanent 'latest' value; verify compatibility rather than guessing versions.
+C. Keep the supported host needed by BiometricPrompt. Do not blindly replace
+   FragmentActivity just to hide an exception, mask request codes or bypass the
+   modern Activity Result API with arbitrary legacy request codes.
+D. Reproduce export and restore on the rebuilt artifact and confirm that the
+   actual legacy request-code exception no longer occurs. Test biometrics too.
+
+Additional picker repairs are still required:
+- Register launchers at a stable Activity/root boundary so locking, navigation
+  or recreation cannot orphan a pending result. Route results with an explicit
+  task ID; do not depend on a stale screen callback.
+- Guard launch failures, repeated taps, missing providers, cancellation and URI
+  access errors. Show an understandable error instead of throwing on the UI.
+- Use CreateDocument/ACTION_CREATE_DOCUMENT for a chosen .pvault filename and
+  location. Use OpenDocument for restore. Do not add broad filesystem permissions.
+- The standard OpenDocument contract already supplies normal document/openable
+  intent behaviour. Verify its actual generated intent before claiming a missing
+  CATEGORY_OPENABLE. Provider MIME behaviour and disabled Recent entries require
+  device evidence; they are not universal consequences of the .pvault extension.
+- Pass a URI to task-owned IO code. OpenInputStream/openOutputStream must run on
+  Dispatchers.IO inside use/finally, after validation, with clear ownership.
+- Close streams on every early return, cancelled coroutine, provider error and
+  failed session check. Do not open a stream on the main thread and abandon it.
+- Treat remember as surviving ordinary recomposition, not Activity recreation
+  or leaving the composition. Preserve non-secret task/URI state appropriately;
+  an in-memory ViewModel does not guarantee process-death recovery.
+- Do not put master/backup passwords, plaintext records or DEKs into saved-state
+  Bundles, rememberSaveable, navigation arguments or logs.
+
+Operation model:
+Idle -> Preparing -> Choosing document -> Writing/Verifying -> Preview/Complete,
+with explicit Cancelled/Failed states. Only one conflicting backup task at once.
+Callbacks must match their operation and original target-vault generation.
+
+Encrypt export data before external-provider handoff. Any staging must remain
+encrypted in app-private storage with bounded size and unique safe filenames.
+Clean staging on completion, cancellation, expiry and safe startup recovery.
+The live vault may lock while a previously authorised encrypted-byte write
+finishes, but no task may keep plaintext/DEK access indefinitely for a file picker.
+Screen-off/manual lock wins over any bounded picker grace period. Use a monotonic
+clock for elapsed time and make return/expiry ordering deterministic.
+
+On restore: validate byte size, framing, schema, algorithms, KDF cost, record
+count/length/structure and AEAD authentication before any database changes.
+Require correct backup password and target-session authentication. Wrong password,
+tampering, truncated input, provider failure or cancellation must leave both
+vaults unchanged. Preview only authenticated contents. Merge/Replace must commit
+atomically into the intended vault, with conflict handling described below.
+
+Do not label a write 'verified' merely because flush/close succeeded. If no
+readback verification is performed, use an accurate 'Backup saved' message.
+Apply size/memory bounds to EXPORT too; avoid concurrent full-vault JSON copies.
+
+========================================================================
+06. SECOND USER-VISIBLE BLOCKER: KEYBOARD BLACK/BLANK HALF-SCREEN
+========================================================================
+
+Fix the owner's real-device problem where opening the Android keyboard during
+password setup, unlock, notes or other inputs makes a large screen area black
+or blank and can leave only the input line usable.
+
+Inspect edge-to-edge/window theme, adjustResize, root background, Scaffold inset
+ownership, nested Scaffolds, imePadding, scrolling and focus visibility. Earlier
+source used safeDrawing in the parent Scaffold, padding(innerPadding) without
+consumeWindowInsets and child editors with separate imePadding. This is a
+source-supported hypothesis for inset problems, not a device-proven diagnosis.
+
+Define one owner per system-bar/IME inset. Apply/consume Scaffold padding
+correctly and prevent duplicate keyboard-sized space from nested containers.
+Do not pile on fixed spacers or remove all padding indiscriminately. The manifest
+already had adjustResize; repeating that attribute alone is not proof of a fix.
+
+Use a full-window Material Surface/background that remains correct during IME
+animations and theme changes. Keep focused fields visible through appropriate
+scrolling/bring-into-view and sensible constraints. Save/confirm controls must
+remain reachable. Avoid form collapse and inaccessible bottom controls.
+
+Test setup, unlock, note/credential editing, password checker and backup-password
+fields in light/dark/system theme, portrait/landscape, large fonts and different
+navigation/keyboard configurations. Include Realme 11 Pro+ / Android 15 when
+available, clearly labelling actual device evidence versus emulator checks.
+
+Distinguish physical black UI from screenshot/screen-recording redaction caused
+by FLAG_SECURE. Preserve screenshot protection; disabling it is not the
+production keyboard fix. Use synthetic data for all visual diagnostics.
+
+========================================================================
+07. DATA INTEGRITY AND SESSION FIXES THAT MUST NOT BE OMITTED
+========================================================================
+
+These additional findings came from an earlier source review. Recheck them in
+the current source; if already fixed, show the regression evidence.
+
+N01 - Cross-vault primary-key collisions.
+Earlier EncryptedRecordEntity made recordId the global primary key, while Room
+inserts used REPLACE and restore preserved IDs. Restoring the same ID into slot 1
+could replace a slot-0 row. A small host SQLite reproduction confirmed that
+conflict behaviour; it was not a physical-device exploit test.
+Enforce per-vault record identity with a composite key (vault_slot, record_id)
+or reviewed opaque storage identity. Add non-destructive migrations and ensure
+all DAO writes/queries/deletes are vault-scoped. Test intentionally identical IDs
+in both vaults and verify the other vault's rows/ciphertexts stay unchanged.
+
+N02 - Silent omission of corrupted records.
+Earlier decryptEntityOrNull plus mapNotNull could silently omit unreadable
+records during export and omit then delete them during a full-slot merge rewrite.
+Make authentication/parse failures explicit. Abort ordinary backup/merge on
+unexpected corruption and preserve original ciphertext. Never call an incomplete
+recovery export a complete backup or overwrite unreadable records silently.
+
+N03 - Late unlock reopens after screen-off/manual lock.
+Earlier unlock jobs were not cancelled/invalidated by lock before repository
+openSession completed. Serialize KDF requests and bind every authentication
+attempt to a request generation invalidated by lock, screen-off or supersession.
+Check atomically before session opening; synchronous KDF completion may outlive
+coroutine cancellation. A stale successful result must wipe temporaries and
+leave Locked. Extend operation checks through write commits/UI publication.
+
+N04 - APK metadata failure accepted as success.
+Earlier getPackageArchiveInfo(null result) entered a production fallback for JVM
+tests and constructed VerifiedCandidateApk from manifest versions anyway. Fail
+closed if actual package/version data cannot be validated. Inject test doubles
+in tests instead of creating a release verification bypass. Retain true apksig
+signature verification and installed-signer trust checks.
+
+N05 - Decoy password reconfiguration erases data.
+Earlier 'configure or update decoy password' created a fresh DEK and deleted all
+existing decoy records. Separate initial provisioning, authenticated password
+change and destructive reset. Preserve data for a password change; if the
+independent old decoy key/password is needed, request it only inside the app's
+secure flow. A reset must be labelled destructive and explicitly confirmed.
+
+N06 - Partial setup/configuration mutations.
+Several DAO calls are not one logical transaction merely because each insert is
+atomic. Stage setup/decoy changes and commit related envelopes/records together.
+Coordinate Keystore side effects with a recoverable order. Inject interruption
+between steps; never silently recreate existing keys after failure.
+
+N07 - Build reproducibility and debug/release separation.
+The earlier ZIP lacked wrapper scripts/JAR and CI published debug artifacts as
+latest. Restore a complete compatible verified build setup. Keep debug artifacts
+distinct from approved production output. Confirm the CURRENT workflows before
+repeating the older ephemeral-key finding; the later handoff says it was changed.
+
+N08 - Secret custom fields altered/displayed.
+Earlier custom values were trimmed and displayed in plaintext despite isSecret.
+Preserve exact secret values, including meaningful leading/trailing spaces.
+Trim labels only where intended. Add masked display, deliberate reveal/copy and
+no sensitive previews. Encryption at rest remains mandatory for every field.
+
+========================================================================
+08. TRIAGE ALL 20 ISSUES IN THE COMPLETE BUG/SECURITY REPORT
+========================================================================
+
+Create a traceable checklist with current status, evidence, fixes and tests for
+every item below. Do not copy severity labels or remedies uncritically.
+
+BUG 01 - Legacy 16-bit requestCode failure.
+Confirm the stack trace and resolved Fragment/Activity versions; fix dependency
+compatibility and verify both picker flows plus biometrics. See Section 05.
+
+BUG 02 - Picker state, lifecycle, URI/provider IO and descriptors.
+Implement task-owned, session-safe result handling. Remember survives ordinary
+recomposition. A ViewModel helps with recreation but is not process-death storage.
+Guard launch and open/close IO safely; do not request broad storage access.
+
+BUG 03 - Decoy state inferred from row count.
+Persist/derive an authoritative encrypted configuration flag independent of
+decoy records. An active empty decoy must still block real biometric unlocking.
+Use a safe envelope/configuration migration and tests. Filler rows/HMAC labels
+alone do not establish forensic deniability; acknowledge size/count/history limits.
+
+BUG 04 - Settings fingerprints real versus decoy.
+Use generic active-vault settings with correctly scoped capabilities. Reduce
+obvious real-only labels/cards in normal decoy experience without granting real
+management access. Do not add dummy biometric controls that jump into the real
+vault. Real biometrics remain disabled when decoy is configured. UI similarity
+does not mean the hidden vault is mathematically undetectable.
+
+BUG 05 - Concurrent unlock and restartable backoff.
+Use repository-level single-flight/Mutex plus a synchronous/invariant-safe
+request guard, not just a disabled button. Prevent concurrent Argon2 memory spikes.
+Use bounded restart-aware cooldown with clock/reboot handling and minimal coarse
+metadata. It cannot prevent offline guessing on copied data. No destructive wipe
+or permanent denial of access. Include N03 lock-during-unlock regression coverage.
+
+BUG 06 - Unapproved OTA paths and inconsistent CI signer.
+Restrict production metadata and initial release URLs to the approved owner/repo;
+keep developer overrides/debug simulators isolated. Validate parsed origins,
+normalised paths and redirects. Verify the newer persistent-key workflow before
+claiming keys still change every run. Enforce Section 04 exposure handling.
+
+BUG 07 - Clipboard tracking discarded before a clear succeeds.
+Keep sensitive marking and short lifetime. Null/restricted clipboard reads are
+not proof of ownership. Retain bounded pending-clear tracking and retry when
+focus/foreground permits, clearing only the still-owned item. Never blindly
+erase a newer unrelated clip on null/exception. Do not promise exact background
+30-second clearing on every Android/OEM or that the clip stays forever; platform
+auto-clear behaviour varies. Avoid logging or persisting password digests.
+
+BUG 08 - Secret Strings and memory lifetime.
+Minimise plaintext copies, lifetimes and whole-vault JSON allocations. Use
+wipeable buffers at appropriate crypto/serialization boundaries and clear
+session references on lock. Streaming can help but still creates buffers/strings.
+Do not promise perfect JVM/ART memory erasure or call a streaming rewrite a
+complete defence against a compromised process/OS.
+
+BUG 09 - Unnecessary unlock telemetry in DataStore.
+Stop saving detailed KDF/timestamp history after every unlock/failure. Keep
+optional benchmarks explicit, minimal and appropriately protected. Distinguish
+app-private preferences from globally readable files. Retain only the minimum
+coarse state needed for legitimate cooldown/reminder behaviour.
+
+BUG 10 - Ordinary password change versus biometric failure.
+Rewrapping an existing random DEK is not automatically a cryptographic defect;
+it does not revoke a DEK already obtained from an older compromised copy. State
+that boundary. A separate compromise-recovery rekey needs atomic re-encryption,
+compatibility and failure tests. Do not force unsafe full rekeying at every
+password change. Fix swallowed biometric errors/invalidation, strong-auth
+configuration and clear password fallback without destroying vault data.
+
+BUG 11 - Decoy/global preference weakens screenshot policy.
+Enforce FLAG_SECURE on locked/setup/secret screens by default. A decoy must not
+disable real-vault capture protection. Any opt-out needs deliberate authenticated
+scope. Preserve this policy while repairing keyboard layout and external flows.
+
+BUG 12 - Drafts lost on rotation/resizing.
+Keep allowed session-scoped drafts in lifecycle-aware memory and clear them on
+genuine lock. Do not blindly save plaintext passwords/notes in Bundles or saved
+state. Define encrypted draft recovery or safe cancellation after process death.
+Test rotation, theme changes, multi-window, navigation and lock independently.
+
+BUG 13 - Save & Done closes before successful save.
+Wire the existing save completion result through UI and close only after success.
+Keep invalid/failed drafts visible. Define Back/Close/pending autosave flushing
+or explicit discard. Loss within a 350 ms debounce is a cancellation/race risk,
+not proof that every Close cancels a ViewModel-owned coroutine. Test actual paths.
+
+BUG 14 - Folder names/identity and missing management.
+Use stable IDs and migrate existing name references safely. Treat All as a
+distinct filter state, reject ambiguous duplicates and support create/rename/
+delete in both Notes/Passwords. Deleting a folder must reassign records through
+a clear policy, never delete their contents without a separate explicit action.
+
+BUG 15 - Pending checklist/custom inputs and isSecret.
+Commit complete pending items once on explicit save, or clearly request their
+completion. Do not silently discard partially entered fields or duplicate items
+on autosave. Honour secret visibility and preserve exact values (N08).
+
+BUG 16 - Locked update has invisible progress/awkward permission return.
+Provide an app-level non-secret update surface while the vault stays locked.
+Resume validated pending installation after Android permission settings return.
+Do not keep the real vault unlocked with a picker grace window to improve OTA UX.
+Lock before external settings/installer and require Android confirmation.
+
+BUG 17 - Double startup manifest request.
+Reuse already validated metadata and change prompt visibility in memory. Keep
+rate limits, per-version reminder choices, cancellation and manual checking.
+
+BUG 18 - R8/namespace.
+R8 is size/defence-in-depth work, not encryption. Enable it with correct tested
+rules only after correctness/security fixes, and test the minified release.
+Keep private mapping files. com.example namespace is not itself an exploit;
+do not break package/application identity for cosmetic renaming.
+
+BUG 19 - Weak estimator heuristics and stale reuse feedback.
+Fix dictionary errors, multiple-pattern analysis and state invalidation, or use
+a maintained compatible offline guessability estimator with licensed bundled
+data. Do not equate character-pool entropy with measured safety for human-chosen
+passwords. Keep estimates conservative, no unsupported cracking-time guarantees,
+and no online password/hash/prefix/breach requests.
+
+BUG 20 - Credential pinning and orphan coroutine scope.
+Implement requested pin UI/sorting consistently and preserve persistence/backup
+behaviour. Give clipboard jobs/listeners an explicit lifecycle owner and cleanup.
+Do not remove requested features just to eliminate model fields.
+
+========================================================================
+09. INSTAGRAM, CREDITS AND PREMIUM QUALITY
+========================================================================
+
+About must display professionally:
+PRIVATE VAULT
+Developed by Tp Editz
+Telegram: @Tp_Editz
+Instagram: @tp_ediitz
+Actual installed versionName/versionCode.
+
+External profile URLs:
+https://t.me/Tp_Editz
+https://www.instagram.com/tp_ediitz/
+
+Use the clean Instagram URL without the supplied tracking query. Keep the exact
+username with two consecutive i characters. Add copy/open actions matching the
+existing visual system and accessible labels; stack/wrap on narrow screens.
+Do not fetch remote avatars or add social SDKs/tracking. Open externally only
+after explicit action, safely handle missing handlers and send no vault secrets.
+Public-handle copying should not interfere with pending secret-clipboard checks.
+
+Keep the current premium design direction while repairing functionality: clear
+typography, consistent spacing, light/dark/system themes, comfortable touch
+targets, smooth non-blocking navigation and readable scrolling editors. Respect
+font scaling, TalkBack and system motion preferences. Run KDF/database/provider/
+network work off the main thread. Do not reduce encryption cost for animations.
+
+========================================================================
+10. INVESTIGATE THE SPECIFIC REPORTED OTA PUBLICATION FAILURE
+========================================================================
+
+The handoff says run 41983802119 stopped at 'Check required secrets' because
+OTA_REPO_TOKEN was empty, before signing/building/publishing the OTA artifact.
+If the actual logs confirm that sequence, it explains that particular job's
+failure. Do not blame Gradle, parser, checksum or phone for steps that never ran.
+It does not establish the CURRENT secret state or rule out later client bugs.
+
+Check whether the owner already added/fixed the secret. GitHub does not reveal
+saved secret plaintext through normal inspection; a secret name alone does not
+prove that the job receives a usable credential. Use safe workflow preflight.
+
+Expected name: OTA_REPO_TOKEN.
+Expected storage location: Actions secrets of the PRIVATE Android source repo.
+Reference settings page:
+https://github.com/tpeditz/Private-vault-android-/settings/secrets/actions
+
+If a fine-grained PAT is used, limit it to resource owner tpeditz, target repo
+Private-vault-updates, Contents read/write and default read-only metadata. Use
+the minimum lifetime/permissions supported by the real workflow. A suitable
+GitHub App credential is an alternative if available; do not force unrelated
+account setup for a beginner.
+
+Never ask me to paste the token into chat or a source file. Guide me to enter it
+only in the official GitHub secret form. Explain the exact screen, repository,
+secret name and expected outcome. Do not pretend you can read/create my secret
+without an authorised credential flow. Check expiration, repo selection, owner,
+environment approvals and workflow/fork restrictions where relevant.
+
+The private repo's default GITHUB_TOKEN cannot simply be assumed to write to a
+different repo. Build in private; use narrowly scoped cross-repo credentials for
+approved public release writes. Never print secrets, dumps, signing material or
+authenticated URLs. Avoid shell tracing for secret handling.
+
+A preflight should fail clearly for absent/invalid credentials and verify target
+access without destructive test writes. A successful read request alone is not
+proof of write permission; validate through documented permissions and the
+authorised publication stage, not an unapproved throwaway public commit.
+
+========================================================================
+11. REPAIR THE OTA PUBLISHER AND MANIFEST CONTRACT
+========================================================================
+
+Inspect current build-apk.yml, publish-ota.yml, catalog/build configuration,
+OtaUpdateManager, UI/ViewModel, FileProvider and tests before changing them.
+
+Prepare this controlled release process:
+1. Validate baseline/version/signing policy and relevant owner authorisation.
+2. Build one final APK artifact with the intended identity.
+3. Cryptographically verify it; extract actual package/version/signing data.
+4. Compute checksum and byte size from THAT exact final file.
+5. Prepare a unique release tag/asset and plain-text notes.
+6. When publication is authorised, upload/promote the verified asset first.
+7. Confirm the public asset is available and matches expected bytes/identity.
+8. Publish/update the compatible update.json LAST.
+9. Fetch manifest and asset anonymously and verify the public outputs.
+
+There is no single atomic transaction across a release asset and a Git commit.
+Use safe ordering and retain the previous valid manifest/release on failure.
+Do not point clients at a draft/unavailable asset. Cleanup/recovery must not
+delete the last working release or overwrite old immutable bytes.
+
+Use one source of truth for version metadata; remove misleading hardcoded
+workflow labels. Avoid racing publishers, duplicate tags and unsafe reruns.
+Detect an already-published artifact and verify identity before deciding to
+resume, stop or publish a new version. Do not silently reuse a versionCode for
+different production APK bytes. Update manifest create/update cases correctly.
+
+Document the schema actually accepted by the installed baseline. The later
+handoff claims versionCode, versionName, apkUrl, sha256, releaseNotes, publishedAt
+and fileSizeBytes. Verify those fields from code/artifact before generating the
+real file. Older specifications used downloadUrl and additional identity/schema
+fields. Preserve bootstrap compatibility deliberately; do not guess or publish
+two conflicting URLs/checksums. Numeric code policy must work with supported
+Android ranges; switching a parser to Long alone does not solve schema/version
+limits. Compare versionCode numerically and offer strictly newer releases.
+
+Validate response size, field types/ranges/lengths, duplicate-key ambiguity,
+non-empty APK URL/hash, checksums, byte size and supported schema. Optional size
+absence must not remove the independent download-size cap. Treat notes as
+untrusted bounded plain text, never executable HTML. No placeholder links or
+dummy hashes in a real release.
+
+========================================================================
+12. OTA CLIENT TRUST, REDIRECTS AND USER CHOICE
+========================================================================
+
+Keep normal HTTPS/TLS validation. No trust-all certificate manager or HTTP
+fallback. Limit the manifest/initial release URL to the approved repository.
+Validate every redirect BEFORE sending the next request, including HTTPS scheme,
+appropriate delivery host, ports/user-info and path rules for that stage. Checking
+only the final response URL can allow an unwanted request to escape beforehand.
+Do not apply repository path rules to CDN paths that legitimately use different
+structures; map the actual authorised download chain and test it narrowly.
+
+Before installer handoff validate complete size/checksum, actual apksig signature,
+trusted installed signer or explicitly reviewed lineage, applicationId, actual
+candidate versionCode and Android compatibility. Manifest certificate/hash values
+alone are not a trust anchor. Fail closed on missing metadata, unsupported APK,
+parse failure or any mismatch. No test-only bypass in release code.
+
+The updater must never read vault databases, keys, notes, passwords or backups.
+Keep downloads in app-controlled storage; clean partial/obsolete files safely.
+Lock before external installer/settings activities and use narrowly scoped
+FileProvider grants. Returning from settings should resume the pending update
+workflow without requiring the vault to be exposed. Android confirms install.
+An installer launch is not installation success; check installed version afterward.
+
+Required dialog:
+- Update Now: start a real download, show progress/cancel/retry, verify, then ask
+  Android to install with user confirmation.
+- Update Later: dismiss and allow normal app use.
+- Remind Me Later: next app launch, tomorrow or three days, stored locally for
+  that version and not repeatedly shown before the chosen time.
+
+Manual Settings -> Updates remains available to update earlier than a reminder.
+Keep progress/errors/install controls available while locked. No invisible
+download, forced update, automatic install, remote kill switch or offline lockout.
+New release policy, dismissals, app restarts and clock changes need explicit
+reminder-state tests. Do not transmit vault information through reminders.
+
+========================================================================
+13. IMPLEMENTATION ORDER AND HONEST TEST EVIDENCE
+========================================================================
+
+Stage 1: Match current source/build/installed baseline, classify all findings and
+         diagnose picker exception; record the exposed-key production gate.
+Stage 2: Repair backup/restore, isolation/corruption/transactions and safe drafts.
+Stage 3: Repair keyboard layouts, decoy/authentication/biometric/clipboard policy,
+         editor/folder/checker issues and Instagram credits.
+Stage 4: Repair OTA workflow credentials, publisher, schema compatibility and
+         client UX/trust checks without publishing automatically.
+Stage 5: Run focused regressions, relevant existing tests, builds and real-device
+         flows. Produce a reviewable candidate and publication prerequisites.
+
+Minimum regression matrix; record PASS, FAIL, BLOCKED or NOT TESTED for each:
+
+T01. Dependency graph confirms compatible Fragment/Activity/Biometric versions.
+T02. Both actual Save As/Open Document pickers open without the 16-bit exception.
+T03. Export creates a valid encrypted .pvault; cancellation/provider denial/full
+     storage produce errors without crash or false 'verified' success.
+T04. Restore with correct password previews and performs Merge/Replace safely.
+T05. Wrong password/corruption/unsupported/oversized input leaves both vaults intact.
+T06. Backup round-trip works on a compatible fresh install without the old Keystore.
+T07. Identical record IDs in different vaults cannot replace one another.
+T08. Unreadable existing ciphertext is preserved, not silently dropped on merge.
+T09. Picker rotation/navigation/lock/process recreation follows documented safe
+     task and URI handling without plaintext saved-state secrets.
+T10. Late file/authentication callbacks cannot cross operations/vault generations.
+T11. Rapid unlock taps start only one KDF; lock/screen-off during KDF stays locked.
+T12. Active empty decoy still blocks real biometric enrollment/unlock.
+T13. Decoy password change preserves data; explicit reset warns of destruction.
+T14. Setup/decoy/migration failure injection does not leave mixed keys/records.
+T15. Keyboard show/hide has no unexplained black half-screen/double IME gap and
+     leaves focused inputs/save controls usable on tested layouts/devices.
+T16. Rotation preserves allowed drafts; genuine lock removes secret access.
+T17. Invalid/failed Save keeps editor open; pending checklist/custom inputs survive
+     explicit save without duplicates, silent loss or trimming secret spaces.
+T18. Folder IDs/filtering/rename/delete and credential pinning work consistently.
+T19. Clipboard ownership prevents erasing newer unrelated clips; null/background
+     reads keep safe bounded retry behaviour with accurate OS limitations.
+T20. Biometric cancellation/invalidation falls back without data reset; capture
+     policy cannot be weakened by decoy/global settings unexpectedly.
+T21. No routine unlock-history telemetry, secret logs or unintended network calls.
+T22. Instagram/Telegram credits and exact clean URLs work through explicit actions.
+T23. Missing/invalid OTA_REPO_TOKEN yields a precise safe preflight error.
+T24. Installed baseline and new client parse the same real manifest contract.
+T25. Offline/404/500/timeout/bad JSON/bad type/oversized response fail safely.
+T26. Untrusted origin/path/redirect/HTTP downgrade is rejected before escape.
+T27. Wrong hash/signer/package/version/null metadata never reaches installation.
+T28. Update Now/Later/Remind preserve choice and no download occurs before consent.
+T29. Locked updates show progress and resume correctly after permission settings.
+T30. Publication uses the exact verified APK and matching size/hash/URL; anonymous
+     fetch checks succeed only after authorised publication.
+T31. Actual in-place upgrade over the baseline preserves real AND decoy passwords,
+     notes, credentials, folders/tags/trash, relevant settings and key usability.
+T32. Release is non-debuggable, excludes test UI, uses approved secure signing
+     policy and passes relevant minified-release tests if R8 is enabled.
+
+Use synthetic records in all evidence. Add targeted regressions for actual
+invariants; keep useful existing tests. Unit/Robolectric tests do not establish
+phone SAF/IME/Keystore/installer behaviour. Test real Android 15/Realme behaviour
+where possible, and honestly mark device-unavailable checks NOT TESTED.
+
+If the owner must collect logs or perform an installation, give short clear
+instructions. Never claim a phone test passed because CI was green. A successful
+build is separate from public publication, updater execution and data survival.
+
+========================================================================
+14. DELIVERABLES AND PUBLICATION BOUNDARY
+========================================================================
+
+Produce:
+1. Repaired private source project, complete compatible build setup and an
+   exportable project ZIP when direct repository access/export is unavailable.
+2. File-by-file changes and findings checklist, identifying obsolete/fixed/
+   confirmed/unconfirmed items with evidence.
+3. Actual crash diagnosis and dependency findings, or explicit missing evidence.
+4. Non-destructive database/envelope migration and backup-compatibility results.
+5. Test matrix with actual commands/builds/devices and unresolved blockers.
+6. A genuinely built test APK/candidate, labelled accurately, and actual package,
+   versions, APK SHA-256/size and public certificate fingerprint.
+7. Signing-exposure assessment and secure production transition proposal that
+   preserves data and does not silently change trust.
+8. Compatible update.json prepared from real final artifact values, plus planned
+   release metadata; never fabricate a working public URL or publication result.
+9. Beginner-friendly owner actions, including secure secret entry only if needed.
+
+You are authorised by this prompt to prepare private implementation changes,
+tests and candidate artifacts in the provided development environment. Do not
+send messages, change repository visibility, publish an APK/manifest or perform
+public distribution without the owner's explicit publication authorisation.
+Finish preparation and show the concrete result before seeking that final step.
+
+After authorised publication, report exact public manifest/release links, hash,
+size and anonymous verification. Until then label them PREPARED, NOT PUBLISHED.
+Do not select a success status that implies a step you did not actually perform.
+
+Report separate status for:
+- Application repairs: implemented/tested/blocked/not tested.
+- Build: successful/failed/not run.
+- Signing: controlled test only/production ready/migration blocked.
+- OTA publication: prepared/blocked/published and verified/not attempted.
+- Device upgrade: verified/not tested/failed.
+
+No destructive database fallback, silent reset, uninstall shortcut, waived
+signature check, invented test result, exposed secret or claim of total security.
+Keep the existing project and user data intact. Fix the app as well as its OTA
+pipeline; do not let a missing publication token erase the application repair
+scope. Provide concrete working results and accurately state remaining limits.
+
+ENGINEERING REFERENCES TO VERIFY DURING IMPLEMENTATION
+https://developer.android.com/jetpack/androidx/releases/fragment
+https://developer.android.com/training/basics/intents/result
+https://developer.android.com/training/data-storage/shared/documents-files
+https://developer.android.com/develop/ui/compose/system/insets-ui
+https://developer.android.com/develop/ui/compose/state-saving
+https://developer.android.com/develop/ui/views/touch-and-input/copy-paste
+https://developer.android.com/privacy-and-security/keystore
+https://developer.android.com/tools/apksigner
+https://developer.android.com/studio/publish/app-signing
+
+FINAL DIRECTIVE
+
+Upgrade the actual PRIVATE VAULT project using this consolidated specification.
+Resolve the picker crash, keyboard layout, integrity/session/security problems,
+Instagram credits and OTA blockers with meaningful tests. Preserve offline use,
+independent vaults, installed identity and existing data. Prepare the candidate
+privately and seek publication approval only after the result is reviewable.
+
+MASTER IMPLEMENTATION PROMPT - END

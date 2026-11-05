@@ -7,6 +7,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -95,10 +96,11 @@ fun BackupAndRestoreScreen(
 ) {
     BackHandler { onBack() }
 
-    var exportPassword by rememberSaveable { mutableStateOf("") }
-    var confirmExportPassword by rememberSaveable { mutableStateOf("") }
+    // Section 05, BUG 02, BUG 12 & T09 Fix: Keep backup/restore passwords in non-saveable memory.
+    var exportPassword by remember { mutableStateOf("") }
+    var confirmExportPassword by remember { mutableStateOf("") }
 
-    var restorePassword by rememberSaveable { mutableStateOf("") }
+    var restorePassword by remember { mutableStateOf("") }
     var restoreMode by rememberSaveable {
         mutableStateOf(PortableBackupEngine.RestoreMode.MERGE_KEEP_NEWEST)
     }
@@ -122,6 +124,34 @@ fun BackupAndRestoreScreen(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+
+        if (uiState.backupOperationStage != BackupOperationStage.IDLE) {
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("backup_operation_stage_banner")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    if (uiState.isBusy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                    }
+                    Text(
+                        text = uiState.backupOperationStage.label,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+            }
+        }
 
         // N02 Fix: Explicit Integrity Warning if any corrupted record exists in the active slot
         if (uiState.corruptedRecordCount > 0) {
@@ -360,6 +390,20 @@ fun BackupAndRestoreScreen(
                 }
 
                 if (uiState.selectedRestoreUriString != null) {
+                    OutlinedButton(
+                        onClick = {
+                            viewModel.verifyAndPreviewSelectedUri(backupPassword = restorePassword)
+                        },
+                        enabled = !uiState.isBusy && restorePassword.isNotBlank(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("backup_preview_submit_button")
+                    ) {
+                        Icon(Icons.Filled.CheckCircle, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Preview Backup Contents")
+                    }
+
                     Button(
                         onClick = {
                             val submittedPass = restorePassword
@@ -389,6 +433,38 @@ fun BackupAndRestoreScreen(
                         }
                     }
                 }
+
+                val preview = uiState.verifiedRestorePreview
+                if (preview != null) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("verified_restore_preview_card")
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Authenticated Backup Preview (${preview.fileName})",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Records: ${preview.notesCount} notes • ${preview.credentialsCount} credentials • ${preview.foldersCount} folders",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text(
+                                text = "Created by PRIVATE VAULT v${preview.appVersionName}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -408,20 +484,20 @@ fun SecurityAndDecoySettingsScreen(
 ) {
     BackHandler { onBack() }
 
-    // R02 Fix: Active-vault password rotation state (works identically in Real and Decoy sessions)
-    var currentVaultPass by rememberSaveable { mutableStateOf("") }
-    var newVaultPass by rememberSaveable { mutableStateOf("") }
-    var confirmNewVaultPass by rememberSaveable { mutableStateOf("") }
+    // R02, BUG 02, BUG 12 & T09 Fix: Keep all password inputs in non-saveable memory.
+    var currentVaultPass by remember { mutableStateOf("") }
+    var newVaultPass by remember { mutableStateOf("") }
+    var confirmNewVaultPass by remember { mutableStateOf("") }
 
     // R02 & N05 Fix: Password-gated Plausible Deniability Policy Sheet state
     var showPolicyGateDialog by rememberSaveable { mutableStateOf(false) }
-    var gatePasswordInput by rememberSaveable { mutableStateOf("") }
+    var gatePasswordInput by remember { mutableStateOf("") }
 
     // Decoy Provisioning / Rotation / Destructive Reset state
-    var realPassForDecoy by rememberSaveable { mutableStateOf("") }
-    var currentDecoyPass by rememberSaveable { mutableStateOf("") }
-    var decoyPass by rememberSaveable { mutableStateOf("") }
-    var confirmDecoyPass by rememberSaveable { mutableStateOf("") }
+    var realPassForDecoy by remember { mutableStateOf("") }
+    var currentDecoyPass by remember { mutableStateOf("") }
+    var decoyPass by remember { mutableStateOf("") }
+    var confirmDecoyPass by remember { mutableStateOf("") }
     var seedDecoyData by rememberSaveable { mutableStateOf(true) }
     var confirmDestructiveReset by rememberSaveable { mutableStateOf(false) }
 
@@ -1336,13 +1412,19 @@ fun OtaUpdatesScreen(
                         )
                         Button(
                             onClick = {
-                                context.startActivity(
-                                    viewModel.otaUpdateManager.buildInstallVerifiedApkIntent(
-                                        otaState.verifiedApkFile
-                                    )
+                                val installIntent = viewModel.otaUpdateManager.buildInstallVerifiedApkIntent(
+                                    otaState.verifiedApkFile
                                 )
+                                viewModel.lockVaultNow("Vault locked before launching system package installer.")
+                                try {
+                                    context.startActivity(installIntent)
+                                } catch (e: Exception) {
+                                    viewModel.setErrorBanner("Could not launch package installer: ${e.message}")
+                                }
                             },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ota_confirm_install_button")
                         ) {
                             Text("Confirm Installation in Android")
                         }
@@ -1356,11 +1438,17 @@ fun OtaUpdatesScreen(
                         )
                         Button(
                             onClick = {
-                                context.startActivity(
-                                    viewModel.otaUpdateManager.buildManageUnknownAppSourcesIntent()
-                                )
+                                val settingsIntent = viewModel.otaUpdateManager.buildManageUnknownAppSourcesIntent()
+                                viewModel.lockVaultNow("Vault locked before opening Android Unknown App Sources settings.")
+                                try {
+                                    context.startActivity(settingsIntent)
+                                } catch (e: Exception) {
+                                    viewModel.setErrorBanner("Could not open Unknown App Sources settings: ${e.message}")
+                                }
                             },
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ota_open_unknown_sources_button")
                         ) {
                             Icon(Icons.Filled.Build, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
@@ -1369,11 +1457,15 @@ fun OtaUpdatesScreen(
                         OutlinedButton(
                             onClick = {
                                 if (viewModel.otaUpdateManager.canRequestPackageInstalls()) {
-                                    context.startActivity(
-                                        viewModel.otaUpdateManager.buildInstallVerifiedApkIntent(
-                                            otaState.verifiedApkFile
-                                        )
+                                    val installIntent = viewModel.otaUpdateManager.buildInstallVerifiedApkIntent(
+                                        otaState.verifiedApkFile
                                     )
+                                    viewModel.lockVaultNow("Vault locked before launching system package installer.")
+                                    try {
+                                        context.startActivity(installIntent)
+                                    } catch (e: Exception) {
+                                        viewModel.setErrorBanner("Could not launch package installer: ${e.message}")
+                                    }
                                 }
                             },
                             modifier = Modifier.fillMaxWidth()
@@ -1677,16 +1769,17 @@ fun AboutVaultScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Version ${OtaUpdateManager.getInstalledVersionName(context)} • Offline Encrypted Security Suite",
+                            text = "Version ${OtaUpdateManager.getInstalledVersionName(context)} (Code ${OtaUpdateManager.getInstalledVersionCode(context)}) • Offline Encrypted Security Suite",
                             style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag("about_installed_version_text")
                         )
                     }
                 }
 
                 HorizontalDivider()
 
-                // Developer Credits Block (Telegram + Instagram U04)
+                // Developer Credits Block (Telegram + Instagram U04, Section 09, T22)
                 Text(
                     text = "Developed by Tp Editz",
                     style = MaterialTheme.typography.titleMedium,
@@ -1699,34 +1792,69 @@ fun AboutVaultScreen(
                     fontFamily = FontFamily.Monospace
                 )
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            viewModel.copyPublicContactHandle("Telegram ID", "@Tp_Editz")
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("copy_telegram_id_button")
-                    ) {
-                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Copy Telegram ID")
-                    }
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                    val isNarrow = maxWidth < 360.dp
+                    if (isNarrow) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    viewModel.copyPublicContactHandle("Telegram ID", "@Tp_Editz")
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("copy_telegram_id_button")
+                            ) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Copy Telegram ID")
+                            }
+                            Button(
+                                onClick = {
+                                    pendingExternalDestination = "Telegram" to "https://t.me/Tp_Editz"
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("open_telegram_button")
+                            ) {
+                                Icon(Icons.Filled.OpenInBrowser, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Open Telegram")
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    viewModel.copyPublicContactHandle("Telegram ID", "@Tp_Editz")
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("copy_telegram_id_button")
+                            ) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Copy Telegram ID")
+                            }
 
-                    Button(
-                        onClick = {
-                            pendingExternalDestination = "Telegram" to "https://t.me/Tp_Editz"
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("open_telegram_button")
-                    ) {
-                        Icon(Icons.Filled.OpenInBrowser, contentDescription = null)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Open Telegram")
+                            Button(
+                                onClick = {
+                                    pendingExternalDestination = "Telegram" to "https://t.me/Tp_Editz"
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("open_telegram_button")
+                            ) {
+                                Icon(Icons.Filled.OpenInBrowser, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Open Telegram")
+                            }
+                        }
                     }
                 }
 
@@ -1739,34 +1867,69 @@ fun AboutVaultScreen(
                     fontFamily = FontFamily.Monospace
                 )
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = {
-                            viewModel.copyPublicContactHandle("Instagram ID", "@tp_ediitz")
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("copy_instagram_id_button")
-                    ) {
-                        Icon(Icons.Filled.ContentCopy, contentDescription = null)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Copy Instagram ID")
-                    }
+                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                    val isNarrow = maxWidth < 360.dp
+                    if (isNarrow) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    viewModel.copyPublicContactHandle("Instagram ID", "@tp_ediitz")
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("copy_instagram_id_button")
+                            ) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Copy Instagram ID")
+                            }
+                            Button(
+                                onClick = {
+                                    pendingExternalDestination = "Instagram" to "https://www.instagram.com/tp_ediitz/"
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("open_instagram_button")
+                            ) {
+                                Icon(Icons.Filled.OpenInBrowser, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Open Instagram")
+                            }
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    viewModel.copyPublicContactHandle("Instagram ID", "@tp_ediitz")
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("copy_instagram_id_button")
+                            ) {
+                                Icon(Icons.Filled.ContentCopy, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Copy Instagram ID")
+                            }
 
-                    Button(
-                        onClick = {
-                            pendingExternalDestination = "Instagram" to "https://www.instagram.com/tp_ediitz/"
-                        },
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("open_instagram_button")
-                    ) {
-                        Icon(Icons.Filled.OpenInBrowser, contentDescription = null)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Open Instagram")
+                            Button(
+                                onClick = {
+                                    pendingExternalDestination = "Instagram" to "https://www.instagram.com/tp_ediitz/"
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("open_instagram_button")
+                            ) {
+                                Icon(Icons.Filled.OpenInBrowser, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Open Instagram")
+                            }
+                        }
                     }
                 }
             }

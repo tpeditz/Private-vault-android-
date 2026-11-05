@@ -17,10 +17,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.net.URI
 import java.security.MessageDigest
 import java.security.cert.X509Certificate
@@ -30,14 +33,17 @@ import java.util.concurrent.TimeUnit
 /**
  * Self-contained HTTPS OTA Update Manager for PRIVATE VAULT.
  *
- * Security Invariants (B04 / N04 / R04 / R14 / R15):
- * 1. HTTPS-only transport with strict GitHub host and repository path allowlisting
- *    (`raw.githubusercontent.com/tpeditz/Private-vault-updates/...` and
- *    `github.com/tpeditz/Private-vault-updates/releases/download/...`), allowing custom repository
- *    overrides only in debug builds (`BuildConfig.DEBUG`).
+ * Security Invariants (B04 / N04 / R04 / R14 / R15 / Section 11 & 12):
+ * 1. HTTPS-only transport with strict GitHub host, port (443), no-userinfo, normalized path, and
+ *    hop-by-hop redirect validation BEFORE sending any redirected request (`T26`).
+ *    - Initial manifest requests must target `raw.githubusercontent.com/tpeditz/Private-vault-updates/...`
+ *    - Initial APK download requests must target `github.com/tpeditz/Private-vault-updates/releases/download/...`
+ *      or `raw.githubusercontent.com/tpeditz/Private-vault-updates/...`
+ *    - Redirect hops on APK downloads may resolve only to official GitHub release asset CDN hosts
+ *      (`objects.githubusercontent.com`, `release-assets.githubusercontent.com`).
  * 2. Never downloads an APK automatically—downloads ONLY when the user explicitly selects "Update Now".
  * 3. Verifies candidate APK using:
- *    - Exact SHA-256 file digest match against `update.json`
+ *    - Exact SHA-256 file digest match against `update.json` (and exact `fileSizeBytes` match when > 0)
  *    - Official `com.android.apksig.ApkVerifier` cryptographic signature verification
  *    - Exact SHA-256 signing certificate match against the currently installed app's trusted signer(s)
  *    - Non-null parsed package archive metadata (`N04`: fails closed if `ArchiveInfoParser` returns null)
@@ -104,11 +110,13 @@ class OtaUpdateManager(
         ) : OtaState
     }
 
+    // Section 12 Fix (T26): Disable automatic redirects so every redirect target is validated
+    // BEFORE the next HTTP request is sent over the network.
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
+        .followRedirects(false)
+        .followSslRedirects(false)
         .build()
 
     private val _otaState = MutableStateFlow<OtaState>(OtaState.Idle)
@@ -123,14 +131,14 @@ class OtaUpdateManager(
     ): OtaState = withContext(Dispatchers.IO) {
         _otaState.value = OtaState.Checking
         try {
-            validateAllowedHttpsUrl(manifestUrl, isManifestEndpoint = true)
-            val request = Request.Builder()
-                .url(manifestUrl)
-                .header("Accept", "application/json")
-                .header("Cache-Control", "no-cache")
-                .build()
-
-            httpClient.newCall(request).execute().use { response ->
+            executeWithValidatedRedirects(
+                initialUrl = manifestUrl,
+                isManifestEndpoint = true,
+                headers = mapOf(
+                    "Accept" to "application/json",
+                    "Cache-Control" to "no-cache"
+                )
+            ).use { response ->
                 if (!response.isSuccessful) {
                     val err = OtaState.Error(
                         title = "Update Check Failed",
@@ -140,7 +148,10 @@ class OtaUpdateManager(
                     return@withContext err
                 }
 
-                val bodyStr = response.body?.string().orEmpty()
+                val bodyStream = response.body?.byteStream()
+                    ?: throw IllegalStateException("Empty update manifest response.")
+                val bodyBytes = bodyStream.use { readBoundedBytes(it, MAX_MANIFEST_JSON_BYTES) }
+                val bodyStr = String(bodyBytes, Charsets.UTF_8)
                 if (bodyStr.isBlank()) {
                     val err = OtaState.Error(
                         title = "Invalid Update Manifest",
@@ -177,8 +188,8 @@ class OtaUpdateManager(
     }
 
     /**
-     * R15 Fix: Updates the prompt visibility of an already-fetched `UpdateAvailable` state without
-     * issuing a duplicate network request.
+     * R15 / BUG 17 Fix: Updates the prompt visibility of an already-fetched `UpdateAvailable`
+     * state in memory without issuing a duplicate network request.
      */
     fun setPromptDialogVisible(visible: Boolean) {
         val current = _otaState.value
@@ -195,8 +206,8 @@ class OtaUpdateManager(
     }
 
     /**
-     * R14 Fix: Re-evaluates `NeedsUnknownSourcesPermission` when the user returns from Android's
-     * "Install unknown apps" settings screen so they can immediately tap Install without re-downloading.
+     * R14 / BUG 16 Fix: Re-evaluates `NeedsUnknownSourcesPermission` when the user returns from
+     * Android's "Install unknown apps" settings screen so they can immediately tap Install without re-downloading.
      */
     fun refreshInstallPermissionState(): Boolean {
         val current = _otaState.value
@@ -220,33 +231,38 @@ class OtaUpdateManager(
     suspend fun downloadAndVerifyUpdate(manifest: UpdateManifest): OtaState =
         withContext(Dispatchers.IO) {
             val otaDir = File(context.cacheDir, "ota_updates").apply { mkdirs() }
+            // Clean up any older candidate files before downloading
+            otaDir.listFiles()?.forEach { file ->
+                if (file.name != "private_vault_update_v${manifest.versionCode}.apk") {
+                    runCatching { file.delete() }
+                }
+            }
             val candidateFile = File(otaDir, "private_vault_update_v${manifest.versionCode}.apk")
             if (candidateFile.exists()) {
                 candidateFile.delete()
             }
 
             try {
-                validateAllowedHttpsUrl(manifest.apkDownloadUrl, isManifestEndpoint = false)
                 _otaState.value = OtaState.Downloading(
                     manifest = manifest,
                     bytesDownloaded = 0L,
                     totalBytes = manifest.fileSizeBytes
                 )
 
-                val request = Request.Builder()
-                    .url(manifest.apkDownloadUrl)
-                    .build()
-
-                httpClient.newCall(request).execute().use { response ->
+                executeWithValidatedRedirects(
+                    initialUrl = manifest.apkDownloadUrl,
+                    isManifestEndpoint = false
+                ).use { response ->
                     if (!response.isSuccessful) {
                         throw IllegalStateException("APK download failed with HTTP ${response.code}.")
                     }
-                    // Validate final redirected URL host as well (R04)
-                    val finalUrl = response.request.url.toString()
-                    validateAllowedHttpsUrl(finalUrl, isManifestEndpoint = false)
 
                     val body = response.body ?: throw IllegalStateException("Empty APK response body.")
-                    val total = if (body.contentLength() > 0) body.contentLength() else manifest.fileSizeBytes
+                    val contentLength = body.contentLength()
+                    if (contentLength > MAX_APK_BYTES) {
+                        throw IllegalStateException("Candidate APK content-length ($contentLength) exceeds 150 MiB safety limit.")
+                    }
+                    val total = if (contentLength > 0) contentLength else manifest.fileSizeBytes
 
                     body.byteStream().use { input ->
                         FileOutputStream(candidateFile).use { output ->
@@ -254,11 +270,16 @@ class OtaUpdateManager(
                             var downloaded = 0L
                             var read: Int
                             while (input.read(buffer).also { read = it } != -1) {
-                                output.write(buffer, 0, read)
                                 downloaded += read
-                                if ( downloaded > MAX_APK_BYTES) {
+                                if (downloaded > MAX_APK_BYTES) {
                                     throw IllegalStateException("Downloaded APK exceeds 150 MiB safety limit.")
                                 }
+                                if (manifest.fileSizeBytes > 0L && downloaded > manifest.fileSizeBytes) {
+                                    throw SecurityException(
+                                        "Downloaded APK size ($downloaded bytes) exceeds manifest fileSizeBytes (${manifest.fileSizeBytes})."
+                                    )
+                                }
+                                output.write(buffer, 0, read)
                                 _otaState.value = OtaState.Downloading(
                                     manifest = manifest,
                                     bytesDownloaded = downloaded,
@@ -274,7 +295,8 @@ class OtaUpdateManager(
                 val verifiedSignerSha256 = verifyCandidateApkFile(
                     apkFile = candidateFile,
                     expectedFileSha256 = manifest.sha256Checksum,
-                    expectedVersionCode = manifest.versionCode.toLong()
+                    expectedVersionCode = manifest.versionCode.toLong(),
+                    expectedFileSizeBytes = manifest.fileSizeBytes
                 )
 
                 val nextState = if (canRequestPackageInstalls()) {
@@ -307,22 +329,79 @@ class OtaUpdateManager(
         }
 
     /**
+     * Executes an HTTPS GET request while validating every redirect hop BEFORE sending the next request (`T26`).
+     */
+    private fun executeWithValidatedRedirects(
+        initialUrl: String,
+        isManifestEndpoint: Boolean,
+        allowDebugCustomRepositoryPath: Boolean = BuildConfig.DEBUG,
+        headers: Map<String, String> = emptyMap(),
+        maxRedirects: Int = MAX_REDIRECT_HOPS
+    ): Response {
+        var currentUrl = initialUrl.trim()
+        for (hop in 0..maxRedirects) {
+            validateAllowedHttpsUrl(
+                url = currentUrl,
+                isManifestEndpoint = isManifestEndpoint,
+                allowDebugCustomRepositoryPath = allowDebugCustomRepositoryPath,
+                isRedirectHop = hop > 0
+            )
+
+            val requestBuilder = Request.Builder().url(currentUrl)
+            headers.forEach { (k, v) -> requestBuilder.header(k, v) }
+            val response = httpClient.newCall(requestBuilder.build()).execute()
+
+            if (response.code in REDIRECT_STATUS_CODES) {
+                val locationHeader = response.header("Location")
+                response.close()
+                if (locationHeader.isNullOrBlank()) {
+                    throw SecurityException("Redirect response (HTTP ${response.code}) missing Location header.")
+                }
+                if (hop == maxRedirects) {
+                    throw SecurityException("Too many redirect hops ($maxRedirects) while fetching update resource.")
+                }
+                val resolvedUri = try {
+                    URI(currentUrl).resolve(locationHeader.trim())
+                } catch (e: Exception) {
+                    throw IllegalArgumentException("Malformed redirect Location header: $locationHeader")
+                }
+                val nextUrl = resolvedUri.toString()
+                // Validate the redirect target BEFORE issuing the next network call!
+                validateAllowedHttpsUrl(
+                    url = nextUrl,
+                    isManifestEndpoint = isManifestEndpoint,
+                    allowDebugCustomRepositoryPath = allowDebugCustomRepositoryPath,
+                    isRedirectHop = true
+                )
+                currentUrl = nextUrl
+                continue
+            }
+            return response
+        }
+        throw SecurityException("Exceeded maximum redirect hops.")
+    }
+
+    /**
      * Verifies a candidate APK file on disk using:
-     * 1. Exact SHA-256 digest match against `expectedFileSha256`
+     * 1. Exact byte size check (when `expectedFileSizeBytes > 0`) and exact SHA-256 digest match
      * 2. Official Android `com.android.apksig.ApkVerifier` cryptographic signature verification
      * 3. Signer certificate SHA-256 match against the installed app's trusted signing certificate(s)
      * 4. Non-null package archive metadata (`N04` fail-closed!) confirming exact `packageName` match
      *    and strictly higher `versionCode`.
-     *
-     * Throws `SecurityException` or `IllegalArgumentException` on any mismatch and deletes the file.
      */
     fun verifyCandidateApkFile(
         apkFile: File,
         expectedFileSha256: String,
-        expectedVersionCode: Long
+        expectedVersionCode: Long,
+        expectedFileSizeBytes: Long = 0L
     ): String {
         require(apkFile.exists() && apkFile.length() > 0L) {
             "Candidate APK file does not exist or is empty."
+        }
+        if (expectedFileSizeBytes > 0L && apkFile.length() != expectedFileSizeBytes) {
+            throw SecurityException(
+                "APK byte size mismatch (expected $expectedFileSizeBytes bytes, got ${apkFile.length()} bytes)."
+            )
         }
 
         // 1. Verify exact SHA-256 checksum of the downloaded APK file
@@ -418,7 +497,7 @@ class OtaUpdateManager(
             releaseNotes = "• Verified Argon2id + AES-256-GCM dual-vault persistence\n" +
                 "• Preserves both Real and Decoy vaults across in-place APK upgrades\n" +
                 "• Signed with trusted release certificate",
-            publishedAt = "2026-03-31",
+            publishedAt = "2026-11-05",
             fileSizeBytes = 14_800_000L
         )
         _otaState.value = OtaState.UpdateAvailable(
@@ -456,19 +535,73 @@ class OtaUpdateManager(
         }
     }
 
-    fun parseAndValidateManifestJson(jsonString: String): UpdateManifest {
-        val root = JSONObject(jsonString)
-        val versionCode = root.getInt("versionCode")
-        val versionName = root.getString("versionName").trim()
-        val apkUrl = root.getString("apkUrl").trim()
-        val sha256 = root.getString("sha256").trim().lowercase(Locale.US)
-        val releaseNotes = root.optString("releaseNotes", "Security and stability improvements.")
-        val publishedAt = root.optString("publishedAt", "")
-        val fileSizeBytes = root.optLong("fileSizeBytes", 0L)
+    /**
+     * Parses and validates `update.json`, enforcing:
+     * - Size bound (`<= 64 KiB`)
+     * - No duplicate top-level JSON keys
+     * - Backward compatibility across `apkUrl` and `downloadUrl` (rejecting conflicting values)
+     * - Strict SHA-256 hex format, positive `versionCode`, and bounded plain-text `releaseNotes`.
+     */
+    fun parseAndValidateManifestJson(
+        jsonString: String,
+        allowDebugCustomRepositoryPath: Boolean = BuildConfig.DEBUG
+    ): UpdateManifest {
+        require(jsonString.toByteArray(Charsets.UTF_8).size <= MAX_MANIFEST_JSON_BYTES) {
+            "Update manifest exceeds maximum safe size (64 KiB)."
+        }
+        requireNoDuplicateTopLevelJsonKeys(jsonString)
 
-        require(versionCode > 0) { "Manifest versionCode must be > 0." }
-        require(versionName.isNotEmpty()) { "Manifest versionName cannot be empty." }
-        validateAllowedHttpsUrl(apkUrl, isManifestEndpoint = false)
+        val root = JSONObject(jsonString)
+        val versionCodeLong = root.getLong("versionCode")
+        require(versionCodeLong in 1L..Int.MAX_VALUE.toLong()) {
+            "Manifest versionCode ($versionCodeLong) is out of supported range."
+        }
+        val versionCode = versionCodeLong.toInt()
+        val versionName = root.getString("versionName").trim()
+        require(versionName.isNotEmpty() && versionName.length <= 64) {
+            "Manifest versionName must be between 1 and 64 characters."
+        }
+
+        val apkUrlPrimary = root.optString("apkUrl", "").trim()
+        val downloadUrlLegacy = root.optString("downloadUrl", "").trim()
+        if (apkUrlPrimary.isNotEmpty() && downloadUrlLegacy.isNotEmpty()) {
+            require(apkUrlPrimary == downloadUrlLegacy) {
+                "Ambiguous manifest: apkUrl and downloadUrl do not match."
+            }
+        }
+        val apkUrl = apkUrlPrimary.ifEmpty { downloadUrlLegacy }
+        require(apkUrl.isNotEmpty()) {
+            "Manifest is missing required apkUrl."
+        }
+
+        val sha256Primary = root.optString("sha256", "").trim().lowercase(Locale.US)
+        val sha256Legacy = root.optString("sha256Checksum", "").trim().lowercase(Locale.US)
+        if (sha256Primary.isNotEmpty() && sha256Legacy.isNotEmpty()) {
+            require(sha256Primary == sha256Legacy) {
+                "Ambiguous manifest: sha256 and sha256Checksum do not match."
+            }
+        }
+        val sha256 = sha256Primary.ifEmpty { sha256Legacy }
+
+        val rawReleaseNotes = root.optString("releaseNotes", "Security and stability improvements.")
+        val sanitizedNotes = rawReleaseNotes
+            .replace("\u0000", "")
+            .take(MAX_RELEASE_NOTES_CHARS)
+            .trim()
+            .ifEmpty { "Security and stability improvements." }
+
+        val publishedAt = root.optString("publishedAt", "").trim().take(64)
+        val fileSizeBytes = root.optLong("fileSizeBytes", root.optLong("apkSizeBytes", 0L))
+        require(fileSizeBytes in 0L..MAX_APK_BYTES) {
+            "Manifest fileSizeBytes ($fileSizeBytes) is out of valid bounds."
+        }
+
+        validateAllowedHttpsUrl(
+            url = apkUrl,
+            isManifestEndpoint = false,
+            allowDebugCustomRepositoryPath = allowDebugCustomRepositoryPath,
+            isRedirectHop = false
+        )
         require(sha256.matches(Regex("^[0-9a-f]{64}$"))) {
             "Manifest sha256 must be a valid 64-character hexadecimal SHA-256 digest."
         }
@@ -478,21 +611,22 @@ class OtaUpdateManager(
             versionName = versionName,
             apkDownloadUrl = apkUrl,
             sha256Checksum = sha256,
-            releaseNotes = releaseNotes,
+            releaseNotes = sanitizedNotes,
             publishedAt = publishedAt,
             fileSizeBytes = fileSizeBytes
         )
     }
 
     /**
-     * R04 Fix: Validates both HTTPS host AND canonical `tpeditz/Private-vault-updates` repository
-     * path in production builds, allowing custom GitHub paths under the allowlisted hosts only
-     * when `BuildConfig.DEBUG` is true.
+     * R04 & Section 12 Fix (T26): Validates HTTPS scheme, host allowlist, port (default/443 only),
+     * absence of userinfo (`user:pass@`), absence of `..` path traversal, and canonical
+     * `/tpeditz/Private-vault-updates/` repository path in production builds.
      */
     fun validateAllowedHttpsUrl(
         url: String,
         isManifestEndpoint: Boolean = false,
-        allowDebugCustomRepositoryPath: Boolean = BuildConfig.DEBUG
+        allowDebugCustomRepositoryPath: Boolean = BuildConfig.DEBUG,
+        isRedirectHop: Boolean = false
     ) {
         val parsed = try {
             URI(url.trim())
@@ -503,35 +637,92 @@ class OtaUpdateManager(
         require(scheme == "https") {
             "Insecure update URL rejected (HTTPS required): $url"
         }
+        require(parsed.userInfo == null) {
+            "Update URL with embedded userinfo rejected: $url"
+        }
+        require(parsed.port == -1 || parsed.port == 443) {
+            "Update URL with non-standard port (${parsed.port}) rejected: $url"
+        }
         val host = parsed.host?.lowercase(Locale.US)
             ?: throw IllegalArgumentException("Update URL missing host: $url")
         require(host in ALLOWED_HOSTS) {
             "Untrusted update host rejected ($host). Only official GitHub release hosts are permitted."
         }
 
+        val rawPath = parsed.rawPath ?: parsed.path ?: ""
+        val segments = rawPath.split('/')
+        require(segments.none { it == ".." || it == "." || it.equals("%2e%2e", ignoreCase = true) }) {
+            "Update URL containing path traversal segments rejected: $url"
+        }
+
+        val normalizedPath = parsed.normalize().path ?: ""
+
         if (!allowDebugCustomRepositoryPath) {
-            val path = parsed.path ?: ""
             if (isManifestEndpoint) {
                 require(
                     host == "raw.githubusercontent.com" &&
-                        path.startsWith("/tpeditz/Private-vault-updates/")
+                        normalizedPath.startsWith("/tpeditz/Private-vault-updates/")
                 ) {
-                    "Untrusted manifest repository path rejected ($host$path). Production updates must come from tpeditz/Private-vault-updates."
+                    "Untrusted manifest repository path rejected ($host$normalizedPath). Production updates must come from tpeditz/Private-vault-updates."
+                }
+            } else if (!isRedirectHop) {
+                // Initial APK URL in update.json must point to the official tpeditz/Private-vault-updates repository
+                val isOfficialInitialApkPath =
+                    (host == "github.com" && normalizedPath.startsWith("/tpeditz/Private-vault-updates/releases/download/")) ||
+                        (host == "raw.githubusercontent.com" && normalizedPath.startsWith("/tpeditz/Private-vault-updates/"))
+                require(isOfficialInitialApkPath) {
+                    "Untrusted initial APK download path rejected ($host$normalizedPath). Production updates must come from tpeditz/Private-vault-updates."
                 }
             } else {
-                val isOfficialReleasePath =
-                    (host == "github.com" && path.startsWith("/tpeditz/Private-vault-updates/releases/download/")) ||
-                        (host == "raw.githubusercontent.com" && path.startsWith("/tpeditz/Private-vault-updates/")) ||
-                        (host == "objects.githubusercontent.com" || host == "release-assets.githubusercontent.com")
-                require(isOfficialReleasePath) {
-                    "Untrusted APK download path rejected ($host$path). Production updates must come from tpeditz/Private-vault-updates."
+                // Redirect hop from github.com/tpeditz/Private-vault-updates/releases/download/...
+                val isOfficialRedirectTarget =
+                    (host == "github.com" && normalizedPath.startsWith("/tpeditz/Private-vault-updates/releases/download/")) ||
+                        (host == "raw.githubusercontent.com" && normalizedPath.startsWith("/tpeditz/Private-vault-updates/")) ||
+                        (host in ALLOWED_CDN_REDIRECT_HOSTS && normalizedPath.isNotEmpty())
+                require(isOfficialRedirectTarget) {
+                    "Untrusted APK redirect target rejected ($host$normalizedPath)."
                 }
             }
         }
     }
 
+    private fun readBoundedBytes(input: InputStream, maxBytes: Int): ByteArray {
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(8 * 1024)
+        var total = 0
+        var read: Int
+        while (input.read(buffer).also { read = it } != -1) {
+            total += read
+            if (total > maxBytes) {
+                throw IllegalArgumentException("Response exceeds maximum allowed byte size ($maxBytes bytes).")
+            }
+            out.write(buffer, 0, read)
+        }
+        return out.toByteArray()
+    }
+
+    private fun requireNoDuplicateTopLevelJsonKeys(jsonString: String) {
+        val keyRegex = Regex(""""([A-Za-z0-9_]+)"\s*:""")
+        val seenKeys = HashSet<String>()
+        for (match in keyRegex.findAll(jsonString)) {
+            val key = match.groupValues[1]
+            require(seenKeys.add(key)) {
+                "Duplicate JSON key '$key' rejected in update manifest."
+            }
+        }
+    }
+
     companion object {
-        private const val MAX_APK_BYTES = 150L * 1024L * 1024L
+        const val MAX_APK_BYTES = 150L * 1024L * 1024L
+        const val MAX_MANIFEST_JSON_BYTES = 64 * 1024
+        const val MAX_RELEASE_NOTES_CHARS = 4_000
+        private const val MAX_REDIRECT_HOPS = 5
+        private val REDIRECT_STATUS_CODES = setOf(301, 302, 303, 307, 308)
+
+        val ALLOWED_CDN_REDIRECT_HOSTS = setOf(
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com"
+        )
 
         val ALLOWED_HOSTS = setOf(
             "raw.githubusercontent.com",
@@ -539,6 +730,23 @@ class OtaUpdateManager(
             "objects.githubusercontent.com",
             "release-assets.githubusercontent.com"
         )
+
+        /**
+         * Generates a canonical `update.json` manifest string compatible with both the installed
+         * baseline (`versionCode 2`/`3`) and Version 5 (`versionCode 4`).
+         */
+        fun generateCompatibleManifestJson(manifest: UpdateManifest): String {
+            val obj = JSONObject()
+            obj.put("versionCode", manifest.versionCode)
+            obj.put("versionName", manifest.versionName)
+            obj.put("apkUrl", manifest.apkDownloadUrl)
+            obj.put("downloadUrl", manifest.apkDownloadUrl)
+            obj.put("sha256", manifest.sha256Checksum.lowercase(Locale.US))
+            obj.put("fileSizeBytes", manifest.fileSizeBytes)
+            obj.put("publishedAt", manifest.publishedAt)
+            obj.put("releaseNotes", manifest.releaseNotes)
+            return obj.toString(2)
+        }
 
         fun getInstalledVersionCode(context: Context): Long {
             val pkgInfo = context.packageManager.getPackageInfo(context.packageName, 0)
@@ -552,7 +760,7 @@ class OtaUpdateManager(
 
         fun getInstalledVersionName(context: Context): String {
             val pkgInfo = context.packageManager.getPackageInfo(context.packageName, 0)
-            return pkgInfo.versionName ?: "1.0.1"
+            return pkgInfo.versionName ?: "1.0.3"
         }
 
         @Suppress("DEPRECATION")

@@ -117,6 +117,29 @@ data class StagedBackupMetadata(
     val suggestedFileName: String
 )
 
+enum class BackupOperationStage(val label: String) {
+    IDLE("Idle"),
+    PREPARING_EXPORT("Preparing encrypted .pvault…"),
+    WAITING_FOR_EXPORT_DESTINATION("Waiting for Save As location…"),
+    WRITING_EXPORT("Writing encrypted .pvault…"),
+    WAITING_FOR_RESTORE_FILE("Waiting for .pvault file selection…"),
+    VERIFYING_RESTORE("Verifying Argon2id + AES-256-GCM backup…"),
+    APPLYING_RESTORE("Applying authenticated restore…")
+}
+
+data class VerifiedRestorePreviewState(
+    val operationId: String = UUID.randomUUID().toString(),
+    val targetSessionId: Long = 0L,
+    val targetSlotId: Int = 0,
+    val sourceUriString: String = "",
+    val fileName: String,
+    val exportedAtEpochMs: Long,
+    val appVersionName: String,
+    val notesCount: Int,
+    val credentialsCount: Int,
+    val foldersCount: Int
+)
+
 data class VaultUiState(
     val isLoading: Boolean = true,
     val isVaultProvisioned: Boolean = false,
@@ -139,21 +162,25 @@ data class VaultUiState(
     val selectedNoteFolderId: String? = null,
     val notesSortOrder: SortOrder = SortOrder.UPDATED_DESC,
     val notesFavoritesOnly: Boolean = false,
+    val notesTrashOnly: Boolean = false,
 
     val credentialsSearchQuery: String = "",
     val selectedCredentialCategory: String = "All",
     val selectedCredentialFolderId: String? = null,
     val credentialsSortOrder: SortOrder = SortOrder.UPDATED_DESC,
     val credentialsFavoritesOnly: Boolean = false,
+    val credentialsTrashOnly: Boolean = false,
 
     // Session-scoped active drafts surviving rotation & keyboard resize (R10)
     val activeNoteDraft: NoteEditorDraftState? = null,
     val activeCredentialDraft: CredentialEditorDraftState? = null,
 
-    // Backup & Restore state (U01, U02, R10, R16)
+    // Backup & Restore state (U01, U02, R10, R16, Section 05)
+    val backupOperationStage: BackupOperationStage = BackupOperationStage.IDLE,
     val stagedBackupMetadata: StagedBackupMetadata? = null,
     val selectedRestoreUriString: String? = null,
     val selectedRestoreFileName: String? = null,
+    val verifiedRestorePreview: VerifiedRestorePreviewState? = null,
     val allowRecoveryExportSkippingCorrupted: Boolean = false,
 
     // Generator & Strength Audit state
@@ -194,6 +221,7 @@ class VaultViewModel(
     val clipboardCountdownSeconds: StateFlow<Int?> = clipboardManager.activeCountdownSeconds
 
     private var unlockJob: Job? = null
+    private val backupMutex = kotlinx.coroutines.sync.Mutex()
 
     init {
         cleanupStaleBackupStagingFiles()
@@ -252,9 +280,11 @@ class VaultViewModel(
                                 isDecoyPolicySheetUnlocked = false,
                                 activeNoteDraft = null,
                                 activeCredentialDraft = null,
+                                backupOperationStage = if (inPickerWindow) state.backupOperationStage else BackupOperationStage.IDLE,
                                 stagedBackupMetadata = if (inPickerWindow) state.stagedBackupMetadata else null,
                                 selectedRestoreUriString = null,
                                 selectedRestoreFileName = null,
+                                verifiedRestorePreview = null,
                                 strengthCheckerInput = "",
                                 notesSearchQuery = "",
                                 credentialsSearchQuery = ""
@@ -289,20 +319,22 @@ class VaultViewModel(
                 )
             }
 
-            // R15 Fix: Perform a single non-blocking startup OTA check and set prompt visibility
-            // based on the user's saved reminder policy without re-fetching!
-            val currentPrefs = preferencesRepository.preferencesFlow.first()
-            val result = otaUpdateManager.checkForUpdates(
-                manifestUrl = currentPrefs.otaManifestUrl,
-                showDialogIfAvailable = false
-            )
-            if (result is OtaUpdateManager.OtaState.UpdateAvailable) {
-                val shouldPrompt = preferencesRepository.shouldShowAutomaticUpdatePrompt(
-                    prefs = currentPrefs,
-                    remoteVersionCode = result.manifest.versionCode
+            if (enableStartupOtaCheck) {
+                // R15 Fix: Perform a single non-blocking startup OTA check and set prompt visibility
+                // based on the user's saved reminder policy without re-fetching!
+                val currentPrefs = preferencesRepository.preferencesFlow.first()
+                val result = otaUpdateManager.checkForUpdates(
+                    manifestUrl = currentPrefs.otaManifestUrl,
+                    showDialogIfAvailable = false
                 )
-                if (shouldPrompt) {
-                    otaUpdateManager.setPromptDialogVisible(true)
+                if (result is OtaUpdateManager.OtaState.UpdateAvailable) {
+                    val shouldPrompt = preferencesRepository.shouldShowAutomaticUpdatePrompt(
+                        prefs = currentPrefs,
+                        remoteVersionCode = result.manifest.versionCode
+                    )
+                    if (shouldPrompt) {
+                        otaUpdateManager.setPromptDialogVisible(true)
+                    }
                 }
             }
         }
@@ -798,6 +830,13 @@ class VaultViewModel(
         saveNote(note.copy(isFavorite = !note.isFavorite))
     }
 
+    fun toggleNoteTrash(note: NoteRecord) {
+        val nextTrashed = !note.isTrashed
+        saveNote(note.copy(isTrashed = nextTrashed)) {
+            setStatusBanner(if (nextTrashed) "Note moved to Trash." else "Note restored from Trash.")
+        }
+    }
+
     // --- Session-scoped Credential Editor Draft (R10, R13, R18, N08) ---
 
     fun openNewCredentialDraft() {
@@ -971,6 +1010,13 @@ class VaultViewModel(
         saveCredential(credential.copy(isPinned = !credential.isPinned))
     }
 
+    fun toggleCredentialTrash(credential: CredentialRecord) {
+        val nextTrashed = !credential.isTrashed
+        saveCredential(credential.copy(isTrashed = nextTrashed)) {
+            setStatusBanner(if (nextTrashed) "Credential moved to Trash." else "Credential restored from Trash.")
+        }
+    }
+
     // --- Folder Lifecycle (Create, Rename, Delete with Reassignment — R12) ---
 
     fun createFolder(name: String, scope: FolderScope) {
@@ -1059,7 +1105,21 @@ class VaultViewModel(
     }
 
     fun setNotesFavoritesOnly(favOnly: Boolean) {
-        _uiState.update { it.copy(notesFavoritesOnly = favOnly) }
+        _uiState.update {
+            it.copy(
+                notesFavoritesOnly = favOnly,
+                notesTrashOnly = if (favOnly) false else it.notesTrashOnly
+            )
+        }
+    }
+
+    fun setNotesTrashOnly(trashOnly: Boolean) {
+        _uiState.update {
+            it.copy(
+                notesTrashOnly = trashOnly,
+                notesFavoritesOnly = if (trashOnly) false else it.notesFavoritesOnly
+            )
+        }
     }
 
     fun setCredentialsSearchQuery(query: String) {
@@ -1079,7 +1139,21 @@ class VaultViewModel(
     }
 
     fun setCredentialsFavoritesOnly(favOnly: Boolean) {
-        _uiState.update { it.copy(credentialsFavoritesOnly = favOnly) }
+        _uiState.update {
+            it.copy(
+                credentialsFavoritesOnly = favOnly,
+                credentialsTrashOnly = if (favOnly) false else it.credentialsTrashOnly
+            )
+        }
+    }
+
+    fun setCredentialsTrashOnly(trashOnly: Boolean) {
+        _uiState.update {
+            it.copy(
+                credentialsTrashOnly = trashOnly,
+                credentialsFavoritesOnly = if (trashOnly) false else it.credentialsFavoritesOnly
+            )
+        }
     }
 
     // ============================================================================================
@@ -1170,7 +1244,17 @@ class VaultViewModel(
         val allowSkipCorrupted = _uiState.value.allowRecoveryExportSkippingCorrupted
 
         return viewModelScope.launch(Dispatchers.Default) {
-            _uiState.update { it.copy(isBusy = true, errorBannerMessage = null) }
+            if (!backupMutex.tryLock()) {
+                Arrays.fill(passChars, '\u0000')
+                return@launch
+            }
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    backupOperationStage = BackupOperationStage.PREPARING_EXPORT,
+                    errorBannerMessage = null
+                )
+            }
             var encryptedBytes: ByteArray? = null
             try {
                 encryptedBytes = vaultRepository.prepareEncryptedBackupBytes(
@@ -1204,6 +1288,7 @@ class VaultViewModel(
                 _uiState.update {
                     it.copy(
                         isBusy = false,
+                        backupOperationStage = BackupOperationStage.WAITING_FOR_EXPORT_DESTINATION,
                         stagedBackupMetadata = metadata,
                         statusBannerMessage = "Encrypted backup prepared. Choose where to save $suggestedName."
                     )
@@ -1213,6 +1298,7 @@ class VaultViewModel(
                 _uiState.update {
                     it.copy(
                         isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
                         errorBannerMessage = e.message
                     )
                 }
@@ -1220,20 +1306,23 @@ class VaultViewModel(
                 _uiState.update {
                     it.copy(
                         isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
                         errorBannerMessage = e.message ?: "Failed to prepare encrypted backup."
                     )
                 }
             } finally {
                 Arrays.fill(passChars, '\u0000')
                 encryptedBytes?.let { Arrays.fill(it, 0.toByte()) }
+                backupMutex.unlock()
             }
         }
     }
 
     /**
-     * U01 & R16 Fix: Called from `MainActivity`'s top-level `CreateDocument` result callback.
-     * Opens `contentResolver.openOutputStream(uri)` on `Dispatchers.IO` inside `use {}`, copies the
-     * staged encrypted `.pvault` file, deletes the staging file in `finally`, and reports the real result.
+     * U01, R16, T03 & T10 Fix: Called from `MainActivity`'s top-level `CreateDocument` result callback.
+     * Verifies no cross-slot switch occurred, opens `contentResolver.openOutputStream(uri)` on `Dispatchers.IO`
+     * inside `use {}`, copies the staged encrypted `.pvault` file, deletes the staging file in `finally`,
+     * and reports `"Backup saved ($sizeKb KB)."` without exposing raw content URIs.
      */
     fun completeExportToUri(destinationUri: Uri?): Job? {
         vaultRepository.sessionManager.endFilePickerTransitionWindow()
@@ -1242,6 +1331,7 @@ class VaultViewModel(
             deleteStagedBackupFile(metadata)
             _uiState.update {
                 it.copy(
+                    backupOperationStage = BackupOperationStage.IDLE,
                     stagedBackupMetadata = null,
                     statusBannerMessage = "Backup export cancelled."
                 )
@@ -1254,8 +1344,32 @@ class VaultViewModel(
             return null
         }
 
+        // T10 Guard: If the vault was re-unlocked to a different slot while the picker was open,
+        // reject the stale staged backup so Slot 0 and Slot 1 exports can never cross!
+        val currentSession = vaultRepository.sessionManager.sessionState.value
+        if (currentSession is VaultSessionManager.SessionState.Unlocked &&
+            currentSession.slotId != metadata.originSlotId
+        ) {
+            deleteStagedBackupFile(metadata)
+            _uiState.update {
+                it.copy(
+                    backupOperationStage = BackupOperationStage.IDLE,
+                    stagedBackupMetadata = null,
+                    errorBannerMessage = "Backup export aborted because active vault session changed."
+                )
+            }
+            return null
+        }
+
         return viewModelScope.launch(Dispatchers.Default) {
-            _uiState.update { it.copy(isBusy = true, errorBannerMessage = null) }
+            if (!backupMutex.tryLock()) return@launch
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    backupOperationStage = BackupOperationStage.WRITING_EXPORT,
+                    errorBannerMessage = null
+                )
+            }
             try {
                 val bytesWritten = withContext(Dispatchers.IO) {
                     val stagedFile = File(metadata.stagedFilePath)
@@ -1279,20 +1393,23 @@ class VaultViewModel(
                 _uiState.update {
                     it.copy(
                         isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
                         stagedBackupMetadata = null,
-                        statusBannerMessage = "Encrypted .pvault backup saved ($sizeKb KB)."
+                        statusBannerMessage = "Backup saved ($sizeKb KB)."
                     )
                 }
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
                         isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
                         stagedBackupMetadata = null,
                         errorBannerMessage = "Backup export failed: ${e.message ?: "Unable to write to selected location."}"
                     )
                 }
             } finally {
                 deleteStagedBackupFile(metadata)
+                backupMutex.unlock()
             }
         }
     }
@@ -1302,6 +1419,9 @@ class VaultViewModel(
      */
     fun beginRestoreFileSelection(onReadyToLaunchOpenDocument: () -> Unit) {
         vaultRepository.sessionManager.beginFilePickerTransitionWindow()
+        _uiState.update {
+            it.copy(backupOperationStage = BackupOperationStage.WAITING_FOR_RESTORE_FILE)
+        }
         onReadyToLaunchOpenDocument()
     }
 
@@ -1312,14 +1432,21 @@ class VaultViewModel(
     fun onRestoreFileSelected(sourceUri: Uri?): Job? {
         vaultRepository.sessionManager.endFilePickerTransitionWindow()
         if (sourceUri == null) {
-            setStatusBanner("Restore file selection cancelled.")
+            _uiState.update {
+                it.copy(
+                    backupOperationStage = BackupOperationStage.IDLE,
+                    statusBannerMessage = "Restore file selection cancelled."
+                )
+            }
             return null
         }
         val fallbackName = sourceUri.lastPathSegment ?: "backup.pvault"
         _uiState.update {
             it.copy(
+                backupOperationStage = BackupOperationStage.IDLE,
                 selectedRestoreUriString = sourceUri.toString(),
                 selectedRestoreFileName = fallbackName,
+                verifiedRestorePreview = null,
                 statusBannerMessage = "Selected backup file: $fallbackName. Enter backup password to verify and restore."
             )
         }
@@ -1332,6 +1459,99 @@ class VaultViewModel(
                     selectedRestoreFileName = displayName,
                     statusBannerMessage = "Selected backup file: $displayName. Enter backup password to verify and restore."
                 )
+            }
+        }
+    }
+
+    /**
+     * Section 05, BUG 05 & T04 Fix: Decrypts and authenticates the selected `.pvault` file in memory
+     * without modifying the database, populating `verifiedRestorePreview` with the verified record counts,
+     * export timestamp, and app version so the user can inspect the backup before applying it.
+     */
+    fun verifyAndPreviewSelectedUri(backupPassword: String): Job? {
+        val uriString = _uiState.value.selectedRestoreUriString
+        if (uriString.isNullOrBlank()) {
+            setErrorBanner("Please select a .pvault backup file first.")
+            return null
+        }
+        val uri = try {
+            Uri.parse(uriString)
+        } catch (_: Exception) {
+            setErrorBanner("Selected backup file URI is invalid.")
+            return null
+        }
+        return verifyAndPreviewFromUri(uri, backupPassword)
+    }
+
+    fun verifyAndPreviewFromUri(sourceUri: Uri, backupPassword: String): Job? {
+        if (backupPassword.isBlank()) {
+            setErrorBanner("Enter the password for this .pvault backup file.")
+            return null
+        }
+        val passChars = backupPassword.toCharArray()
+        val fileName = _uiState.value.selectedRestoreFileName ?: sourceUri.lastPathSegment ?: "backup.pvault"
+
+        return viewModelScope.launch(Dispatchers.Default) {
+            if (!backupMutex.tryLock()) {
+                Arrays.fill(passChars, '\u0000')
+                return@launch
+            }
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    backupOperationStage = BackupOperationStage.VERIFYING_RESTORE,
+                    errorBannerMessage = null
+                )
+            }
+            try {
+                val backupBytes = withContext(Dispatchers.IO) {
+                    val inputStream = openInputStreamForUri(sourceUri)
+                        ?: throw FileNotFoundException("Android storage provider could not open the selected backup file.")
+                    inputStream.use { input ->
+                        readBoundedBytes(input, PortableBackupEngine.MAX_BACKUP_FILE_BYTES)
+                    }
+                }
+                val verifiedPayload = PortableBackupEngine.decryptAndVerifyBackupBytes(
+                    backupBytes = backupBytes,
+                    backupPasswordChars = passChars
+                )
+                val preview = VerifiedRestorePreviewState(
+                    fileName = fileName,
+                    exportedAtEpochMs = verifiedPayload.exportedAtEpochMs,
+                    appVersionName = verifiedPayload.appVersionName,
+                    notesCount = verifiedPayload.notesCount,
+                    credentialsCount = verifiedPayload.credentialsCount,
+                    foldersCount = verifiedPayload.foldersCount
+                )
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
+                        verifiedRestorePreview = preview,
+                        statusBannerMessage = "Backup verified: ${preview.notesCount} notes, ${preview.credentialsCount} credentials, ${preview.foldersCount} folders."
+                    )
+                }
+            } catch (_: AEADBadTagException) {
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
+                        verifiedRestorePreview = null,
+                        errorBannerMessage = "Backup verification failed: wrong backup password or tampered .pvault file."
+                    )
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
+                        verifiedRestorePreview = null,
+                        errorBannerMessage = "Backup verification failed: ${e.message ?: "Invalid .pvault file."}"
+                    )
+                }
+            } finally {
+                Arrays.fill(passChars, '\u0000')
+                backupMutex.unlock()
             }
         }
     }
@@ -1373,9 +1593,20 @@ class VaultViewModel(
             return null
         }
         val passChars = backupPassword.toCharArray()
+        val fileName = _uiState.value.selectedRestoreFileName ?: sourceUri.lastPathSegment ?: "backup.pvault"
 
         return viewModelScope.launch(Dispatchers.Default) {
-            _uiState.update { it.copy(isBusy = true, errorBannerMessage = null) }
+            if (!backupMutex.tryLock()) {
+                Arrays.fill(passChars, '\u0000')
+                return@launch
+            }
+            _uiState.update {
+                it.copy(
+                    isBusy = true,
+                    backupOperationStage = BackupOperationStage.VERIFYING_RESTORE,
+                    errorBannerMessage = null
+                )
+            }
             try {
                 val backupBytes = withContext(Dispatchers.IO) {
                     val inputStream = openInputStreamForUri(sourceUri)
@@ -1385,18 +1616,32 @@ class VaultViewModel(
                     }
                 }
 
+                _uiState.update {
+                    it.copy(backupOperationStage = BackupOperationStage.APPLYING_RESTORE)
+                }
+
                 val payload = vaultRepository.applyVerifiedBackupRestore(
                     sessionId = sessionId,
                     backupBytes = backupBytes,
                     backupPasswordChars = passChars,
                     restoreMode = restoreMode
                 )
+                val preview = VerifiedRestorePreviewState(
+                    fileName = fileName,
+                    exportedAtEpochMs = payload.exportedAtEpochMs,
+                    appVersionName = payload.appVersionName,
+                    notesCount = payload.notesCount,
+                    credentialsCount = payload.credentialsCount,
+                    foldersCount = payload.foldersCount
+                )
                 refreshActiveVaultItems(sessionId)
                 _uiState.update {
                     it.copy(
                         isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
                         selectedRestoreUriString = null,
                         selectedRestoreFileName = null,
+                        verifiedRestorePreview = preview,
                         statusBannerMessage = "Restored ${payload.notesCount} notes & ${payload.credentialsCount} credentials."
                     )
                 }
@@ -1404,6 +1649,7 @@ class VaultViewModel(
                 _uiState.update {
                     it.copy(
                         isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
                         errorBannerMessage = "Restore rejected: wrong backup password or tampered .pvault file. Existing vault data is untouched."
                     )
                 }
@@ -1411,6 +1657,7 @@ class VaultViewModel(
                 _uiState.update {
                     it.copy(
                         isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
                         errorBannerMessage = e.message
                     )
                 }
@@ -1418,6 +1665,7 @@ class VaultViewModel(
                 _uiState.update {
                     it.copy(
                         isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
                         errorBannerMessage = "Storage permission expired for selected file. Please choose the .pvault file again."
                     )
                 }
@@ -1425,6 +1673,7 @@ class VaultViewModel(
                 _uiState.update {
                     it.copy(
                         isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
                         errorBannerMessage = "The selected backup file could not be found. Please choose a valid .pvault file."
                     )
                 }
@@ -1432,11 +1681,13 @@ class VaultViewModel(
                 _uiState.update {
                     it.copy(
                         isBusy = false,
+                        backupOperationStage = BackupOperationStage.IDLE,
                         errorBannerMessage = "Restore rejected: ${e.message ?: "Invalid .pvault file."}"
                     )
                 }
             } finally {
                 Arrays.fill(passChars, '\u0000')
+                backupMutex.unlock()
             }
         }
     }

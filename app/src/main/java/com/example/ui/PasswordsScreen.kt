@@ -53,6 +53,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
@@ -129,10 +130,12 @@ fun PasswordsTabScreen(
         uiState.selectedCredentialCategory,
         uiState.selectedCredentialFolderId,
         uiState.credentialsSortOrder,
-        uiState.credentialsFavoritesOnly
+        uiState.credentialsFavoritesOnly,
+        uiState.credentialsTrashOnly
     ) {
         val q = uiState.credentialsSearchQuery.trim().lowercase(Locale.US)
         val filtered = uiState.credentials.filter { cred ->
+            val matchesTrash = if (uiState.credentialsTrashOnly) cred.isTrashed else !cred.isTrashed
             val matchesQuery = if (q.isEmpty()) {
                 true
             } else {
@@ -148,7 +151,7 @@ fun PasswordsTabScreen(
             val matchesFolder = uiState.selectedCredentialFolderId == null ||
                 cred.folderId == uiState.selectedCredentialFolderId
             val matchesFav = !uiState.credentialsFavoritesOnly || cred.isFavorite
-            matchesQuery && matchesCat && matchesFolder && matchesFav
+            matchesTrash && matchesQuery && matchesCat && matchesFolder && matchesFav
         }
 
         // R18 Fix: Sort pinned credentials first, then by selected sort order
@@ -289,6 +292,20 @@ fun PasswordsTabScreen(
                     },
                     label = { Text("Sort: ${uiState.credentialsSortOrder.label}") }
                 )
+                val trashedCount = uiState.credentials.count { it.isTrashed }
+                FilterChip(
+                    selected = uiState.credentialsTrashOnly,
+                    onClick = { viewModel.setCredentialsTrashOnly(!uiState.credentialsTrashOnly) },
+                    label = { Text(if (trashedCount > 0) "Trash ($trashedCount)" else "Trash") },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Filled.Delete,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    modifier = Modifier.testTag("credentials_trash_chip")
+                )
             }
 
             if (filteredCredentials.isEmpty()) {
@@ -337,7 +354,9 @@ fun PasswordsTabScreen(
                                 )
                             },
                             onTogglePin = { viewModel.toggleCredentialPin(cred) },
-                            onToggleFavorite = { viewModel.toggleCredentialFavorite(cred) }
+                            onToggleFavorite = { viewModel.toggleCredentialFavorite(cred) },
+                            onToggleTrash = { viewModel.toggleCredentialTrash(cred) },
+                            onPermanentDelete = { viewModel.deleteCredential(cred.id) }
                         )
                     }
                 }
@@ -353,7 +372,9 @@ private fun CredentialItemCard(
     onCopyUsername: () -> Unit,
     onCopyPassword: () -> Unit,
     onTogglePin: () -> Unit,
-    onToggleFavorite: () -> Unit
+    onToggleFavorite: () -> Unit,
+    onToggleTrash: () -> Unit,
+    onPermanentDelete: () -> Unit
 ) {
     var revealPassword by remember { mutableStateOf(false) }
 
@@ -417,27 +438,62 @@ private fun CredentialItemCard(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(
-                        onClick = onTogglePin,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (credential.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
-                            contentDescription = if (credential.isPinned) "Unpin Credential" else "Pin Credential",
-                            tint = if (credential.isPinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    IconButton(
-                        onClick = onToggleFavorite,
-                        modifier = Modifier.size(36.dp)
-                    ) {
-                        Icon(
-                            imageVector = if (credential.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
-                            contentDescription = "Favorite Credential",
-                            tint = if (credential.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(18.dp)
-                        )
+                    if (!credential.isTrashed) {
+                        IconButton(
+                            onClick = onTogglePin,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (credential.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
+                                contentDescription = if (credential.isPinned) "Unpin Credential" else "Pin Credential",
+                                tint = if (credential.isPinned) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onToggleFavorite,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (credential.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                                contentDescription = "Favorite Credential",
+                                tint = if (credential.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onToggleTrash,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("trash_credential_${credential.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Delete,
+                                contentDescription = "Move Credential to Trash",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    } else {
+                        TextButton(
+                            onClick = onToggleTrash,
+                            modifier = Modifier.testTag("restore_credential_${credential.id}")
+                        ) {
+                            Text("Restore")
+                        }
+                        IconButton(
+                            onClick = onPermanentDelete,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("perm_delete_credential_${credential.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Delete,
+                                contentDescription = "Delete Permanently",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
             }

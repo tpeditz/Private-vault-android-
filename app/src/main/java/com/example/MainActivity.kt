@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -344,6 +345,8 @@ fun PrivateVaultRootApp(
             modifier = Modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
+                .systemBarsPadding()
+                .consumeWindowInsets(WindowInsets.systemBars)
         ) {
             StatusBannerStrip(
                 statusMessage = uiState.statusBannerMessage,
@@ -380,6 +383,8 @@ fun PrivateVaultRootApp(
             modifier = Modifier
                 .fillMaxSize()
                 .background(MaterialTheme.colorScheme.background)
+                .systemBarsPadding()
+                .consumeWindowInsets(WindowInsets.systemBars)
         ) {
             StatusBannerStrip(
                 statusMessage = uiState.statusBannerMessage,
@@ -422,6 +427,7 @@ fun PrivateVaultRootApp(
 
     // Active Unlocked Vault Shell
     var topMenuExpanded by remember { mutableStateOf(false) }
+    val isEditorOpen = uiState.activeNoteDraft != null || uiState.activeCredentialDraft != null
 
     BoxWithConstraints(
         modifier = Modifier
@@ -550,7 +556,9 @@ fun PrivateVaultRootApp(
                 }
             },
             bottomBar = {
-                if (!isWideLayout && uiState.secondaryDestination == SecondaryDestination.NONE) {
+                // Section 06 / T15 Fix: Hide bottom NavigationBar when a full-screen Note or Credential
+                // editor is open so the software keyboard does not stack 80.dp of navigation chrome above IME.
+                if (!isWideLayout && uiState.secondaryDestination == SecondaryDestination.NONE && !isEditorOpen) {
                     NavigationBar {
                         NavigationBarItem(
                             selected = uiState.primaryTab == PrimaryTab.NOTES,

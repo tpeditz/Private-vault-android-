@@ -40,6 +40,7 @@ data class NoteRecord(
     val colorAccentIndex: Int = 0,
     val isPinned: Boolean = false,
     val isFavorite: Boolean = false,
+    val isTrashed: Boolean = false,
     override val createdAtEpochMs: Long = System.currentTimeMillis(),
     override val updatedAtEpochMs: Long = System.currentTimeMillis()
 ) : VaultItem
@@ -65,6 +66,7 @@ data class CredentialRecord(
     val customFields: List<CustomCredentialField> = emptyList(),
     val isFavorite: Boolean = false,
     val isPinned: Boolean = false,
+    val isTrashed: Boolean = false,
     override val createdAtEpochMs: Long = System.currentTimeMillis(),
     override val updatedAtEpochMs: Long = System.currentTimeMillis()
 ) : VaultItem
@@ -121,6 +123,7 @@ object VaultRecordCodec {
                 root.put("colorAccentIndex", item.colorAccentIndex)
                 root.put("isPinned", item.isPinned)
                 root.put("isFavorite", item.isFavorite)
+                root.put("isTrashed", item.isTrashed)
                 root.put("createdAtEpochMs", item.createdAtEpochMs)
                 root.put("updatedAtEpochMs", item.updatedAtEpochMs)
 
@@ -152,6 +155,7 @@ object VaultRecordCodec {
                 root.put("folderId", item.folderId)
                 root.put("isFavorite", item.isFavorite)
                 root.put("isPinned", item.isPinned)
+                root.put("isTrashed", item.isTrashed)
                 root.put("createdAtEpochMs", item.createdAtEpochMs)
                 root.put("updatedAtEpochMs", item.updatedAtEpochMs)
 
@@ -242,6 +246,7 @@ object VaultRecordCodec {
                     colorAccentIndex = root.optInt("colorAccentIndex", 0),
                     isPinned = root.optBoolean("isPinned", false),
                     isFavorite = root.optBoolean("isFavorite", false),
+                    isTrashed = root.optBoolean("isTrashed", false),
                     createdAtEpochMs = root.optLong("createdAtEpochMs", 0L),
                     updatedAtEpochMs = root.optLong("updatedAtEpochMs", 0L)
                 )
@@ -297,6 +302,7 @@ object VaultRecordCodec {
                     customFields = customFields,
                     isFavorite = root.optBoolean("isFavorite", false),
                     isPinned = root.optBoolean("isPinned", false),
+                    isTrashed = root.optBoolean("isTrashed", false),
                     createdAtEpochMs = root.optLong("createdAtEpochMs", 0L),
                     updatedAtEpochMs = root.optLong("updatedAtEpochMs", 0L)
                 )

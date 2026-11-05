@@ -12,8 +12,8 @@ android {
     applicationId = "com.tpeditz.privatevault"
     minSdk = 24
     targetSdk = 36
-    versionCode = 3
-    versionName = "1.0.2"
+    versionCode = 4
+    versionName = "1.0.3"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -85,6 +85,7 @@ android {
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
   implementation(libs.androidx.activity.compose)
+  implementation(libs.androidx.fragment.ktx)
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)
   implementation(libs.androidx.compose.material3)
