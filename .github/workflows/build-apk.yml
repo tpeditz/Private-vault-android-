@@ -71,9 +71,6 @@ jobs:
           elif [ -n "${DEBUG_KEYSTORE_B64:-}" ]; then
             echo "Decoding ./debug.keystore from configured DEBUG_KEYSTORE_BASE64 secret..."
             printf '%s' "${DEBUG_KEYSTORE_B64}" | tr -d '[:space:]' | base64 -d > "${KEYSTORE_FILE}"
-          elif [ -f "./debug.keystore.base64" ] && [ -s "./debug.keystore.base64" ]; then
-            echo "Decoding ./debug.keystore from ./debug.keystore.base64..."
-            tr -d '[:space:]' < "./debug.keystore.base64" | base64 -d > "${KEYSTORE_FILE}"
           else
             echo "Generating temporary ./debug.keystore using Java 17 keytool..."
             "${JAVA_HOME}/bin/keytool" -genkeypair -v \

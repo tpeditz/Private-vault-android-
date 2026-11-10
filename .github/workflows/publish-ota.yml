@@ -4,17 +4,22 @@ on:
   workflow_dispatch:
     inputs:
       signing_mode:
-        description: 'Signing identity mode (release_keystore for production key, debug_compatibility for controlled Build 3/4 compatibility tests)'
+        description: 'Signing identity mode (release_keystore for production release, debug_compatibility for controlled non-production test builds only)'
         required: true
         default: 'release_keystore'
         type: choice
         options:
           - release_keystore
           - debug_compatibility
+      expected_signer_sha256:
+        description: 'Optional expected colon-separated or hex SHA-256 certificate fingerprint of the installed production signer (verified before publishing)'
+        required: false
+        default: ''
+        type: string
       release_notes:
         description: 'Release notes for update.json and GitHub Release'
         required: true
-        default: 'PRIVATE VAULT maintenance and security update.'
+        default: 'PRIVATE VAULT v1.0.4 security, backup verification, and friendly UI/UX update.'
         type: string
       min_supported_version_code:
         description: 'Minimum supported versionCode for OTA upgrade'
@@ -51,7 +56,13 @@ jobs:
 
           if [ "${SIGNING_MODE}" = "release_keystore" ]; then
             if [ -z "${RELEASE_KS_B64:-}" ] || [ -z "${RELEASE_STORE_PASS:-}" ] || [ -z "${RELEASE_KEY_ALIAS:-}" ] || [ -z "${RELEASE_KEY_PASS:-}" ]; then
-              echo "::error::signing_mode=release_keystore requires RELEASE_KEYSTORE_BASE64, RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, and RELEASE_KEY_PASSWORD secrets."
+              echo "::error::signing_mode=release_keystore requires RELEASE_KEYSTORE_BASE64, RELEASE_STORE_PASSWORD, RELEASE_KEY_ALIAS, and RELEASE_KEY_PASSWORD secrets. Refusing to fall back to debug key."
+              exit 1
+            fi
+          else
+            echo "::warning::NON-PRODUCTION BUILD: signing_mode=debug_compatibility is strictly for controlled test builds."
+            if [ -z "${DEBUG_KS_B64:-}" ]; then
+              echo "::error::debug_compatibility mode requires the DEBUG_KEYSTORE_BASE64 secret. Committed keystore files in the repository are prohibited."
               exit 1
             fi
           fi
@@ -71,11 +82,14 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Prepare signing keystore in runner temp
+      - name: Prepare and validate signing keystore in runner temp
         id: signing_prep
         env:
           SIGNING_MODE: ${{ inputs.signing_mode }}
           RELEASE_KS_B64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASS: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASS: ${{ secrets.RELEASE_KEY_PASSWORD }}
           DEBUG_KS_B64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         shell: bash
         run: |
@@ -87,15 +101,28 @@ jobs:
               echo "::error::Decoded release keystore is empty."
               exit 1
             fi
+
+            # Verify that the keystore opens and contains the configured alias
+            if ! "${JAVA_HOME}/bin/keytool" -list -keystore "${KS_PATH}" -storepass "${RELEASE_STORE_PASS}" -alias "${RELEASE_KEY_ALIAS}" >/dev/null 2>&1; then
+              echo "::error::Release keystore does not contain configured alias '${RELEASE_KEY_ALIAS}' or store password is invalid."
+              exit 1
+            fi
+
+            # Align the temporary keystore alias with Gradle's release signingConfig ('upload') if different
+            if [ "${RELEASE_KEY_ALIAS}" != "upload" ]; then
+              "${JAVA_HOME}/bin/keytool" -changealias \
+                -keystore "${KS_PATH}" \
+                -storepass "${RELEASE_STORE_PASS}" \
+                -keypass "${RELEASE_KEY_PASS}" \
+                -alias "${RELEASE_KEY_ALIAS}" \
+                -destalias "upload" >/dev/null 2>&1
+            fi
             echo "keystore_path=${KS_PATH}" >> "${GITHUB_OUTPUT}"
           else
             KS_PATH="./debug.keystore"
-            if [ -n "${DEBUG_KS_B64:-}" ]; then
-              printf '%s' "${DEBUG_KS_B64}" | tr -d '[:space:]' | base64 -d > "${KS_PATH}"
-            elif [ -f "./debug.keystore.base64" ] && [ -s "./debug.keystore.base64" ]; then
-              tr -d '[:space:]' < "./debug.keystore.base64" | base64 -d > "${KS_PATH}"
-            else
-              echo "::error::debug_compatibility mode requires DEBUG_KEYSTORE_BASE64 secret or ./debug.keystore.base64 so the original debug signer identity is preserved."
+            printf '%s' "${DEBUG_KS_B64}" | tr -d '[:space:]' | base64 -d > "${KS_PATH}"
+            if [ ! -s "${KS_PATH}" ]; then
+              echo "::error::Decoded debug keystore is empty."
               exit 1
             fi
             echo "keystore_path=${KS_PATH}" >> "${GITHUB_OUTPUT}"
@@ -111,6 +138,10 @@ jobs:
         id: build_apk
         env:
           SIGNING_MODE: ${{ inputs.signing_mode }}
+          KEYSTORE_PATH: ${{ steps.signing_prep.outputs.keystore_path }}
+          STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
           PV_RELEASE_STORE_FILE: ${{ steps.signing_prep.outputs.keystore_path }}
           PV_RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
           PV_RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
@@ -132,17 +163,62 @@ jobs:
           fi
           echo "built_apk=${BUILT_APK}" >> "${GITHUB_OUTPUT}"
 
+      - name: Verify APK signature, signer certificate SHA-256, and package identity
+        id: verify_signer
+        env:
+          BUILT_APK: ${{ steps.build_apk.outputs.built_apk }}
+          SIGNING_MODE: ${{ inputs.signing_mode }}
+          EXPECTED_CERT: ${{ inputs.expected_signer_sha256 }}
+          SECRET_EXPECTED_CERT: ${{ secrets.EXPECTED_PRODUCTION_CERT_SHA256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CERT_OUTPUT="$("${JAVA_HOME}/bin/keytool" -printcert -jarfile "${BUILT_APK}")"
+          if ! echo "${CERT_OUTPUT}" | grep -q "SHA256:"; then
+            echo "::error::Built APK at ${BUILT_APK} is not signed with a verifiable certificate."
+            exit 1
+          fi
+
+          ACTUAL_CERT_COLON="$(echo "${CERT_OUTPUT}" | sed -nE 's/.*SHA256:[[:space:]]*([0-9A-Fa-f:]+).*/\1/p' | head -n 1 | tr '[:lower:]' '[:upper:]')"
+          ACTUAL_CERT_HEX="$(echo "${ACTUAL_CERT_COLON}" | tr -d ':')"
+          echo "Verified APK Signer Certificate SHA-256: ${ACTUAL_CERT_COLON}"
+
+          # Refuse to publish a production release if it was accidentally signed with the public Android debug certificate
+          DEBUG_CERT_HEX="12943A916928049269C02D8D971B5967A041FB6C7DB25A1279D3414E45CFB561"
+          if [ "${SIGNING_MODE}" = "release_keystore" ] && [ "${ACTUAL_CERT_HEX}" = "${DEBUG_CERT_HEX}" ]; then
+            echo "::error::CRITICAL: release_keystore mode produced an APK signed with the known debug certificate! Aborting release."
+            exit 1
+          fi
+
+          TARGET_EXPECTED="${EXPECTED_CERT:-${SECRET_EXPECTED_CERT:-}}"
+          if [ -n "${TARGET_EXPECTED}" ]; then
+            NORM_EXPECTED="$(echo "${TARGET_EXPECTED}" | tr -d '[:space:]:' | tr '[:lower:]' '[:upper:]')"
+            if [ "${ACTUAL_CERT_HEX}" != "${NORM_EXPECTED}" ]; then
+              echo "::error::APK signer certificate (${ACTUAL_CERT_COLON}) does NOT match expected installed production signer (${TARGET_EXPECTED}). Users would not be able to install this update in place!"
+              exit 1
+            fi
+            echo "Confirmed APK signer matches expected installed production signer."
+          fi
+          echo "signer_sha256=${ACTUAL_CERT_COLON}" >> "${GITHUB_OUTPUT}"
+
       - name: Extract single-source-of-truth APK metadata and generate update.json
         id: apk_meta
         env:
           BUILT_APK: ${{ steps.build_apk.outputs.built_apk }}
+          SIGNING_MODE: ${{ inputs.signing_mode }}
           RELEASE_NOTES: ${{ inputs.release_notes }}
           MIN_SUPPORTED_CODE: ${{ inputs.min_supported_version_code }}
         shell: bash
         run: |
           set -euo pipefail
+          APP_ID="$(sed -nE 's/^[[:space:]]*applicationId[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle.kts | head -n 1)"
           VERSION_CODE="$(sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' app/build.gradle.kts | head -n 1)"
           VERSION_NAME="$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle.kts | head -n 1)"
+
+          if [ "${APP_ID}" != "com.tpeditz.privatevault" ]; then
+            echo "::error::Unexpected applicationId '${APP_ID}' (expected com.tpeditz.privatevault)."
+            exit 1
+          fi
 
           if [ -z "${VERSION_CODE}" ] || [ -z "${VERSION_NAME}" ]; then
             echo "::error::Failed to extract versionCode or versionName from app/build.gradle.kts."
@@ -152,8 +228,13 @@ jobs:
           APK_SHA256="$(sha256sum "${BUILT_APK}" | awk '{print tolower($1)}')"
           APK_SIZE_BYTES="$(wc -c < "${BUILT_APK}" | tr -d '[:space:]')"
           PUBLISHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-          RELEASE_TAG="v${VERSION_NAME}-b${VERSION_CODE}"
-          ASSET_FILENAME="PRIVATE-VAULT-v${VERSION_NAME}-b${VERSION_CODE}.apk"
+          if [ "${SIGNING_MODE}" = "debug_compatibility" ]; then
+            RELEASE_TAG="v${VERSION_NAME}-b${VERSION_CODE}-test-debug"
+            ASSET_FILENAME="PRIVATE-VAULT-v${VERSION_NAME}-b${VERSION_CODE}-NON-PRODUCTION-DEBUG.apk"
+          else
+            RELEASE_TAG="v${VERSION_NAME}-b${VERSION_CODE}"
+            ASSET_FILENAME="PRIVATE-VAULT-v${VERSION_NAME}-b${VERSION_CODE}.apk"
+          fi
           ASSET_DOWNLOAD_URL="https://github.com/${PUBLIC_OTA_REPO}/releases/download/${RELEASE_TAG}/${ASSET_FILENAME}"
 
           STAGING_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/ota-publish-XXXXXX")"
@@ -209,8 +290,10 @@ jobs:
         run: |
           set -euo pipefail
           PRERELEASE_FLAG=()
+          TITLE_PREFIX="PRIVATE VAULT"
           if [ "${SIGNING_MODE}" = "debug_compatibility" ]; then
             PRERELEASE_FLAG=(--prerelease)
+            TITLE_PREFIX="[NON-PRODUCTION TEST] PRIVATE VAULT"
           fi
 
           if gh release view "${RELEASE_TAG}" --repo "${PUBLIC_OTA_REPO}" >/dev/null 2>&1; then
@@ -218,7 +301,7 @@ jobs:
           else
             gh release create "${RELEASE_TAG}" "${STAGED_APK}" \
               --repo "${PUBLIC_OTA_REPO}" \
-              --title "PRIVATE VAULT v${VERSION_NAME} (Build ${VERSION_CODE})" \
+              --title "${TITLE_PREFIX} v${VERSION_NAME} (Build ${VERSION_CODE})" \
               --notes "${RELEASE_NOTES}" \
               "${PRERELEASE_FLAG[@]}"
           fi

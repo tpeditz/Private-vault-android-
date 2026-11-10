@@ -40,6 +40,7 @@ data class NoteRecord(
     val colorAccentIndex: Int = 0,
     val isPinned: Boolean = false,
     val isFavorite: Boolean = false,
+    val isArchived: Boolean = false,
     val isTrashed: Boolean = false,
     override val createdAtEpochMs: Long = System.currentTimeMillis(),
     override val updatedAtEpochMs: Long = System.currentTimeMillis()
@@ -55,6 +56,7 @@ data class CustomCredentialField(
 data class CredentialRecord(
     override val id: String = UUID.randomUUID().toString(),
     val serviceName: String,
+    val accountLabel: String = "",
     val username: String,
     val password: String,
     val websiteUrl: String = "",
@@ -66,6 +68,7 @@ data class CredentialRecord(
     val customFields: List<CustomCredentialField> = emptyList(),
     val isFavorite: Boolean = false,
     val isPinned: Boolean = false,
+    val isArchived: Boolean = false,
     val isTrashed: Boolean = false,
     override val createdAtEpochMs: Long = System.currentTimeMillis(),
     override val updatedAtEpochMs: Long = System.currentTimeMillis()
@@ -123,6 +126,7 @@ object VaultRecordCodec {
                 root.put("colorAccentIndex", item.colorAccentIndex)
                 root.put("isPinned", item.isPinned)
                 root.put("isFavorite", item.isFavorite)
+                root.put("isArchived", item.isArchived)
                 root.put("isTrashed", item.isTrashed)
                 root.put("createdAtEpochMs", item.createdAtEpochMs)
                 root.put("updatedAtEpochMs", item.updatedAtEpochMs)
@@ -146,6 +150,7 @@ object VaultRecordCodec {
                 root.put("recordType", TYPE_CREDENTIAL)
                 root.put("id", item.id)
                 root.put("serviceName", item.serviceName)
+                root.put("accountLabel", item.accountLabel)
                 root.put("username", item.username)
                 root.put("password", item.password)
                 root.put("websiteUrl", item.websiteUrl)
@@ -155,6 +160,7 @@ object VaultRecordCodec {
                 root.put("folderId", item.folderId)
                 root.put("isFavorite", item.isFavorite)
                 root.put("isPinned", item.isPinned)
+                root.put("isArchived", item.isArchived)
                 root.put("isTrashed", item.isTrashed)
                 root.put("createdAtEpochMs", item.createdAtEpochMs)
                 root.put("updatedAtEpochMs", item.updatedAtEpochMs)
@@ -246,6 +252,7 @@ object VaultRecordCodec {
                     colorAccentIndex = root.optInt("colorAccentIndex", 0),
                     isPinned = root.optBoolean("isPinned", false),
                     isFavorite = root.optBoolean("isFavorite", false),
+                    isArchived = root.optBoolean("isArchived", false),
                     isTrashed = root.optBoolean("isTrashed", false),
                     createdAtEpochMs = root.optLong("createdAtEpochMs", 0L),
                     updatedAtEpochMs = root.optLong("updatedAtEpochMs", 0L)
@@ -291,6 +298,7 @@ object VaultRecordCodec {
                 CredentialRecord(
                     id = root.getString("id"),
                     serviceName = root.optString("serviceName", ""),
+                    accountLabel = root.optString("accountLabel", ""),
                     username = root.optString("username", ""),
                     password = root.optString("password", ""),
                     websiteUrl = root.optString("websiteUrl", ""),
@@ -302,6 +310,7 @@ object VaultRecordCodec {
                     customFields = customFields,
                     isFavorite = root.optBoolean("isFavorite", false),
                     isPinned = root.optBoolean("isPinned", false),
+                    isArchived = root.optBoolean("isArchived", false),
                     isTrashed = root.optBoolean("isTrashed", false),
                     createdAtEpochMs = root.optLong("createdAtEpochMs", 0L),
                     updatedAtEpochMs = root.optLong("updatedAtEpochMs", 0L)

@@ -79,7 +79,59 @@ class VaultRepository(
         val slot0 = vaultDao.getEnvelopeForSlot(VaultSessionManager.REAL_SLOT) ?: return@withContext false
         slot0.biometricNonce != null &&
             slot0.biometricWrappedDek != null &&
-            BiometricKeyEnvelopeHelper.hasHardwareKey()
+            BiometricKeyEnvelopeHelper.hasKeystoreKey()
+    }
+
+    fun isBiometricKeyHardwareBacked(): Boolean {
+        return BiometricKeyEnvelopeHelper.isHardwareBackedKey()
+    }
+
+    private fun deriveAndUnwrapWithLegacyFallback(
+        passwordChars: CharArray,
+        env: VaultEnvelopeEntity,
+        slotId: Int,
+        params: CryptoEngine.KdfParams
+    ): CryptoEngine.UnwrappedEnvelopePayload? {
+        val nfcKek = CryptoEngine.deriveKeyArgon2id(
+            passwordChars = passwordChars,
+            salt = env.kdfSalt,
+            params = params,
+            normalizeUnicodeNfc = true
+        )
+        try {
+            val unwrapped = CryptoEngine.unwrapEnvelopePayloadOrNull(
+                kekBytes = nfcKek,
+                nonce = env.envelopeNonce,
+                slotId = slotId,
+                envelopeVersion = env.envelopeVersion,
+                params = params,
+                wrappedCiphertext = env.wrappedPayloadCiphertext
+            )
+            if (unwrapped != null || !CryptoEngine.hasDistinctLegacyNonNfcForm(passwordChars)) {
+                return unwrapped
+            }
+        } finally {
+            Arrays.fill(nfcKek, 0.toByte())
+        }
+
+        val rawKek = CryptoEngine.deriveKeyArgon2id(
+            passwordChars = passwordChars,
+            salt = env.kdfSalt,
+            params = params,
+            normalizeUnicodeNfc = false
+        )
+        return try {
+            CryptoEngine.unwrapEnvelopePayloadOrNull(
+                kekBytes = rawKek,
+                nonce = env.envelopeNonce,
+                slotId = slotId,
+                envelopeVersion = env.envelopeVersion,
+                params = params,
+                wrappedCiphertext = env.wrappedPayloadCiphertext
+            )
+        } finally {
+            Arrays.fill(rawKek, 0.toByte())
+        }
     }
 
     /**
@@ -98,8 +150,10 @@ class VaultRepository(
      * Provisions a brand-new vault with:
      * - Slot 0 (Real Vault) encrypted under `realMasterPasswordChars`
      * - Slot 1 (Decoy Vault) either encrypted as an active Decoy Vault under `optionalDecoyPasswordChars`
-     *   OR initialized with a structurally identical dummy envelope (`SLOT_ROLE_DUMMY`) so both rows
-     *   always exist on disk from day one.
+     *   OR initialized with a structurally identical dummy envelope (`SLOT_ROLE_DUMMY`) wrapped with
+     *   256-bit CSPRNG key material so no password can unwrap a dummy slot (`PV-SEC-006`).
+     * - Built-in "General" folders are synthesized virtually in memory by `normalizeFoldersAndLinks`
+     *   rather than persisted as initial SQLite rows (`PV-SEC-009`).
      * - Commits envelopes and initial records atomically inside a single `@Transaction` (`N06`).
      */
     suspend fun initializeNewVault(
@@ -136,11 +190,6 @@ class VaultRepository(
             val salt1 = CryptoEngine.generateSalt()
             val nonce1 = CryptoEngine.generateNonce()
             val dek1 = CryptoEngine.generateDek()
-
-            val dummySecretChars = ByteArray(16).let { rnd ->
-                CryptoEngine.randomBytes(16).copyInto(rnd)
-                CharArray(16) { idx -> ((rnd[idx].toInt() and 0x7F) + 33).toChar() }
-            }
             var kek1: ByteArray? = null
 
             try {
@@ -174,10 +223,11 @@ class VaultRepository(
                     biometricWrappedDek = null
                 )
 
+                // PV-SEC-006: Use 256-bit CSPRNG random key directly for dummy Slot 1 when Decoy Mode is disabled
                 kek1 = if (hasDecoy) {
                     CryptoEngine.deriveKeyArgon2id(optionalDecoyPasswordChars!!, salt1, params)
                 } else {
-                    CryptoEngine.deriveKeyArgon2id(dummySecretChars, salt1, params)
+                    CryptoEngine.randomBytes(CryptoEngine.DEK_BYTES)
                 }
 
                 val payload1 = CryptoEngine.UnwrappedEnvelopePayload(
@@ -211,22 +261,14 @@ class VaultRepository(
                 )
 
                 val initialEntities = mutableListOf<EncryptedRecordEntity>()
-                buildDefaultStarterFolders().forEach { folder ->
-                    initialEntities.add(encryptItemForSlot(VaultSessionManager.REAL_SLOT, dek0, folder))
-                }
                 if (seedSampleDataInRealVault) {
                     buildStarterRealVaultRecords(now).forEach { item ->
                         initialEntities.add(encryptItemForSlot(VaultSessionManager.REAL_SLOT, dek0, item))
                     }
                 }
-                if (hasDecoy) {
-                    buildDefaultStarterFolders().forEach { folder ->
-                        initialEntities.add(encryptItemForSlot(VaultSessionManager.DECOY_SLOT, dek1, folder))
-                    }
-                    if (seedSampleDataInDecoyVault) {
-                        buildPlausibleDecoyVaultRecords(now).forEach { item ->
-                            initialEntities.add(encryptItemForSlot(VaultSessionManager.DECOY_SLOT, dek1, item))
-                        }
+                if (hasDecoy && seedSampleDataInDecoyVault) {
+                    buildPlausibleDecoyVaultRecords(now).forEach { item ->
+                        initialEntities.add(encryptItemForSlot(VaultSessionManager.DECOY_SLOT, dek1, item))
                     }
                 }
 
@@ -247,7 +289,6 @@ class VaultRepository(
                 kek1?.let { Arrays.fill(it, 0.toByte()) }
                 Arrays.fill(dek0, 0.toByte())
                 Arrays.fill(dek1, 0.toByte())
-                Arrays.fill(dummySecretChars, '\u0000')
             }
         }
     }
@@ -255,11 +296,9 @@ class VaultRepository(
     /**
      * Evaluates BOTH Slot 0 and Slot 1 key envelopes against `passwordChars`.
      *
-     * Uniform Two-Slot Path (S02) + Lock-Race Prevention (N03) + Key Wiping (R05):
+     * Uniform Two-Slot Path (S02) + Lock-Race Prevention (N03) + Key Wiping (R05) + NFC Fallback (PV-SEC-011):
      * - Serialized via `kdfMutex` so concurrent unlock calls cannot overlap (`R03`).
      * - Always runs Argon2id + AES-GCM unwrap for Slot 0 AND Slot 1 before deciding the outcome.
-     * - Nested `try/finally` ensures `kek0`, `kek1`, `unwrapped0`, and `unwrapped1` are zeroed even
-     *   if the second derivation throws or is cancelled (`R05`).
      * - If `expectedAuthGeneration` no longer matches `sessionManager.currentAuthRequestGeneration()`
      *   (because a lock or screen-off event occurred while Argon2id was executing), the derived keys
      *   are wiped and `UnlockResult.CancelledByLock` is returned with the vault remaining `Locked` (`N03`).
@@ -297,30 +336,22 @@ class VaultRepository(
             params1.validateBounds()
 
             val startNs = System.nanoTime()
-            var kek0: ByteArray? = null
-            var kek1: ByteArray? = null
             var unwrapped0: CryptoEngine.UnwrappedEnvelopePayload? = null
             var unwrapped1: CryptoEngine.UnwrappedEnvelopePayload? = null
 
             try {
-                kek0 = CryptoEngine.deriveKeyArgon2id(passwordChars, env0.kdfSalt, params0)
-                unwrapped0 = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                    kekBytes = kek0,
-                    nonce = env0.envelopeNonce,
+                unwrapped0 = deriveAndUnwrapWithLegacyFallback(
+                    passwordChars = passwordChars,
+                    env = env0,
                     slotId = VaultSessionManager.REAL_SLOT,
-                    envelopeVersion = env0.envelopeVersion,
-                    params = params0,
-                    wrappedCiphertext = env0.wrappedPayloadCiphertext
+                    params = params0
                 )
 
-                kek1 = CryptoEngine.deriveKeyArgon2id(passwordChars, env1.kdfSalt, params1)
-                unwrapped1 = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                    kekBytes = kek1,
-                    nonce = env1.envelopeNonce,
+                unwrapped1 = deriveAndUnwrapWithLegacyFallback(
+                    passwordChars = passwordChars,
+                    env = env1,
                     slotId = VaultSessionManager.DECOY_SLOT,
-                    envelopeVersion = env1.envelopeVersion,
-                    params = params1,
-                    wrappedCiphertext = env1.wrappedPayloadCiphertext
+                    params = params1
                 )
 
                 val elapsedMs = ((System.nanoTime() - startNs) / 1_000_000L).coerceAtLeast(1L)
@@ -367,8 +398,6 @@ class VaultRepository(
                     }
                 }
             } finally {
-                kek0?.let { Arrays.fill(it, 0.toByte()) }
-                kek1?.let { Arrays.fill(it, 0.toByte()) }
                 unwrapped0?.wipe()
                 unwrapped1?.wipe()
             }
@@ -475,15 +504,19 @@ class VaultRepository(
     }
 
     /**
-     * R02 Fix: Rotates the password of the CURRENTLY ACTIVE vault slot (works in both Slot 0 Real
-     * and Slot 1 Decoy!) without revealing slot labels or touching any encrypted records.
-     * Enforces cross-slot password uniqueness by checking that `newPasswordChars` does not unwrap
-     * the other slot's envelope.
+     * R02 + PV-SEC-010 Fix: Rotates the password of the CURRENTLY ACTIVE vault slot (works in both
+     * Slot 0 Real and Slot 1 Decoy).
+     * - By default (`rekeyAllRecordsWithNewDek = false`), rotates the KEK and re-wraps the existing
+     *   256-bit DEK for fast password updates.
+     * - When `rekeyAllRecordsWithNewDek = true` (`PV-SEC-010`), generates a brand-new 256-bit DEK,
+     *   decrypts and re-encrypts all records in the active slot under the new DEK, and commits the
+     *   updated envelope + re-encrypted records atomically inside a single Room `@Transaction`.
      */
     suspend fun changeActiveVaultPassword(
         sessionId: Long,
         currentPasswordChars: CharArray,
-        newPasswordChars: CharArray
+        newPasswordChars: CharArray,
+        rekeyAllRecordsWithNewDek: Boolean = false
     ) = withContext(Dispatchers.Default) {
         kdfMutex.withLock {
             val session = sessionManager.requireActiveSession(sessionId)
@@ -515,16 +548,12 @@ class VaultRepository(
                 iterations = activeEnv.kdfIterations,
                 parallelism = activeEnv.kdfParallelism
             )
-            val currentKek = CryptoEngine.deriveKeyArgon2id(currentPasswordChars, activeEnv.kdfSalt, currentParams)
-            val verifiedPayload = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                kekBytes = currentKek,
-                nonce = activeEnv.envelopeNonce,
+            val verifiedPayload = deriveAndUnwrapWithLegacyFallback(
+                passwordChars = currentPasswordChars,
+                env = activeEnv,
                 slotId = activeSlotId,
-                envelopeVersion = activeEnv.envelopeVersion,
-                params = currentParams,
-                wrappedCiphertext = activeEnv.wrappedPayloadCiphertext
+                params = currentParams
             )
-            Arrays.fill(currentKek, 0.toByte())
 
             if (verifiedPayload == null || !verifiedPayload.isActiveVault) {
                 verifiedPayload?.wipe()
@@ -539,16 +568,12 @@ class VaultRepository(
                     iterations = otherEnv.kdfIterations,
                     parallelism = otherEnv.kdfParallelism
                 )
-                val otherTestKek = CryptoEngine.deriveKeyArgon2id(newPasswordChars, otherEnv.kdfSalt, otherParams)
-                val otherUnwrapped = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                    kekBytes = otherTestKek,
-                    nonce = otherEnv.envelopeNonce,
+                val otherUnwrapped = deriveAndUnwrapWithLegacyFallback(
+                    passwordChars = newPasswordChars,
+                    env = otherEnv,
                     slotId = otherSlotId,
-                    envelopeVersion = otherEnv.envelopeVersion,
-                    params = otherParams,
-                    wrappedCiphertext = otherEnv.wrappedPayloadCiphertext
+                    params = otherParams
                 )
-                Arrays.fill(otherTestKek, 0.toByte())
                 val collidesWithOtherSlot = otherUnwrapped != null && otherUnwrapped.isActiveVault
                 otherUnwrapped?.wipe()
                 require(!collidesWithOtherSlot) {
@@ -559,29 +584,81 @@ class VaultRepository(
             val newSalt = CryptoEngine.generateSalt()
             val newNonce = CryptoEngine.generateNonce()
             val newKek = CryptoEngine.deriveKeyArgon2id(newPasswordChars, newSalt, currentParams)
+            var newDek: ByteArray? = null
             try {
-                val updatedPayload = verifiedPayload.copy(
-                    rotatedAtEpochMs = System.currentTimeMillis()
-                )
-                val newWrapped = CryptoEngine.wrapEnvelopePayload(
-                    kekBytes = newKek,
-                    nonce = newNonce,
-                    slotId = activeSlotId,
-                    envelopeVersion = activeEnv.envelopeVersion,
-                    params = currentParams,
-                    payload = updatedPayload
-                )
-                withContext(Dispatchers.IO) {
-                    vaultDao.upsertEnvelope(
-                        activeEnv.copy(
-                            kdfSalt = newSalt,
-                            envelopeNonce = newNonce,
-                            wrappedPayloadCiphertext = newWrapped
-                        )
+                if (!rekeyAllRecordsWithNewDek) {
+                    val updatedPayload = verifiedPayload.copy(
+                        rotatedAtEpochMs = System.currentTimeMillis()
                     )
+                    val newWrapped = CryptoEngine.wrapEnvelopePayload(
+                        kekBytes = newKek,
+                        nonce = newNonce,
+                        slotId = activeSlotId,
+                        envelopeVersion = activeEnv.envelopeVersion,
+                        params = currentParams,
+                        payload = updatedPayload
+                    )
+                    withContext(Dispatchers.IO) {
+                        vaultDao.upsertEnvelope(
+                            activeEnv.copy(
+                                kdfSalt = newSalt,
+                                envelopeNonce = newNonce,
+                                wrappedPayloadCiphertext = newWrapped
+                            )
+                        )
+                    }
+                } else {
+                    val snapshot = loadDecryptedSlotSnapshotForSession(sessionId)
+                    if (snapshot.hasCorruptedRecords) {
+                        throw VaultRecordIntegrityException(
+                            corruptedRecordIds = snapshot.corruptedRecordIds,
+                            message = "Full DEK rotation aborted: ${snapshot.corruptedRecordIds.size} record(s) failed integrity verification."
+                        )
+                    }
+                    newDek = CryptoEngine.generateDek()
+                    val rotatedPayload = verifiedPayload.copy(
+                        rotatedAtEpochMs = System.currentTimeMillis(),
+                        dekBytes = newDek
+                    )
+                    val newWrapped = CryptoEngine.wrapEnvelopePayload(
+                        kekBytes = newKek,
+                        nonce = newNonce,
+                        slotId = activeSlotId,
+                        envelopeVersion = activeEnv.envelopeVersion,
+                        params = currentParams,
+                        payload = rotatedPayload
+                    )
+                    // Exclude unmodified virtual built-in default folders so SQLite row count stays clean (PV-SEC-009)
+                    val itemsToPersist = snapshot.items.filterNot { item ->
+                        item is VaultFolder &&
+                            (item.id == VaultFolder.DEFAULT_NOTE_FOLDER_ID || item.id == VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID) &&
+                            item.createdAtEpochMs == 0L
+                    }
+                    val reEncryptedEntities = itemsToPersist.map { item ->
+                        encryptItemForSlot(activeSlotId, newDek, item)
+                    }
+                    if (activeSlotId == VaultSessionManager.REAL_SLOT) {
+                        BiometricKeyEnvelopeHelper.deleteBiometricKey()
+                    }
+                    val updatedEnv = activeEnv.copy(
+                        kdfSalt = newSalt,
+                        envelopeNonce = newNonce,
+                        wrappedPayloadCiphertext = newWrapped,
+                        biometricNonce = if (activeSlotId == VaultSessionManager.REAL_SLOT) null else activeEnv.biometricNonce,
+                        biometricWrappedDek = if (activeSlotId == VaultSessionManager.REAL_SLOT) null else activeEnv.biometricWrappedDek
+                    )
+                    withContext(Dispatchers.IO) {
+                        vaultDao.rekeySlotAtomically(
+                            slotId = activeSlotId,
+                            updatedEnvelope = updatedEnv,
+                            reEncryptedRecords = reEncryptedEntities
+                        )
+                    }
+                    sessionManager.updateActiveSessionDek(sessionId, newDek)
                 }
             } finally {
                 Arrays.fill(newKek, 0.toByte())
+                newDek?.let { Arrays.fill(it, 0.toByte()) }
                 verifiedPayload.wipe()
             }
         }
@@ -593,13 +670,14 @@ class VaultRepository(
     suspend fun rotateRealMasterPassword(
         sessionId: Long,
         currentPasswordChars: CharArray,
-        newPasswordChars: CharArray
+        newPasswordChars: CharArray,
+        rekeyAllRecordsWithNewDek: Boolean = false
     ) {
         val session = sessionManager.requireActiveSession(sessionId)
         require(session.canManageVaultSecurity) {
             "Master Password rotation is only permitted in the primary vault."
         }
-        changeActiveVaultPassword(sessionId, currentPasswordChars, newPasswordChars)
+        changeActiveVaultPassword(sessionId, currentPasswordChars, newPasswordChars, rekeyAllRecordsWithNewDek)
     }
 
     /**
@@ -623,22 +701,15 @@ class VaultRepository(
                 iterations = env0.kdfIterations,
                 parallelism = env0.kdfParallelism
             )
-            val kek0 = CryptoEngine.deriveKeyArgon2id(realMasterPasswordChars, env0.kdfSalt, params0)
-            try {
-                val unwrapped0 = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                    kekBytes = kek0,
-                    nonce = env0.envelopeNonce,
-                    slotId = VaultSessionManager.REAL_SLOT,
-                    envelopeVersion = env0.envelopeVersion,
-                    params = params0,
-                    wrappedCiphertext = env0.wrappedPayloadCiphertext
-                )
-                val valid = unwrapped0 != null && unwrapped0.isActiveVault
-                unwrapped0?.wipe()
-                valid
-            } finally {
-                Arrays.fill(kek0, 0.toByte())
-            }
+            val unwrapped0 = deriveAndUnwrapWithLegacyFallback(
+                passwordChars = realMasterPasswordChars,
+                env = env0,
+                slotId = VaultSessionManager.REAL_SLOT,
+                params = params0
+            )
+            val valid = unwrapped0 != null && unwrapped0.isActiveVault
+            unwrapped0?.wipe()
+            valid
         }
     }
 
@@ -686,13 +757,11 @@ class VaultRepository(
                 parallelism = env0.kdfParallelism
             )
             val kek0 = CryptoEngine.deriveKeyArgon2id(realMasterPasswordChars, env0.kdfSalt, params0)
-            val unwrapped0 = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                kekBytes = kek0,
-                nonce = env0.envelopeNonce,
+            val unwrapped0 = deriveAndUnwrapWithLegacyFallback(
+                passwordChars = realMasterPasswordChars,
+                env = env0,
                 slotId = VaultSessionManager.REAL_SLOT,
-                envelopeVersion = env0.envelopeVersion,
-                params = params0,
-                wrappedCiphertext = env0.wrappedPayloadCiphertext
+                params = params0
             )
             if (unwrapped0 == null || !unwrapped0.isActiveVault) {
                 Arrays.fill(kek0, 0.toByte())
@@ -758,10 +827,8 @@ class VaultRepository(
                     biometricWrappedDek = null
                 )
 
+                // PV-SEC-009: Do not write built-in default folders as SQLite rows; only write sample records if enabled
                 val seedEntities = mutableListOf<EncryptedRecordEntity>()
-                buildDefaultStarterFolders().forEach { folder ->
-                    seedEntities.add(encryptItemForSlot(VaultSessionManager.DECOY_SLOT, dek1, folder))
-                }
                 if (seedSampleData) {
                     buildPlausibleDecoyVaultRecords(now).forEach { item ->
                         seedEntities.add(encryptItemForSlot(VaultSessionManager.DECOY_SLOT, dek1, item))
@@ -833,34 +900,26 @@ class VaultRepository(
                 parallelism = env1.kdfParallelism
             )
 
-            var kek0: ByteArray? = null
-            var currentKek1: ByteArray? = null
             var newKek1: ByteArray? = null
             var unwrapped0: CryptoEngine.UnwrappedEnvelopePayload? = null
             var unwrapped1: CryptoEngine.UnwrappedEnvelopePayload? = null
 
             try {
-                kek0 = CryptoEngine.deriveKeyArgon2id(realMasterPasswordChars, env0.kdfSalt, params0)
-                unwrapped0 = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                    kekBytes = kek0,
-                    nonce = env0.envelopeNonce,
+                unwrapped0 = deriveAndUnwrapWithLegacyFallback(
+                    passwordChars = realMasterPasswordChars,
+                    env = env0,
                     slotId = VaultSessionManager.REAL_SLOT,
-                    envelopeVersion = env0.envelopeVersion,
-                    params = params0,
-                    wrappedCiphertext = env0.wrappedPayloadCiphertext
+                    params = params0
                 )
                 if (unwrapped0 == null || !unwrapped0.isActiveVault) {
                     throw IllegalArgumentException("Real Master Password verification failed.")
                 }
 
-                currentKek1 = CryptoEngine.deriveKeyArgon2id(currentDecoyPasswordChars, env1.kdfSalt, params1)
-                unwrapped1 = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                    kekBytes = currentKek1,
-                    nonce = env1.envelopeNonce,
+                unwrapped1 = deriveAndUnwrapWithLegacyFallback(
+                    passwordChars = currentDecoyPasswordChars,
+                    env = env1,
                     slotId = VaultSessionManager.DECOY_SLOT,
-                    envelopeVersion = env1.envelopeVersion,
-                    params = params1,
-                    wrappedCiphertext = env1.wrappedPayloadCiphertext
+                    params = params1
                 )
                 if (unwrapped1 == null || !unwrapped1.isActiveVault) {
                     throw IllegalArgumentException("Current Decoy Password verification failed.")
@@ -891,8 +950,6 @@ class VaultRepository(
                     )
                 }
             } finally {
-                kek0?.let { Arrays.fill(it, 0.toByte()) }
-                currentKek1?.let { Arrays.fill(it, 0.toByte()) }
                 newKek1?.let { Arrays.fill(it, 0.toByte()) }
                 unwrapped0?.wipe()
                 unwrapped1?.wipe()
@@ -901,9 +958,9 @@ class VaultRepository(
     }
 
     /**
-     * Disables Decoy Mode by replacing Slot 1 with a fresh unconfigured dummy envelope, setting
-     * `decoyPolicyFlag = DECOY_POLICY_DISABLED` in Slot 0, and deleting all Slot 1 records inside
-     * a single atomic `@Transaction` (`N06`, `R01`).
+     * Disables Decoy Mode by replacing Slot 1 with a fresh unconfigured dummy envelope wrapped
+     * with CSPRNG key material (`PV-SEC-006`), setting `decoyPolicyFlag = DECOY_POLICY_DISABLED`
+     * in Slot 0, and deleting all Slot 1 records inside a single atomic `@Transaction` (`N06`, `R01`).
      */
     suspend fun disableDecoyVault(
         sessionId: Long,
@@ -924,13 +981,11 @@ class VaultRepository(
                 parallelism = env0.kdfParallelism
             )
             val kek0 = CryptoEngine.deriveKeyArgon2id(realMasterPasswordChars, env0.kdfSalt, params0)
-            val unwrapped0 = CryptoEngine.unwrapEnvelopePayloadOrNull(
-                kekBytes = kek0,
-                nonce = env0.envelopeNonce,
+            val unwrapped0 = deriveAndUnwrapWithLegacyFallback(
+                passwordChars = realMasterPasswordChars,
+                env = env0,
                 slotId = VaultSessionManager.REAL_SLOT,
-                envelopeVersion = env0.envelopeVersion,
-                params = params0,
-                wrappedCiphertext = env0.wrappedPayloadCiphertext
+                params = params0
             )
             if (unwrapped0 == null || !unwrapped0.isActiveVault) {
                 Arrays.fill(kek0, 0.toByte())
@@ -942,8 +997,8 @@ class VaultRepository(
             val salt1 = CryptoEngine.generateSalt()
             val nonce1 = CryptoEngine.generateNonce()
             val dek1 = CryptoEngine.generateDek()
-            val dummyChars = CharArray(16) { 'x' }
-            val kek1 = CryptoEngine.deriveKeyArgon2id(dummyChars, salt1, params0)
+            // PV-SEC-006 Fix: Generate 256-bit random dummy KEK directly from SecureRandom
+            val kek1 = CryptoEngine.randomBytes(CryptoEngine.DEK_BYTES)
 
             try {
                 val newNonce0 = CryptoEngine.generateNonce()
@@ -1004,7 +1059,6 @@ class VaultRepository(
                 Arrays.fill(kek0, 0.toByte())
                 Arrays.fill(kek1, 0.toByte())
                 Arrays.fill(dek1, 0.toByte())
-                Arrays.fill(dummyChars, '\u0000')
                 unwrapped0.wipe()
             }
         }
@@ -1241,12 +1295,14 @@ class VaultRepository(
      * N02 Fix: If any record in the active slot fails AEAD authentication or decoding, aborts
      * the ordinary export with `VaultRecordIntegrityException` unless the caller explicitly sets
      * `allowSkipCorruptedRecords = true` (Recovery Export mode).
+     * PV-BUG-009 Fix: Supports scoped export (`ALL_DATA`, `NOTES_ONLY`, `PASSWORDS_ONLY`).
      */
     suspend fun prepareEncryptedBackupBytes(
         sessionId: Long,
         backupPasswordChars: CharArray,
-        appVersionName: String = "1.0.1",
-        allowSkipCorruptedRecords: Boolean = false
+        appVersionName: String = "1.0.4",
+        allowSkipCorruptedRecords: Boolean = false,
+        exportScope: PortableBackupEngine.BackupExportScope = PortableBackupEngine.BackupExportScope.ALL_DATA
     ): ByteArray = withContext(Dispatchers.Default) {
         val snapshot = loadDecryptedSlotSnapshotForSession(sessionId)
         if (snapshot.hasCorruptedRecords && !allowSkipCorruptedRecords) {
@@ -1255,9 +1311,18 @@ class VaultRepository(
                 message = "Backup aborted: ${snapshot.corruptedRecordIds.size} encrypted record(s) failed integrity verification. Enable Recovery Export if you wish to export only intact records."
             )
         }
+        val filteredItems = when (exportScope) {
+            PortableBackupEngine.BackupExportScope.ALL_DATA -> snapshot.items
+            PortableBackupEngine.BackupExportScope.NOTES_ONLY -> snapshot.items.filter { item ->
+                item is NoteRecord || (item is VaultFolder && item.scope == FolderScope.NOTES)
+            }
+            PortableBackupEngine.BackupExportScope.PASSWORDS_ONLY -> snapshot.items.filter { item ->
+                item is CredentialRecord || (item is VaultFolder && item.scope == FolderScope.CREDENTIALS)
+            }
+        }
         val params = defaultKdfParamsProvider()
         PortableBackupEngine.createEncryptedBackupBytes(
-            items = snapshot.items,
+            items = filteredItems,
             backupPasswordChars = backupPasswordChars,
             appVersionName = appVersionName,
             kdfParams = params

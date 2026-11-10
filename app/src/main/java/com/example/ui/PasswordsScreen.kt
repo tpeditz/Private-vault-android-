@@ -20,10 +20,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.CreateNewFolder
@@ -34,10 +36,12 @@ import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -65,6 +69,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -84,6 +89,7 @@ fun PasswordsTabScreen(
     viewModel: VaultViewModel
 ) {
     var showManageFoldersDialog by remember { mutableStateOf(false) }
+    var pendingPermanentDeleteCredentialId by remember { mutableStateOf<String?>(null) }
 
     val activeDraft = uiState.activeCredentialDraft
     if (activeDraft != null) {
@@ -119,6 +125,37 @@ fun PasswordsTabScreen(
         return
     }
 
+    if (pendingPermanentDeleteCredentialId != null) {
+        AlertDialog(
+            onDismissRequest = { pendingPermanentDeleteCredentialId = null },
+            title = { Text("Delete Credential Permanently?") },
+            text = {
+                Text(
+                    "This saved credential will be permanently removed from your vault and cannot be recovered unless you have an external .pvault backup."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val id = pendingPermanentDeleteCredentialId
+                        pendingPermanentDeleteCredentialId = null
+                        if (id != null) {
+                            viewModel.deleteCredential(id)
+                        }
+                    },
+                    modifier = Modifier.testTag("confirm_perm_delete_credential_button")
+                ) {
+                    Text("Delete Permanently")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingPermanentDeleteCredentialId = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     val credFolders = remember(uiState.folders) {
         uiState.folders.filter { it.scope == FolderScope.CREDENTIALS }
             .sortedWith(compareBy<VaultFolder> { !VaultFolder.isDefaultGeneralName(it.name) }.thenBy { it.name.lowercase() })
@@ -131,17 +168,24 @@ fun PasswordsTabScreen(
         uiState.selectedCredentialFolderId,
         uiState.credentialsSortOrder,
         uiState.credentialsFavoritesOnly,
+        uiState.credentialsArchiveOnly,
         uiState.credentialsTrashOnly
     ) {
         val q = uiState.credentialsSearchQuery.trim().lowercase(Locale.US)
         val filtered = uiState.credentials.filter { cred ->
-            val matchesTrash = if (uiState.credentialsTrashOnly) cred.isTrashed else !cred.isTrashed
+            val matchesLifecycle = when {
+                uiState.credentialsTrashOnly -> cred.isTrashed
+                uiState.credentialsArchiveOnly -> !cred.isTrashed && cred.isArchived
+                else -> !cred.isTrashed && !cred.isArchived
+            }
             val matchesQuery = if (q.isEmpty()) {
                 true
             } else {
                 cred.serviceName.lowercase(Locale.US).contains(q) ||
+                    cred.accountLabel.lowercase(Locale.US).contains(q) ||
                     cred.username.lowercase(Locale.US).contains(q) ||
                     cred.websiteUrl.lowercase(Locale.US).contains(q) ||
+                    cred.notes.lowercase(Locale.US).contains(q) ||
                     cred.category.lowercase(Locale.US).contains(q) ||
                     cred.folderName.lowercase(Locale.US).contains(q) ||
                     cred.tags.any { it.lowercase(Locale.US).contains(q) }
@@ -151,7 +195,7 @@ fun PasswordsTabScreen(
             val matchesFolder = uiState.selectedCredentialFolderId == null ||
                 cred.folderId == uiState.selectedCredentialFolderId
             val matchesFav = !uiState.credentialsFavoritesOnly || cred.isFavorite
-            matchesTrash && matchesQuery && matchesCat && matchesFolder && matchesFav
+            matchesLifecycle && matchesQuery && matchesCat && matchesFolder && matchesFav
         }
 
         // R18 Fix: Sort pinned credentials first, then by selected sort order
@@ -208,8 +252,9 @@ fun PasswordsTabScreen(
             OutlinedTextField(
                 value = uiState.credentialsSearchQuery,
                 onValueChange = viewModel::setCredentialsSearchQuery,
-                placeholder = { Text("Search services, usernames, URLs, tags…") },
+                placeholder = { Text("Search services, usernames, labels, notes…") },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 trailingIcon = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -292,6 +337,22 @@ fun PasswordsTabScreen(
                     },
                     label = { Text("Sort: ${uiState.credentialsSortOrder.label}") }
                 )
+
+                val archivedCount = uiState.credentials.count { !it.isTrashed && it.isArchived }
+                FilterChip(
+                    selected = uiState.credentialsArchiveOnly,
+                    onClick = { viewModel.setCredentialsArchiveOnly(!uiState.credentialsArchiveOnly) },
+                    label = { Text(if (archivedCount > 0) "Archive ($archivedCount)" else "Archive") },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Filled.Archive,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    modifier = Modifier.testTag("credentials_archive_chip")
+                )
+
                 val trashedCount = uiState.credentials.count { it.isTrashed }
                 FilterChip(
                     selected = uiState.credentialsTrashOnly,
@@ -355,8 +416,10 @@ fun PasswordsTabScreen(
                             },
                             onTogglePin = { viewModel.toggleCredentialPin(cred) },
                             onToggleFavorite = { viewModel.toggleCredentialFavorite(cred) },
+                            onDuplicate = { viewModel.duplicateCredential(cred) },
+                            onToggleArchive = { viewModel.toggleCredentialArchive(cred) },
                             onToggleTrash = { viewModel.toggleCredentialTrash(cred) },
-                            onPermanentDelete = { viewModel.deleteCredential(cred.id) }
+                            onPermanentDelete = { pendingPermanentDeleteCredentialId = cred.id }
                         )
                     }
                 }
@@ -373,6 +436,8 @@ private fun CredentialItemCard(
     onCopyPassword: () -> Unit,
     onTogglePin: () -> Unit,
     onToggleFavorite: () -> Unit,
+    onDuplicate: () -> Unit,
+    onToggleArchive: () -> Unit,
     onToggleTrash: () -> Unit,
     onPermanentDelete: () -> Unit
 ) {
@@ -418,13 +483,31 @@ private fun CredentialItemCard(
                     }
 
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = credential.serviceName,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = credential.serviceName,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (credential.accountLabel.isNotBlank()) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                    shape = RoundedCornerShape(6.dp)
+                                ) {
+                                    Text(
+                                        text = credential.accountLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
                         if (credential.username.isNotBlank()) {
                             Text(
                                 text = credential.username,
@@ -458,6 +541,32 @@ private fun CredentialItemCard(
                                 imageVector = if (credential.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
                                 contentDescription = "Favorite Credential",
                                 tint = if (credential.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onDuplicate,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("duplicate_credential_${credential.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.ContentCopy,
+                                contentDescription = "Duplicate Credential",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onToggleArchive,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("archive_credential_${credential.id}")
+                        ) {
+                            Icon(
+                                imageVector = if (credential.isArchived) Icons.Filled.Unarchive else Icons.Filled.Archive,
+                                contentDescription = if (credential.isArchived) "Unarchive Credential" else "Archive Credential",
+                                tint = if (credential.isArchived) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -613,8 +722,36 @@ private fun CredentialEditorView(
     onCopySecret: (String, String) -> Unit,
     onClose: () -> Unit
 ) {
+    var showConfirmDeleteDialog by remember { mutableStateOf(false) }
+
     BackHandler {
         onClose()
+    }
+
+    if (showConfirmDeleteDialog && onDelete != null) {
+        AlertDialog(
+            onDismissRequest = { showConfirmDeleteDialog = false },
+            title = { Text("Delete Credential Permanently?") },
+            text = {
+                Text("This saved credential will be permanently deleted from your vault.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showConfirmDeleteDialog = false
+                        onDelete()
+                    },
+                    modifier = Modifier.testTag("confirm_editor_delete_credential_button")
+                ) {
+                    Text("Delete Permanently")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirmDeleteDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     var showPassword by remember { mutableStateOf(false) }
@@ -625,7 +762,7 @@ private fun CredentialEditorView(
         OfflinePasswordStrengthEstimator.evaluate(draft.password, existingVaultPasswords)
     }
 
-    // U03 Fix: Single scrollable Column with single imePadding() and dark background
+    // U03 Fix: Single scrollable Column with single imePadding()
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -667,7 +804,7 @@ private fun CredentialEditorView(
                 }
                 if (onDelete != null) {
                     IconButton(
-                        onClick = onDelete,
+                        onClick = { showConfirmDeleteDialog = true },
                         modifier = Modifier.testTag("credential_editor_delete_button")
                     ) {
                         Icon(
@@ -709,9 +846,21 @@ private fun CredentialEditorView(
             onValueChange = { text -> onUpdateDraft { it.copy(serviceName = text, editorError = null) } },
             label = { Text("Service / Title *") },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("credential_service_input")
+        )
+
+        OutlinedTextField(
+            value = draft.accountLabel,
+            onValueChange = { text -> onUpdateDraft { it.copy(accountLabel = text) } },
+            label = { Text("Account Label (e.g., Personal, Work)") },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("credential_account_label_input")
         )
 
         OutlinedTextField(
@@ -719,6 +868,7 @@ private fun CredentialEditorView(
             onValueChange = { text -> onUpdateDraft { it.copy(username = text) } },
             label = { Text("Username / Email / Account ID") },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
             trailingIcon = {
                 if (draft.username.isNotEmpty()) {
                     IconButton(onClick = { onCopySecret("Username", draft.username) }) {
@@ -736,6 +886,10 @@ private fun CredentialEditorView(
             onValueChange = { text -> onUpdateDraft { it.copy(password = text) } },
             label = { Text("Password / Secret Key") },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Password,
+                autoCorrectEnabled = false
+            ),
             visualTransformation = if (showPassword) {
                 VisualTransformation.None
             } else {
@@ -772,6 +926,13 @@ private fun CredentialEditorView(
                 .testTag("credential_password_input")
         )
 
+        // PV-BUG-011 Fix: Clarify that updating a saved password here only updates your offline vault record
+        Text(
+            text = "Note: Updating a password here only updates your encrypted record in Private Vault. Remember to also update it on the website or service itself.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
         if (draft.password.isNotEmpty()) {
             PasswordStrengthInlineBar(report = strengthReport)
         }
@@ -781,6 +942,7 @@ private fun CredentialEditorView(
             onValueChange = { text -> onUpdateDraft { it.copy(websiteUrl = text) } },
             label = { Text("Website / URI (optional)") },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("credential_url_input")
@@ -833,6 +995,7 @@ private fun CredentialEditorView(
             onValueChange = { text -> onUpdateDraft { it.copy(tagsText = text) } },
             label = { Text("Tags (comma separated)") },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -841,6 +1004,7 @@ private fun CredentialEditorView(
             onValueChange = { text -> onUpdateDraft { it.copy(notes = text) } },
             label = { Text("Encrypted Notes / Recovery Codes") },
             minLines = 3,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("credential_notes_input")
@@ -933,6 +1097,7 @@ private fun CredentialEditorView(
                             },
                             label = { Text("Label") },
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("custom_field_label_input")
@@ -945,6 +1110,10 @@ private fun CredentialEditorView(
                             },
                             label = { Text("Exact Value") },
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = if (draft.pendingCustomIsSecret) KeyboardType.Password else KeyboardType.Text,
+                                autoCorrectEnabled = false
+                            ),
                             visualTransformation = if (draft.pendingCustomIsSecret) {
                                 PasswordVisualTransformation()
                             } else {

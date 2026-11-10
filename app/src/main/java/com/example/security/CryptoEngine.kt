@@ -7,6 +7,7 @@ import java.nio.ByteBuffer
 import java.nio.CharBuffer
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
+import java.text.Normalizer
 import java.util.Arrays
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
@@ -155,16 +156,20 @@ object CryptoEngine {
     /**
      * Derives a 256-bit key using Argon2id v1.3 via BouncyCastle.
      * Validates KDF bounds prior to memory allocation and wipes UTF-8 password bytes in finally (R05).
+     * By default normalizes non-ASCII passwords to Unicode NFC (PV-SEC-011); callers unlocking
+     * existing envelopes or backups can retry with `normalizeUnicodeNfc = false` via
+     * `hasDistinctLegacyNonNfcForm(passwordChars)` for 100% backward compatibility.
      */
     fun deriveKeyArgon2id(
         passwordChars: CharArray,
         salt: ByteArray,
-        params: KdfParams
+        params: KdfParams,
+        normalizeUnicodeNfc: Boolean = true
     ): ByteArray {
         params.validateBounds()
         require(salt.size == SALT_BYTES) { "Invalid salt length: ${salt.size}" }
 
-        val passwordBytes = charArrayToUtf8Bytes(passwordChars)
+        val passwordBytes = charArrayToUtf8Bytes(passwordChars, normalizeUnicodeNfc)
         val output = ByteArray(DEK_BYTES)
         var succeeded = false
         try {
@@ -355,10 +360,25 @@ object CryptoEngine {
             }
             val roleFlag = buffer.get()
             val decoyPolicyFlag = buffer.get() // byte [5]: authenticated decoy policy state for Slot 0
-            buffer.get() // reserved 2
-            buffer.get() // reserved 3
+            val reserved2 = buffer.get()
+            val reserved3 = buffer.get()
+
+            // PV-CRYPTO-001: Strictly validate roleFlag, decoyPolicyFlag, and reserved bytes
+            if (roleFlag != SLOT_ROLE_DUMMY && roleFlag != SLOT_ROLE_ACTIVE) {
+                return null
+            }
+            if (decoyPolicyFlag != DECOY_POLICY_DISABLED && decoyPolicyFlag != DECOY_POLICY_ENABLED) {
+                return null
+            }
+            if (reserved2 != 0.toByte() || reserved3 != 0.toByte()) {
+                return null
+            }
+
             val createdAt = buffer.long
             val rotatedAt = buffer.long
+            if (createdAt < 0L || rotatedAt < 0L) {
+                return null
+            }
             val dek = ByteArray(DEK_BYTES)
             buffer.get(dek)
 
@@ -421,8 +441,25 @@ object CryptoEngine {
         return cipher.doFinal(ciphertext)
     }
 
-    private fun charArrayToUtf8Bytes(chars: CharArray): ByteArray {
-        val charBuffer = CharBuffer.wrap(chars)
+    /**
+     * Checks whether `chars` contains non-ASCII characters whose Unicode NFC form differs from the
+     * raw input, allowing unlock/restore paths to fall back to raw legacy derivation if needed.
+     */
+    fun hasDistinctLegacyNonNfcForm(chars: CharArray): Boolean {
+        if (chars.none { it.code > 0x7F }) return false
+        return !Normalizer.isNormalized(CharBuffer.wrap(chars), Normalizer.Form.NFC)
+    }
+
+    private fun charArrayToUtf8Bytes(
+        chars: CharArray,
+        normalizeUnicodeNfc: Boolean = true
+    ): ByteArray {
+        val charBuffer = if (normalizeUnicodeNfc && chars.any { it.code > 0x7F }) {
+            val normalized = Normalizer.normalize(CharBuffer.wrap(chars), Normalizer.Form.NFC)
+            CharBuffer.wrap(normalized)
+        } else {
+            CharBuffer.wrap(chars)
+        }
         val byteBuffer = StandardCharsets.UTF_8.encode(charBuffer)
         val bytes = ByteArray(byteBuffer.remaining())
         byteBuffer.get(bytes)

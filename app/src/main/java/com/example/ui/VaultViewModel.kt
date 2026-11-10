@@ -24,11 +24,13 @@ import com.example.data.VaultRepository
 import com.example.ota.OtaUpdateManager
 import com.example.security.CryptoEngine
 import com.example.security.OfflinePasswordStrengthEstimator
+import com.example.security.PasswordGeneratorEngine
 import com.example.security.SensitiveClipboardManager
 import com.example.security.VaultSessionManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,8 +50,23 @@ import javax.crypto.Cipher
 enum class PrimaryTab {
     NOTES,
     PASSWORDS,
+    TOOLS,
+    SETTINGS,
     GENERATOR,
     STRENGTH_AUDIT
+}
+
+enum class ToolsSegment {
+    GENERATOR,
+    STRENGTH_CHECKER
+}
+
+enum class AutosaveIndicator {
+    IDLE,
+    UNSAVED,
+    SAVING,
+    SAVED,
+    ERROR
 }
 
 enum class SecondaryDestination {
@@ -69,6 +86,8 @@ enum class SortOrder(val label: String) {
 data class NoteEditorDraftState(
     val noteId: String = UUID.randomUUID().toString(),
     val isEditingExisting: Boolean = false,
+    val isDirty: Boolean = false,
+    val autosaveIndicator: AutosaveIndicator = AutosaveIndicator.IDLE,
     val createdAtEpochMs: Long = System.currentTimeMillis(),
     val title: String = "",
     val body: String = "",
@@ -80,6 +99,7 @@ data class NoteEditorDraftState(
     val colorAccentIndex: Int = 0,
     val isPinned: Boolean = false,
     val isFavorite: Boolean = false,
+    val isArchived: Boolean = false,
     val checklistItems: List<ChecklistEntry> = emptyList(),
     val pendingNewChecklistText: String = "",
     val showMarkdownPreview: Boolean = false,
@@ -91,6 +111,7 @@ data class CredentialEditorDraftState(
     val isEditingExisting: Boolean = false,
     val createdAtEpochMs: Long = System.currentTimeMillis(),
     val serviceName: String = "",
+    val accountLabel: String = "",
     val username: String = "",
     val password: String = "",
     val websiteUrl: String = "",
@@ -101,6 +122,7 @@ data class CredentialEditorDraftState(
     val tagsText: String = "",
     val isFavorite: Boolean = false,
     val isPinned: Boolean = false,
+    val isArchived: Boolean = false,
     val customFields: List<CustomCredentialField> = emptyList(),
     val pendingCustomLabel: String = "",
     val pendingCustomValue: String = "",
@@ -137,17 +159,21 @@ data class VerifiedRestorePreviewState(
     val appVersionName: String,
     val notesCount: Int,
     val credentialsCount: Int,
-    val foldersCount: Int
+    val foldersCount: Int,
+    val isEmptyBackup: Boolean = false
 )
 
 data class VaultUiState(
     val isLoading: Boolean = true,
     val isVaultProvisioned: Boolean = false,
     val isBiometricEnrolled: Boolean = false,
+    val isBiometricHardwareBacked: Boolean = false,
     val isDecoyModeEnabled: Boolean = false,
+    val isBiometricBlockedByPolicy: Boolean = false,
     val isDecoyPolicySheetUnlocked: Boolean = false,
     val sessionState: VaultSessionManager.SessionState = VaultSessionManager.SessionState.Locked,
     val primaryTab: PrimaryTab = PrimaryTab.NOTES,
+    val activeToolsSegment: ToolsSegment = ToolsSegment.GENERATOR,
     val secondaryDestination: SecondaryDestination = SecondaryDestination.NONE,
 
     // Active unlocked vault data
@@ -162,6 +188,7 @@ data class VaultUiState(
     val selectedNoteFolderId: String? = null,
     val notesSortOrder: SortOrder = SortOrder.UPDATED_DESC,
     val notesFavoritesOnly: Boolean = false,
+    val notesArchiveOnly: Boolean = false,
     val notesTrashOnly: Boolean = false,
 
     val credentialsSearchQuery: String = "",
@@ -169,14 +196,17 @@ data class VaultUiState(
     val selectedCredentialFolderId: String? = null,
     val credentialsSortOrder: SortOrder = SortOrder.UPDATED_DESC,
     val credentialsFavoritesOnly: Boolean = false,
+    val credentialsArchiveOnly: Boolean = false,
     val credentialsTrashOnly: Boolean = false,
 
     // Session-scoped active drafts surviving rotation & keyboard resize (R10)
     val activeNoteDraft: NoteEditorDraftState? = null,
     val activeCredentialDraft: CredentialEditorDraftState? = null,
 
-    // Backup & Restore state (U01, U02, R10, R16, Section 05)
+    // Backup & Restore state (U01, U02, R10, R16, Section 05, PV-BUG-009)
     val backupOperationStage: BackupOperationStage = BackupOperationStage.IDLE,
+    val backupExportScope: PortableBackupEngine.BackupExportScope =
+        PortableBackupEngine.BackupExportScope.ALL_DATA,
     val stagedBackupMetadata: StagedBackupMetadata? = null,
     val selectedRestoreUriString: String? = null,
     val selectedRestoreFileName: String? = null,
@@ -187,6 +217,8 @@ data class VaultUiState(
     val generatorConfig: OfflinePasswordStrengthEstimator.GeneratorConfig =
         OfflinePasswordStrengthEstimator.GeneratorConfig(),
     val generatedCandidate: String = "",
+    val generatorError: String? = null,
+    val generatorExplanation: String = "",
     val passphraseWordCount: Int = 5,
     val strengthCheckerInput: String = "",
 
@@ -221,6 +253,7 @@ class VaultViewModel(
     val clipboardCountdownSeconds: StateFlow<Int?> = clipboardManager.activeCountdownSeconds
 
     private var unlockJob: Job? = null
+    private var backgroundAutoLockJob: Job? = null
     private val backupMutex = kotlinx.coroutines.sync.Mutex()
 
     init {
@@ -232,6 +265,7 @@ class VaultViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        backgroundAutoLockJob?.cancel()
         clipboardManager.shutdown()
         cleanupStaleBackupStagingFiles()
     }
@@ -262,6 +296,8 @@ class VaultViewModel(
             vaultRepository.sessionManager.sessionState.collect { session ->
                 when (session) {
                     is VaultSessionManager.SessionState.Locked -> {
+                        backgroundAutoLockJob?.cancel()
+                        backgroundAutoLockJob = null
                         // Note: If the user is in the middle of the Android system Save As picker (U01),
                         // we keep stagedBackupMetadata (which points only to an already-encrypted
                         // .pvault file on disk) so the CreateDocument callback can finish copying it!
@@ -277,6 +313,7 @@ class VaultViewModel(
                                 folders = emptyList(),
                                 corruptedRecordCount = 0,
                                 isDecoyModeEnabled = false,
+                                isBiometricBlockedByPolicy = false,
                                 isDecoyPolicySheetUnlocked = false,
                                 activeNoteDraft = null,
                                 activeCredentialDraft = null,
@@ -293,8 +330,13 @@ class VaultViewModel(
                     }
 
                     is VaultSessionManager.SessionState.Unlocked -> {
+                        val blockedByPolicy = session.slotId == VaultSessionManager.DECOY_SLOT ||
+                            session.isDecoyConfiguredInRealVault
                         _uiState.update { state ->
-                            state.copy(sessionState = session)
+                            state.copy(
+                                sessionState = session,
+                                isBiometricBlockedByPolicy = blockedByPolicy
+                            )
                         }
                         refreshActiveVaultItems(session.sessionId)
                     }
@@ -307,47 +349,69 @@ class VaultViewModel(
         viewModelScope.launch {
             val provisioned = vaultRepository.isVaultProvisioned()
             val bioEnrolled = vaultRepository.isBiometricUnlockEnrolled()
-            val initialPass = OfflinePasswordStrengthEstimator.generatePassword(
-                OfflinePasswordStrengthEstimator.GeneratorConfig()
+            val bioHardwareBacked = vaultRepository.isBiometricKeyHardwareBacked()
+            val defaultCfg = OfflinePasswordStrengthEstimator.GeneratorConfig()
+            val genResult = PasswordGeneratorEngine.generate(
+                length = defaultCfg.length,
+                includeUppercase = defaultCfg.includeUppercase,
+                includeLowercase = defaultCfg.includeLowercase,
+                includeDigits = defaultCfg.includeDigits,
+                includeSymbols = defaultCfg.includeSymbols,
+                excludeAmbiguous = defaultCfg.excludeAmbiguous
             )
+            val initialPass = (genResult as? PasswordGeneratorEngine.GenerationResult.Success)?.password
+                ?: OfflinePasswordStrengthEstimator.generatePassword(defaultCfg)
+            val initialExplanation = (genResult as? PasswordGeneratorEngine.GenerationResult.Success)?.explanation
+                ?: ""
+
             _uiState.update {
                 it.copy(
                     isLoading = false,
                     isVaultProvisioned = provisioned,
                     isBiometricEnrolled = bioEnrolled,
-                    generatedCandidate = initialPass
+                    isBiometricHardwareBacked = bioHardwareBacked,
+                    generatedCandidate = initialPass,
+                    generatorError = null,
+                    generatorExplanation = initialExplanation
                 )
             }
 
             if (enableStartupOtaCheck) {
-                // R15 Fix: Perform a single non-blocking startup OTA check and set prompt visibility
-                // based on the user's saved reminder policy without re-fetching!
                 val currentPrefs = preferencesRepository.preferencesFlow.first()
-                val result = otaUpdateManager.checkForUpdates(
-                    manifestUrl = currentPrefs.otaManifestUrl,
-                    showDialogIfAvailable = false
-                )
-                if (result is OtaUpdateManager.OtaState.UpdateAvailable) {
-                    val shouldPrompt = preferencesRepository.shouldShowAutomaticUpdatePrompt(
-                        prefs = currentPrefs,
-                        remoteVersionCode = result.manifest.versionCode
+                if (currentPrefs.autoCheckOtaOnStartup) {
+                    val result = otaUpdateManager.checkForUpdates(
+                        manifestUrl = currentPrefs.otaManifestUrl,
+                        showDialogIfAvailable = false
                     )
-                    if (shouldPrompt) {
-                        otaUpdateManager.setPromptDialogVisible(true)
+                    if (result is OtaUpdateManager.OtaState.UpdateAvailable) {
+                        val shouldPrompt = preferencesRepository.shouldShowAutomaticUpdatePrompt(
+                            prefs = currentPrefs,
+                            remoteVersionCode = result.manifest.versionCode
+                        )
+                        if (shouldPrompt) {
+                            otaUpdateManager.setPromptDialogVisible(true)
+                        }
                     }
                 }
             }
         }
     }
 
-    fun refreshActiveVaultItems(sessionId: Long? = currentSessionIdOrNull()) {
-        val activeId = sessionId ?: return
-        viewModelScope.launch {
+    fun refreshActiveVaultItems(sessionId: Long? = currentSessionIdOrNull()): Job? {
+        val activeId = sessionId ?: return null
+        return viewModelScope.launch(Dispatchers.Default) {
             try {
                 val snapshot = vaultRepository.loadDecryptedSlotSnapshotForSession(activeId)
                 val decoyEnabled = vaultRepository.isDecoyModeEnabledForRealSession(activeId)
                 val bioEnrolled = vaultRepository.isBiometricUnlockEnrolled()
-                if (!vaultRepository.sessionManager.isSessionActive(activeId)) return@launch
+                val bioHardwareBacked = vaultRepository.isBiometricKeyHardwareBacked()
+                val activeSession = vaultRepository.sessionManager.sessionState.value as? VaultSessionManager.SessionState.Unlocked
+                    ?: return@launch
+                if (activeSession.sessionId != activeId) return@launch
+
+                // PV-SEC-008 Fix: Both Real (when Decoy is enabled) and Decoy sessions set
+                // isBiometricBlockedByPolicy = true so Settings renders the exact same Biometric UI.
+                val blockedByPolicy = activeSession.slotId == VaultSessionManager.DECOY_SLOT || decoyEnabled
 
                 val notes = snapshot.items.filterIsInstance<NoteRecord>()
                 val creds = snapshot.items.filterIsInstance<CredentialRecord>()
@@ -360,7 +424,9 @@ class VaultViewModel(
                         folders = folders,
                         corruptedRecordCount = snapshot.corruptedRecordIds.size,
                         isDecoyModeEnabled = decoyEnabled,
-                        isBiometricEnrolled = bioEnrolled
+                        isBiometricBlockedByPolicy = blockedByPolicy,
+                        isBiometricEnrolled = bioEnrolled,
+                        isBiometricHardwareBacked = bioHardwareBacked
                     )
                 }
             } catch (_: Exception) {
@@ -424,6 +490,7 @@ class VaultViewModel(
                         isBusy = false,
                         isVaultProvisioned = provisioned,
                         isBiometricEnrolled = bioEnrolled,
+                        isBiometricBlockedByPolicy = enableDecoy,
                         sessionState = session,
                         statusBannerMessage = "Encrypted vault provisioned."
                     )
@@ -468,6 +535,8 @@ class VaultViewModel(
                 when (val result = vaultRepository.unlockWithPassword(passwordChars, capturedAuthGen)) {
                     is VaultRepository.UnlockResult.Success -> {
                         preferencesRepository.clearUnlockFailures()
+                        val blockedByPolicy = result.session.slotId == VaultSessionManager.DECOY_SLOT ||
+                            result.session.isDecoyConfiguredInRealVault
                         _uiState.update {
                             it.copy(
                                 isBusy = false,
@@ -475,6 +544,7 @@ class VaultViewModel(
                                 unlockCooldownRemainingMs = 0L,
                                 lastUnlockKdfDurationMs = result.kdfDurationMs,
                                 sessionState = result.session,
+                                isBiometricBlockedByPolicy = blockedByPolicy,
                                 errorBannerMessage = null
                             )
                         }
@@ -553,6 +623,7 @@ class VaultViewModel(
             _uiState.update {
                 it.copy(
                     isBiometricEnrolled = false,
+                    isBiometricHardwareBacked = false,
                     errorBannerMessage = "Device biometrics changed. Please unlock with your password and re-enable biometric quick-unlock in Settings."
                 )
             }
@@ -568,9 +639,11 @@ class VaultViewModel(
                     authenticatedCipher = authenticatedCipher
                 )
                 val enrolled = vaultRepository.isBiometricUnlockEnrolled()
+                val hwBacked = vaultRepository.isBiometricKeyHardwareBacked()
                 _uiState.update {
                     it.copy(
                         isBiometricEnrolled = enrolled,
+                        isBiometricHardwareBacked = hwBacked,
                         statusBannerMessage = "Biometric quick-unlock enabled."
                     )
                 }
@@ -586,6 +659,7 @@ class VaultViewModel(
             _uiState.update {
                 it.copy(
                     isBiometricEnrolled = false,
+                    isBiometricHardwareBacked = false,
                     statusBannerMessage = "Biometric quick-unlock disabled."
                 )
             }
@@ -599,6 +673,8 @@ class VaultViewModel(
     fun lockVaultNow(reasonBanner: String? = null) {
         unlockJob?.cancel()
         unlockJob = null
+        backgroundAutoLockJob?.cancel()
+        backgroundAutoLockJob = null
         vaultRepository.sessionManager.lockNow()
         clipboardManager.clearIfStillOwned()
         _uiState.update {
@@ -610,11 +686,44 @@ class VaultViewModel(
         }
     }
 
+    /**
+     * PV-SEC-007 Fix: Proactively locks the vault in the background (or schedules a coroutine timer
+     * for `autoLockTimeoutMs`) so the decrypted DEK does not remain in memory indefinitely while
+     * the app is backgrounded.
+     */
     fun onAppBackgrounded() {
         vaultRepository.sessionManager.onAppBackgrounded()
+        backgroundAutoLockJob?.cancel()
+        backgroundAutoLockJob = null
+
+        val isUnlocked = vaultRepository.sessionManager.sessionState.value is VaultSessionManager.SessionState.Unlocked
+        if (!isUnlocked) return
+
+        val inPickerWindow = vaultRepository.sessionManager.isInFilePickerTransitionWindow()
+        val timeoutMs = _preferences.value.autoLockTimeoutMs
+
+        if (!inPickerWindow && timeoutMs <= 0L) {
+            lockVaultNow("Vault automatically locked.")
+            return
+        }
+
+        val delayMs = if (inPickerWindow) {
+            VaultSessionManager.FILE_PICKER_GRANT_WINDOW_MS
+        } else {
+            timeoutMs
+        }
+
+        backgroundAutoLockJob = viewModelScope.launch {
+            delay(delayMs)
+            if (vaultRepository.sessionManager.sessionState.value is VaultSessionManager.SessionState.Unlocked) {
+                lockVaultNow("Vault automatically locked.")
+            }
+        }
     }
 
     fun onAppForegrounded() {
+        backgroundAutoLockJob?.cancel()
+        backgroundAutoLockJob = null
         val timeout = _preferences.value.autoLockTimeoutMs
         val locked = vaultRepository.sessionManager.onAppForegrounded(timeout)
         clipboardManager.retryPendingClearOnForeground()
@@ -643,13 +752,35 @@ class VaultViewModel(
     }
 
     // ============================================================================================
-    // Navigation & Draft Editors (R10, R11, R12, R13, R18)
+    // Navigation & Draft Editors (R10, R11, R12, R13, R18, Friendly 4-Tab Nav)
     // ============================================================================================
 
     fun selectPrimaryTab(tab: PrimaryTab) {
+        _uiState.update { state ->
+            when (tab) {
+                PrimaryTab.GENERATOR -> state.copy(
+                    primaryTab = PrimaryTab.TOOLS,
+                    activeToolsSegment = ToolsSegment.GENERATOR,
+                    secondaryDestination = SecondaryDestination.NONE
+                )
+                PrimaryTab.STRENGTH_AUDIT -> state.copy(
+                    primaryTab = PrimaryTab.TOOLS,
+                    activeToolsSegment = ToolsSegment.STRENGTH_CHECKER,
+                    secondaryDestination = SecondaryDestination.NONE
+                )
+                else -> state.copy(
+                    primaryTab = tab,
+                    secondaryDestination = SecondaryDestination.NONE
+                )
+            }
+        }
+    }
+
+    fun selectToolsSegment(segment: ToolsSegment) {
         _uiState.update {
             it.copy(
-                primaryTab = tab,
+                primaryTab = PrimaryTab.TOOLS,
+                activeToolsSegment = segment,
                 secondaryDestination = SecondaryDestination.NONE
             )
         }
@@ -664,7 +795,7 @@ class VaultViewModel(
         }
     }
 
-    // --- Session-scoped Note Editor Draft (R10, R11, R13) ---
+    // --- Session-scoped Note Editor Draft (R10, R11, R13, PV-BUG-003, PV-BUG-004, PV-BUG-007) ---
 
     fun openNewNoteDraft() {
         val defaultFolderId = _uiState.value.selectedNoteFolderId ?: VaultFolder.DEFAULT_NOTE_FOLDER_ID
@@ -674,6 +805,8 @@ class VaultViewModel(
         _uiState.update {
             it.copy(
                 activeNoteDraft = NoteEditorDraftState(
+                    isDirty = false,
+                    autosaveIndicator = AutosaveIndicator.IDLE,
                     folderId = folderObj?.id ?: VaultFolder.DEFAULT_NOTE_FOLDER_ID,
                     folderName = folderObj?.name ?: VaultFolder.DEFAULT_FOLDER_NAME
                 )
@@ -687,6 +820,8 @@ class VaultViewModel(
                 activeNoteDraft = NoteEditorDraftState(
                     noteId = note.id,
                     isEditingExisting = true,
+                    isDirty = false,
+                    autosaveIndicator = AutosaveIndicator.SAVED,
                     createdAtEpochMs = note.createdAtEpochMs,
                     title = note.title,
                     body = note.body,
@@ -698,6 +833,7 @@ class VaultViewModel(
                     colorAccentIndex = note.colorAccentIndex,
                     isPinned = note.isPinned,
                     isFavorite = note.isFavorite,
+                    isArchived = note.isArchived,
                     checklistItems = note.checklistItems
                 )
             )
@@ -707,7 +843,28 @@ class VaultViewModel(
     fun updateActiveNoteDraft(transform: (NoteEditorDraftState) -> NoteEditorDraftState) {
         _uiState.update { state ->
             val current = state.activeNoteDraft ?: return@update state
-            state.copy(activeNoteDraft = transform(current))
+            val next = transform(current)
+            val contentChanged = next.title != current.title ||
+                next.body != current.body ||
+                next.format != current.format ||
+                next.category != current.category ||
+                next.folderId != current.folderId ||
+                next.tagsText != current.tagsText ||
+                next.colorAccentIndex != current.colorAccentIndex ||
+                next.isPinned != current.isPinned ||
+                next.isFavorite != current.isFavorite ||
+                next.isArchived != current.isArchived ||
+                next.checklistItems != current.checklistItems ||
+                next.pendingNewChecklistText != current.pendingNewChecklistText
+            val finalDraft = if (contentChanged) {
+                next.copy(
+                    isDirty = true,
+                    autosaveIndicator = AutosaveIndicator.UNSAVED
+                )
+            } else {
+                next
+            }
+            state.copy(activeNoteDraft = finalDraft)
         }
     }
 
@@ -716,9 +873,11 @@ class VaultViewModel(
     }
 
     /**
-     * R11 & R13 Fix: Saves the active Note draft, automatically committing any non-empty pending
-     * checklist text (`pendingNewChecklistText`), and closes the editor ONLY when `closeOnSuccess`
-     * is true AND the encrypted database write succeeds.
+     * R11, R13, PV-BUG-003 & PV-BUG-004 Fix:
+     * - Saves the active Note draft, automatically committing any non-empty pending checklist text.
+     * - In silent autosave mode (`isSilentAutosave == true`), skips saving if `!draft.isDirty` so
+     *   merely viewing a note never overwrites `updatedAtEpochMs` (`PV-BUG-003`).
+     * - Updates `autosaveIndicator` (`SAVING` -> `SAVED` / `ERROR`) (`PV-BUG-004`).
      */
     fun commitActiveNoteDraft(
         closeOnSuccess: Boolean,
@@ -726,6 +885,13 @@ class VaultViewModel(
     ) {
         val sessionId = currentSessionIdOrNull() ?: return
         val draft = _uiState.value.activeNoteDraft ?: return
+
+        if (isSilentAutosave && !draft.isDirty) {
+            if (closeOnSuccess) {
+                closeNoteDraft()
+            }
+            return
+        }
 
         val finalChecklist = if (draft.pendingNewChecklistText.isNotBlank()) {
             draft.checklistItems + ChecklistEntry(text = draft.pendingNewChecklistText.trim())
@@ -736,10 +902,21 @@ class VaultViewModel(
         if (draft.title.isBlank() && draft.body.isBlank() && finalChecklist.isEmpty()) {
             if (!isSilentAutosave) {
                 updateActiveNoteDraft {
-                    it.copy(editorError = "Please enter a note title, body text, or checklist item before saving.")
+                    it.copy(
+                        autosaveIndicator = AutosaveIndicator.ERROR,
+                        editorError = "Please enter a note title, body text, or checklist item before saving."
+                    )
                 }
             }
             return
+        }
+
+        _uiState.update { state ->
+            state.copy(
+                activeNoteDraft = state.activeNoteDraft?.copy(
+                    autosaveIndicator = AutosaveIndicator.SAVING
+                )
+            )
         }
 
         val resolvedNote = NoteRecord(
@@ -755,6 +932,7 @@ class VaultViewModel(
             colorAccentIndex = draft.colorAccentIndex,
             isPinned = draft.isPinned,
             isFavorite = draft.isFavorite,
+            isArchived = draft.isArchived,
             createdAtEpochMs = draft.createdAtEpochMs,
             updatedAtEpochMs = System.currentTimeMillis()
         )
@@ -770,6 +948,8 @@ class VaultViewModel(
                         } else {
                             state.activeNoteDraft?.copy(
                                 isEditingExisting = true,
+                                isDirty = false,
+                                autosaveIndicator = AutosaveIndicator.SAVED,
                                 checklistItems = finalChecklist,
                                 pendingNewChecklistText = "",
                                 editorError = null
@@ -780,7 +960,14 @@ class VaultViewModel(
                 }
             } catch (e: Exception) {
                 val msg = e.message ?: "Failed to save note."
-                updateActiveNoteDraft { it.copy(editorError = msg) }
+                _uiState.update { state ->
+                    state.copy(
+                        activeNoteDraft = state.activeNoteDraft?.copy(
+                            autosaveIndicator = AutosaveIndicator.ERROR,
+                            editorError = msg
+                        )
+                    )
+                }
                 if (!isSilentAutosave) {
                     setErrorBanner(msg)
                 }
@@ -830,6 +1017,27 @@ class VaultViewModel(
         saveNote(note.copy(isFavorite = !note.isFavorite))
     }
 
+    fun toggleNoteArchive(note: NoteRecord) {
+        val nextArchived = !note.isArchived
+        saveNote(note.copy(isArchived = nextArchived, isTrashed = false)) {
+            setStatusBanner(if (nextArchived) "Note archived." else "Note unarchived.")
+        }
+    }
+
+    fun duplicateNote(note: NoteRecord) {
+        val now = System.currentTimeMillis()
+        val copy = note.copy(
+            id = UUID.randomUUID().toString(),
+            title = "${note.title.ifBlank { "Untitled Note" }} (Copy)",
+            isTrashed = false,
+            createdAtEpochMs = now,
+            updatedAtEpochMs = now
+        )
+        saveNote(copy) {
+            setStatusBanner("Note duplicated.")
+        }
+    }
+
     fun toggleNoteTrash(note: NoteRecord) {
         val nextTrashed = !note.isTrashed
         saveNote(note.copy(isTrashed = nextTrashed)) {
@@ -837,9 +1045,9 @@ class VaultViewModel(
         }
     }
 
-    // --- Session-scoped Credential Editor Draft (R10, R13, R18, N08) ---
+    // --- Session-scoped Credential Editor Draft (R10, R13, R18, N08, PV-BUG-007) ---
 
-    fun openNewCredentialDraft() {
+    fun openNewCredentialDraft(initialPassword: String = "") {
         val defaultFolderId = _uiState.value.selectedCredentialFolderId ?: VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID
         val folderObj = _uiState.value.folders.firstOrNull {
             it.scope == FolderScope.CREDENTIALS && it.id == defaultFolderId
@@ -847,9 +1055,31 @@ class VaultViewModel(
         _uiState.update {
             it.copy(
                 activeCredentialDraft = CredentialEditorDraftState(
+                    password = initialPassword,
                     folderId = folderObj?.id ?: VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID,
                     folderName = folderObj?.name ?: VaultFolder.DEFAULT_FOLDER_NAME
                 )
+            )
+        }
+    }
+
+    fun useGeneratedPasswordInNewCredential() {
+        val candidate = _uiState.value.generatedCandidate
+        if (candidate.isBlank()) return
+        val defaultFolderId = _uiState.value.selectedCredentialFolderId ?: VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID
+        val folderObj = _uiState.value.folders.firstOrNull {
+            it.scope == FolderScope.CREDENTIALS && it.id == defaultFolderId
+        }
+        _uiState.update {
+            it.copy(
+                primaryTab = PrimaryTab.PASSWORDS,
+                secondaryDestination = SecondaryDestination.NONE,
+                activeCredentialDraft = CredentialEditorDraftState(
+                    password = candidate,
+                    folderId = folderObj?.id ?: VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID,
+                    folderName = folderObj?.name ?: VaultFolder.DEFAULT_FOLDER_NAME
+                ),
+                statusBannerMessage = "Generated password loaded into new credential."
             )
         }
     }
@@ -862,6 +1092,7 @@ class VaultViewModel(
                     isEditingExisting = true,
                     createdAtEpochMs = credential.createdAtEpochMs,
                     serviceName = credential.serviceName,
+                    accountLabel = credential.accountLabel,
                     username = credential.username,
                     password = credential.password,
                     websiteUrl = credential.websiteUrl,
@@ -872,6 +1103,7 @@ class VaultViewModel(
                     tagsText = credential.tags.joinToString(", "),
                     isFavorite = credential.isFavorite,
                     isPinned = credential.isPinned,
+                    isArchived = credential.isArchived,
                     customFields = credential.customFields
                 )
             )
@@ -931,6 +1163,7 @@ class VaultViewModel(
         val resolvedCredential = CredentialRecord(
             id = draft.credentialId,
             serviceName = draft.serviceName.trim(),
+            accountLabel = draft.accountLabel.trim(),
             username = draft.username.trim(),
             // Preserve exact password characters
             password = draft.password,
@@ -943,6 +1176,7 @@ class VaultViewModel(
             customFields = finalCustomFields,
             isFavorite = draft.isFavorite,
             isPinned = draft.isPinned,
+            isArchived = draft.isArchived,
             createdAtEpochMs = draft.createdAtEpochMs,
             updatedAtEpochMs = System.currentTimeMillis()
         )
@@ -1008,6 +1242,27 @@ class VaultViewModel(
      */
     fun toggleCredentialPin(credential: CredentialRecord) {
         saveCredential(credential.copy(isPinned = !credential.isPinned))
+    }
+
+    fun toggleCredentialArchive(credential: CredentialRecord) {
+        val nextArchived = !credential.isArchived
+        saveCredential(credential.copy(isArchived = nextArchived, isTrashed = false)) {
+            setStatusBanner(if (nextArchived) "Credential archived." else "Credential unarchived.")
+        }
+    }
+
+    fun duplicateCredential(credential: CredentialRecord) {
+        val now = System.currentTimeMillis()
+        val copy = credential.copy(
+            id = UUID.randomUUID().toString(),
+            serviceName = "${credential.serviceName} (Copy)",
+            isTrashed = false,
+            createdAtEpochMs = now,
+            updatedAtEpochMs = now
+        )
+        saveCredential(copy) {
+            setStatusBanner("Credential duplicated.")
+        }
     }
 
     fun toggleCredentialTrash(credential: CredentialRecord) {
@@ -1085,7 +1340,7 @@ class VaultViewModel(
     }
 
     // ============================================================================================
-    // Search & Filter Controls (R12)
+    // Search & Filter Controls (R12, PV-BUG-007)
     // ============================================================================================
 
     fun setNotesSearchQuery(query: String) {
@@ -1108,7 +1363,18 @@ class VaultViewModel(
         _uiState.update {
             it.copy(
                 notesFavoritesOnly = favOnly,
+                notesArchiveOnly = if (favOnly) false else it.notesArchiveOnly,
                 notesTrashOnly = if (favOnly) false else it.notesTrashOnly
+            )
+        }
+    }
+
+    fun setNotesArchiveOnly(archiveOnly: Boolean) {
+        _uiState.update {
+            it.copy(
+                notesArchiveOnly = archiveOnly,
+                notesFavoritesOnly = if (archiveOnly) false else it.notesFavoritesOnly,
+                notesTrashOnly = if (archiveOnly) false else it.notesTrashOnly
             )
         }
     }
@@ -1117,7 +1383,8 @@ class VaultViewModel(
         _uiState.update {
             it.copy(
                 notesTrashOnly = trashOnly,
-                notesFavoritesOnly = if (trashOnly) false else it.notesFavoritesOnly
+                notesFavoritesOnly = if (trashOnly) false else it.notesFavoritesOnly,
+                notesArchiveOnly = if (trashOnly) false else it.notesArchiveOnly
             )
         }
     }
@@ -1142,7 +1409,18 @@ class VaultViewModel(
         _uiState.update {
             it.copy(
                 credentialsFavoritesOnly = favOnly,
+                credentialsArchiveOnly = if (favOnly) false else it.credentialsArchiveOnly,
                 credentialsTrashOnly = if (favOnly) false else it.credentialsTrashOnly
+            )
+        }
+    }
+
+    fun setCredentialsArchiveOnly(archiveOnly: Boolean) {
+        _uiState.update {
+            it.copy(
+                credentialsArchiveOnly = archiveOnly,
+                credentialsFavoritesOnly = if (archiveOnly) false else it.credentialsFavoritesOnly,
+                credentialsTrashOnly = if (archiveOnly) false else it.credentialsTrashOnly
             )
         }
     }
@@ -1151,37 +1429,85 @@ class VaultViewModel(
         _uiState.update {
             it.copy(
                 credentialsTrashOnly = trashOnly,
-                credentialsFavoritesOnly = if (trashOnly) false else it.credentialsFavoritesOnly
+                credentialsFavoritesOnly = if (trashOnly) false else it.credentialsFavoritesOnly,
+                credentialsArchiveOnly = if (trashOnly) false else it.credentialsArchiveOnly
             )
         }
     }
 
     // ============================================================================================
-    // Password Generator & Offline Strength Checker
+    // Password Generator & Offline Strength Checker (PV-SEC-003)
     // ============================================================================================
 
     fun updateGeneratorConfig(config: OfflinePasswordStrengthEstimator.GeneratorConfig) {
-        val candidate = OfflinePasswordStrengthEstimator.generatePassword(config)
-        _uiState.update {
-            it.copy(
-                generatorConfig = config,
-                generatedCandidate = candidate
-            )
+        val result = PasswordGeneratorEngine.generate(
+            length = config.length,
+            includeUppercase = config.includeUppercase,
+            includeLowercase = config.includeLowercase,
+            includeDigits = config.includeDigits,
+            includeSymbols = config.includeSymbols,
+            excludeAmbiguous = config.excludeAmbiguous
+        )
+        when (result) {
+            is PasswordGeneratorEngine.GenerationResult.Success -> {
+                _uiState.update {
+                    it.copy(
+                        generatorConfig = config,
+                        generatedCandidate = result.password,
+                        generatorError = null,
+                        generatorExplanation = result.explanation
+                    )
+                }
+            }
+            is PasswordGeneratorEngine.GenerationResult.InvalidConfig -> {
+                _uiState.update {
+                    it.copy(
+                        generatorConfig = config,
+                        generatorError = result.message
+                    )
+                }
+            }
         }
     }
 
     fun regeneratePasswordCandidate() {
-        val candidate = OfflinePasswordStrengthEstimator.generatePassword(_uiState.value.generatorConfig)
-        _uiState.update { it.copy(generatedCandidate = candidate) }
+        val config = _uiState.value.generatorConfig
+        val result = PasswordGeneratorEngine.generate(
+            length = config.length,
+            includeUppercase = config.includeUppercase,
+            includeLowercase = config.includeLowercase,
+            includeDigits = config.includeDigits,
+            includeSymbols = config.includeSymbols,
+            excludeAmbiguous = config.excludeAmbiguous
+        )
+        when (result) {
+            is PasswordGeneratorEngine.GenerationResult.Success -> {
+                _uiState.update {
+                    it.copy(
+                        generatedCandidate = result.password,
+                        generatorError = null,
+                        generatorExplanation = result.explanation
+                    )
+                }
+            }
+            is PasswordGeneratorEngine.GenerationResult.InvalidConfig -> {
+                _uiState.update {
+                    it.copy(generatorError = result.message)
+                }
+            }
+        }
     }
 
     fun generatePassphraseCandidate(words: Int = _uiState.value.passphraseWordCount) {
         val clamped = words.coerceIn(4, 8)
         val phrase = OfflinePasswordStrengthEstimator.generatePassphrase(wordCount = clamped)
+        val report = OfflinePasswordStrengthEstimator.evaluate(phrase)
         _uiState.update {
             it.copy(
                 passphraseWordCount = clamped,
-                generatedCandidate = phrase
+                generatedCandidate = phrase,
+                generatorError = null,
+                generatorExplanation = "$clamped-word offline passphrase • ~${report.estimatedEntropyBits} bits word-list entropy"
             )
         }
     }
@@ -1206,11 +1532,15 @@ class VaultViewModel(
     }
 
     // ============================================================================================
-    // Portable Encrypted Backup & Restore (U01, U02, N02, R10, R16)
+    // Portable Encrypted Backup & Restore (U01, U02, N02, R10, R16, PV-BACKUP-001, PV-BUG-009)
     // ============================================================================================
 
     fun setAllowRecoveryExportSkippingCorrupted(allowed: Boolean) {
         _uiState.update { it.copy(allowRecoveryExportSkippingCorrupted = allowed) }
+    }
+
+    fun setBackupExportScope(scope: PortableBackupEngine.BackupExportScope) {
+        _uiState.update { it.copy(backupExportScope = scope) }
     }
 
     /**
@@ -1242,10 +1572,12 @@ class VaultViewModel(
         val originSlotId = session.slotId
         val passChars = backupPassword.toCharArray()
         val allowSkipCorrupted = _uiState.value.allowRecoveryExportSkippingCorrupted
+        val exportScope = _uiState.value.backupExportScope
 
         return viewModelScope.launch(Dispatchers.Default) {
             if (!backupMutex.tryLock()) {
                 Arrays.fill(passChars, '\u0000')
+                setErrorBanner("A backup or restore operation is already in progress.")
                 return@launch
             }
             _uiState.update {
@@ -1261,7 +1593,8 @@ class VaultViewModel(
                     sessionId = sessionId,
                     backupPasswordChars = passChars,
                     appVersionName = OtaUpdateManager.getInstalledVersionName(appContext),
-                    allowSkipCorruptedRecords = allowSkipCorrupted
+                    allowSkipCorruptedRecords = allowSkipCorrupted,
+                    exportScope = exportScope
                 )
                 val opId = UUID.randomUUID().toString()
                 val stagingDir = File(appContext.cacheDir, "backup_staging").apply { mkdirs() }
@@ -1362,7 +1695,10 @@ class VaultViewModel(
         }
 
         return viewModelScope.launch(Dispatchers.Default) {
-            if (!backupMutex.tryLock()) return@launch
+            if (!backupMutex.tryLock()) {
+                setErrorBanner("A backup or restore operation is already in progress.")
+                return@launch
+            }
             _uiState.update {
                 it.copy(
                     isBusy = true,
@@ -1494,6 +1830,7 @@ class VaultViewModel(
         return viewModelScope.launch(Dispatchers.Default) {
             if (!backupMutex.tryLock()) {
                 Arrays.fill(passChars, '\u0000')
+                setErrorBanner("A backup or restore operation is already in progress.")
                 return@launch
             }
             _uiState.update {
@@ -1521,14 +1858,19 @@ class VaultViewModel(
                     appVersionName = verifiedPayload.appVersionName,
                     notesCount = verifiedPayload.notesCount,
                     credentialsCount = verifiedPayload.credentialsCount,
-                    foldersCount = verifiedPayload.foldersCount
+                    foldersCount = verifiedPayload.foldersCount,
+                    isEmptyBackup = verifiedPayload.isEmptyBackup
                 )
                 _uiState.update {
                     it.copy(
                         isBusy = false,
                         backupOperationStage = BackupOperationStage.IDLE,
                         verifiedRestorePreview = preview,
-                        statusBannerMessage = "Backup verified: ${preview.notesCount} notes, ${preview.credentialsCount} credentials, ${preview.foldersCount} folders."
+                        statusBannerMessage = if (preview.isEmptyBackup) {
+                            "Backup verified: This .pvault file contains 0 records (empty backup)."
+                        } else {
+                            "Backup verified: ${preview.notesCount} notes, ${preview.credentialsCount} credentials, ${preview.foldersCount} folders."
+                        }
                     )
                 }
             } catch (_: AEADBadTagException) {
@@ -1598,6 +1940,7 @@ class VaultViewModel(
         return viewModelScope.launch(Dispatchers.Default) {
             if (!backupMutex.tryLock()) {
                 Arrays.fill(passChars, '\u0000')
+                setErrorBanner("A backup or restore operation is already in progress.")
                 return@launch
             }
             _uiState.update {
@@ -1632,7 +1975,8 @@ class VaultViewModel(
                     appVersionName = payload.appVersionName,
                     notesCount = payload.notesCount,
                     credentialsCount = payload.credentialsCount,
-                    foldersCount = payload.foldersCount
+                    foldersCount = payload.foldersCount,
+                    isEmptyBackup = payload.isEmptyBackup
                 )
                 refreshActiveVaultItems(sessionId)
                 _uiState.update {
@@ -1769,13 +2113,15 @@ class VaultViewModel(
     // ============================================================================================
 
     /**
-     * R02 Fix: Rotates the password of the currently active vault (works identically in both
-     * Real and Decoy sessions using generic active-vault terminology!).
+     * R02 & PV-SEC-010 Fix: Rotates the password of the currently active vault (works identically in both
+     * Real and Decoy sessions using generic active-vault terminology!), with optional full DEK rotation
+     * and atomic re-encryption of every vault record.
      */
     fun changeActiveVaultPassword(
         currentPassword: String,
         newPassword: String,
-        confirmNewPassword: String
+        confirmNewPassword: String,
+        rekeyAllRecordsWithNewDek: Boolean = false
     ) {
         if (newPassword.length < 8) {
             setErrorBanner("New Vault Password must be at least 8 characters.")
@@ -1792,11 +2138,23 @@ class VaultViewModel(
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true, errorBannerMessage = null) }
             try {
-                vaultRepository.changeActiveVaultPassword(sessionId, currentChars, newChars)
+                vaultRepository.changeActiveVaultPassword(
+                    sessionId = sessionId,
+                    currentPasswordChars = currentChars,
+                    newPasswordChars = newChars,
+                    rekeyAllRecordsWithNewDek = rekeyAllRecordsWithNewDek
+                )
+                if (rekeyAllRecordsWithNewDek) {
+                    refreshActiveVaultItems(sessionId)
+                }
                 _uiState.update {
                     it.copy(
                         isBusy = false,
-                        statusBannerMessage = "Vault password updated and key envelope re-wrapped."
+                        statusBannerMessage = if (rekeyAllRecordsWithNewDek) {
+                            "Vault password updated and all records re-encrypted with a new 256-bit DEK."
+                        } else {
+                            "Vault password updated and key envelope re-wrapped."
+                        }
                     )
                 }
             } catch (e: Exception) {
@@ -1816,14 +2174,15 @@ class VaultViewModel(
     fun rotateRealMasterPassword(
         currentPassword: String,
         newPassword: String,
-        confirmNewPassword: String
+        confirmNewPassword: String,
+        rekeyAllRecordsWithNewDek: Boolean = false
     ) {
-        changeActiveVaultPassword(currentPassword, newPassword, confirmNewPassword)
+        changeActiveVaultPassword(currentPassword, newPassword, confirmNewPassword, rekeyAllRecordsWithNewDek)
     }
 
     /**
      * R02 Fix: Verifies the Real Master Password before opening the Decoy Policy Management sheet.
-     * In a Decoy session, this always returns anauthentication error without revealing that the
+     * In a Decoy session, this always returns an authentication error without revealing that the
      * user is currently in a Decoy session.
      */
     fun unlockDecoyPolicySheet(realMasterPassword: String) {
@@ -1913,6 +2272,8 @@ class VaultViewModel(
                         isBusy = false,
                         isDecoyModeEnabled = true,
                         isBiometricEnrolled = false,
+                        isBiometricHardwareBacked = false,
+                        isBiometricBlockedByPolicy = true,
                         statusBannerMessage = if (allowDestructiveReset) {
                             "Decoy Vault reset with a new key envelope."
                         } else {
@@ -1999,6 +2360,7 @@ class VaultViewModel(
                     it.copy(
                         isBusy = false,
                         isDecoyModeEnabled = false,
+                        isBiometricBlockedByPolicy = false,
                         statusBannerMessage = "Decoy Vault disabled and replaced with an unconfigured dummy envelope."
                     )
                 }
@@ -2039,14 +2401,17 @@ class VaultViewModel(
     }
 
     fun setThemePreference(theme: ThemePreference) {
+        _preferences.update { it.copy(themePreference = theme) }
         viewModelScope.launch { preferencesRepository.setThemePreference(theme) }
     }
 
     fun setAutoLockTimeoutMs(timeoutMs: Long) {
+        _preferences.update { it.copy(autoLockTimeoutMs = timeoutMs) }
         viewModelScope.launch { preferencesRepository.setAutoLockTimeoutMs(timeoutMs) }
     }
 
     fun setLockOnScreenOff(enabled: Boolean) {
+        _preferences.update { it.copy(lockOnScreenOff = enabled) }
         viewModelScope.launch { preferencesRepository.setLockOnScreenOff(enabled) }
     }
 
@@ -2059,15 +2424,22 @@ class VaultViewModel(
             setErrorBanner("Screenshot protection cannot be disabled in this session.")
             return
         }
+        _preferences.update { it.copy(blockScreenshots = enabled) }
         viewModelScope.launch { preferencesRepository.setBlockScreenshots(enabled) }
     }
 
     fun setClipboardClearTtlSeconds(seconds: Int) {
+        _preferences.update { it.copy(clipboardClearTtlSeconds = seconds) }
         viewModelScope.launch { preferencesRepository.setClipboardClearTtlSeconds(seconds) }
     }
 
+    fun setAutoCheckOtaOnStartup(enabled: Boolean) {
+        _preferences.update { it.copy(autoCheckOtaOnStartup = enabled) }
+        viewModelScope.launch { preferencesRepository.setAutoCheckOtaOnStartup(enabled) }
+    }
+
     // ============================================================================================
-    // OTA Update Actions ("Update Now", "Update Later", "Remind Me Later")
+    // OTA Update Actions ("Update Now", "Update Later", "Remind Me Later", "Cancel Download")
     // ============================================================================================
 
     fun checkForOtaUpdatesManual() {
@@ -2096,6 +2468,11 @@ class VaultViewModel(
             preferencesRepository.clearOtaReminder()
             otaUpdateManager.downloadAndVerifyUpdate(manifest)
         }
+    }
+
+    fun cancelOtaDownload() {
+        otaUpdateManager.cancelActiveDownload()
+        setStatusBanner("OTA update download cancelled.")
     }
 
     fun onOtaUpdateLaterSelected() {

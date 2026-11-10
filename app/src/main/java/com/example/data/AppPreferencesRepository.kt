@@ -31,11 +31,12 @@ enum class OtaReminderPolicy {
 }
 
 data class VaultAppPreferences(
-    val themePreference: ThemePreference = ThemePreference.DARK_OBSIDIAN,
+    val themePreference: ThemePreference = ThemePreference.LIGHT_CLEAN,
     val autoLockTimeoutMs: Long = 60_000L, // Default: 1 minute
     val lockOnScreenOff: Boolean = true,
     val blockScreenshots: Boolean = true,
     val clipboardClearTtlSeconds: Int = 30,
+    val autoCheckOtaOnStartup: Boolean = true,
     val otaManifestUrl: String = AppPreferencesRepository.DEFAULT_OTA_MANIFEST_URL,
     val otaReminderPolicy: OtaReminderPolicy = OtaReminderPolicy.NONE,
     val otaSnoozedUntilEpochMs: Long = 0L,
@@ -69,6 +70,7 @@ class AppPreferencesRepository(private val context: Context) {
         private val KEY_BLOCK_SCREENSHOTS = booleanPreferencesKey("block_screenshots")
         private val KEY_CLIPBOARD_TTL_SEC = intPreferencesKey("clipboard_clear_ttl_sec")
 
+        private val KEY_AUTO_CHECK_OTA_STARTUP = booleanPreferencesKey("auto_check_ota_startup")
         private val KEY_OTA_MANIFEST_URL = stringPreferencesKey("ota_manifest_url")
         private val KEY_OTA_REMINDER_POLICY = stringPreferencesKey("ota_reminder_policy")
         private val KEY_OTA_SNOOZE_UNTIL_MS = longPreferencesKey("ota_snooze_until_ms")
@@ -90,9 +92,9 @@ class AppPreferencesRepository(private val context: Context) {
     }
 
     val preferencesFlow: Flow<VaultAppPreferences> = context.vaultDataStore.data.map { prefs ->
-        val themeStr = prefs[KEY_THEME] ?: ThemePreference.DARK_OBSIDIAN.name
+        val themeStr = prefs[KEY_THEME] ?: ThemePreference.LIGHT_CLEAN.name
         val theme = runCatching { ThemePreference.valueOf(themeStr) }
-            .getOrDefault(ThemePreference.DARK_OBSIDIAN)
+            .getOrDefault(ThemePreference.LIGHT_CLEAN)
 
         val reminderStr = prefs[KEY_OTA_REMINDER_POLICY] ?: OtaReminderPolicy.NONE.name
         val reminder = runCatching { OtaReminderPolicy.valueOf(reminderStr) }
@@ -104,6 +106,7 @@ class AppPreferencesRepository(private val context: Context) {
             lockOnScreenOff = prefs[KEY_LOCK_SCREEN_OFF] ?: true,
             blockScreenshots = prefs[KEY_BLOCK_SCREENSHOTS] ?: true,
             clipboardClearTtlSeconds = (prefs[KEY_CLIPBOARD_TTL_SEC] ?: 30).coerceIn(10, 300),
+            autoCheckOtaOnStartup = prefs[KEY_AUTO_CHECK_OTA_STARTUP] ?: true,
             otaManifestUrl = prefs[KEY_OTA_MANIFEST_URL] ?: DEFAULT_OTA_MANIFEST_URL,
             otaReminderPolicy = reminder,
             otaSnoozedUntilEpochMs = prefs[KEY_OTA_SNOOZE_UNTIL_MS] ?: 0L,
@@ -139,6 +142,10 @@ class AppPreferencesRepository(private val context: Context) {
 
     suspend fun setClipboardClearTtlSeconds(seconds: Int) {
         context.vaultDataStore.edit { it[KEY_CLIPBOARD_TTL_SEC] = seconds.coerceIn(10, 300) }
+    }
+
+    suspend fun setAutoCheckOtaOnStartup(enabled: Boolean) {
+        context.vaultDataStore.edit { it[KEY_AUTO_CHECK_OTA_STARTUP] = enabled }
     }
 
     suspend fun setOtaManifestUrl(url: String) {

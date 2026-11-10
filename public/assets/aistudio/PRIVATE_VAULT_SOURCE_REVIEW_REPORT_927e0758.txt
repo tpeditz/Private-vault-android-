@@ -1,0 +1,486 @@
+PRIVATE VAULT — SOURCE CODE AND APK REVIEW
+Static Security, Functional, Reliability and Release Audit
+
+Review date: 10 November 2026
+Application ID in source: com.tpeditz.privatevault
+Source archive reviewed: Private-vault-android--main.zip
+APK reviewed: PRIVATE VAULT.apk
+Companion audit brief supplied by owner: private_vault_deep_audit_prompt.txt
+
+IMPORTANT SCOPE STATEMENT
+This is an evidence-based static review of the uploaded source snapshot and a structural inspection of the APK container. It is not a full penetration test, a successful build report, a device test report, or a security certification. Findings are separated into confirmed source defects, release/process blockers, design limitations, and items that require runtime evidence. “Not tested” does not mean “secure.”
+
+========================================================================
+1. EXECUTIVE SUMMARY
+========================================================================
+
+Overall conclusion: NOT READY FOR A PRODUCTION OTA RELEASE until the release-signing configuration mismatch is fixed and the malformed-backup restore path is hardened and regression-tested.
+
+The application is a native Android private-vault application built with Kotlin, Jetpack Compose, Room, DataStore, Android Keystore APIs, Bouncy Castle Argon2id, Java Cryptography Architecture AES-GCM, and an OkHttp-based OTA updater. It contains private notes, saved credentials, folders, a password generator, an offline password-strength checker, a primary/decoy vault model, biometric convenience unlock, clipboard controls, encrypted portable backups, and an OTA update workflow.
+
+The most important positive result is that the core cryptographic design is materially better than a superficial “Base64/encrypted database” implementation. The source uses Argon2id for password-derived keys, AES-256-GCM authenticated encryption, random salts/nonces, per-record associated data, and a wrapped random data-encryption key. The vault does not appear to upload notes to a cloud backend. The manifest disables Android backup, and the updater verifies APK hash/signature/package/version before installation.
+
+However, two problems matter immediately:
+
+1. RELEASE SIGNING CONFIGURATION MISMATCH — HIGH / RELEASE BLOCKER.
+   The OTA workflow exports signing secrets as PV_RELEASE_* variables, while the Gradle release configuration reads KEYSTORE_PATH / STORE_PASSWORD / KEY_PASSWORD and hardcodes the key alias to “upload”. The workflow also creates the keystore under a temporary path that Gradle does not read. The default keystore path is not present in the supplied source archive. The production OTA release build is therefore expected to fail or use incomplete signing configuration. This is a definite source/configuration mismatch, although the workflow was not executed here.
+
+2. MALFORMED BACKUP CAN BE TREATED AS AN EMPTY BACKUP — MEDIUM / DATA-LOSS RISK.
+   The backup parser converts a missing or wrongly typed “records” property into an empty JSON array. If the encrypted backup authenticates and the user selects Replace, the restore implementation can delete the active slot’s current records and insert nothing. A file with a present empty “records”: [] array may be a legitimate empty backup; a missing or invalid property should instead be rejected as malformed. This needs a parser fix and regression tests before release.
+
+Other notable issues and limitations:
+- A Base64-encoded debug keystore is present under `.aistudio/artifacts/.../debug.keystore.base64`; the OTA workflow explicitly supports a debug-compatibility mode. This is acceptable only for controlled test builds. If the installed/publicly distributed app uses this key, its signer is no longer a strong private trust root because the key is present in the source archive. The supplied APK signer was not decoded, so this is a conditional risk, not a confirmed production-key compromise.
+- The source archive has gradle-wrapper.properties but no gradlew, gradlew.bat, or gradle-wrapper.jar. A standard reproducible ./gradlew build cannot run from this archive.
+- The Bouncy Castle dependency is pinned to 1.80. The official Bouncy Castle Java 1.86 release was published on 15 September 2026. Upgrade only after reviewing the release notes/advisories and verifying the Argon2 API with regression tests; this review did not establish that an affected 1.80 code path is exploitable in this app.
+- A method called hasHardwareKey() checks only whether a key alias exists. It does not prove the Android Keystore key is hardware-backed or StrongBox-backed.
+- SQLite record contents are encrypted, but the complete database is not shown to be SQLCipher-encrypted. Slot IDs, record IDs, schema versions, nonce/ciphertext lengths, envelope metadata and per-slot record counts remain observable.
+- The decoy feature should not be advertised as forensic-proof plausible deniability. A forensic examiner with a database copy can inspect slot metadata and row counts even though note/credential content is encrypted.
+- The export callback silently returns if a backup mutex is already held. A repeated/concurrent completion callback can receive no user-visible result and leave operation state/staging cleanup ambiguous.
+- The password-strength UI reports entropy based on a simplified character-pool calculation and a small curated dictionary. It should be described as a heuristic, not a rigorous crack-time estimate.
+- Previous owner-reported export/restore crashes and the black/blank keyboard area have not been reproduced on a physical phone in this audit. Source changes and tests address parts of the earlier findings, but real-device verification is still required.
+
+Current release recommendation: NOT READY until PV-REL-001 and PV-DATA-001 are fixed, the test suite is executed, the APK signer is verified against the currently installed production signer, and the backup/restore and keyboard flows are exercised on supported Android devices.
+
+========================================================================
+2. MATERIAL INVENTORY AND REVIEW METHOD
+========================================================================
+
+Files and artifacts reviewed:
+- Private-vault-android--main.zip — extracted source project.
+- PRIVATE VAULT.apk — APK container inspected as a ZIP archive.
+- private_vault_deep_audit_prompt.txt — owner’s detailed audit scope and expected report format.
+- Project-internal PRIVATE_VAULT_ARCHITECTURE_AND_HANDOVER.md.
+- Project-internal public/assets/aistudio/PRIVATE_VAULT_Verified_Findings_and_Google_AI_Repair_Prompt_52dbf926.txt. This is historical context from 05 November 2026, not proof that its old findings remain present.
+- Gradle configuration, version catalog, workflows, manifest and XML resources, Kotlin source, Room entities/DAO/migrations, crypto/key-management code, backup/restore code, updater code, UI/ViewModel code and tests.
+
+Artifact fingerprints:
+- Source ZIP SHA-256: e5d30f3e242dc5f9acab6bcbb2ddd4949c280939345799f1481f5a024daf958a
+- APK SHA-256: 3544b7438ff50421aa28d22430ba96de7044e63cf8fcdd2c958c2946a5b89353
+- APK size: 23,559,281 bytes (approximately 22.5 MiB).
+- APK container: 562 ZIP entries, AndroidManifest.xml present, classes.dex through classes8.dex, native libraries for arm64-v8a, armeabi-v7a, x86 and x86_64.
+
+Tooling limitation:
+The review environment has Java but no installed Gradle, Android SDK command-line tools, adb, aapt, apkanalyzer, apktool or JADX, and the source archive has no Gradle wrapper executable/JAR. Therefore:
+- Gradle compilation was NOT run.
+- Unit/Robolectric/instrumentation tests were NOT run.
+- The APK’s compiled manifest, package/version metadata, signer certificate and source-to-APK correspondence were NOT independently decoded/verified.
+- No emulator or physical-device runtime test, filesystem observation, network capture, dynamic instrumentation or APK decompilation was performed.
+- Full dependency/SCA, SAST, secret scanning and license/SBOM analysis were NOT run.
+
+The source project contains 11 test methods in ExampleRobolectricTest.kt, plus basic example unit and instrumentation test files. These are source files, not evidence of passing tests. The existing Robolectric test names cover crypto, database migrations, backup round-trips, OTA validation, lock/unlock races, clipboard and several earlier bugs. The tests use a low 4 MiB Argon2 test profile for speed; that is test configuration, not evidence that production defaults use 4 MiB.
+
+========================================================================
+3. APPLICATION PROFILE AND ARCHITECTURE
+========================================================================
+
+Platform and stack discovered:
+- Platform: native Android.
+- Language/UI: Kotlin and Jetpack Compose / Material 3.
+- Architecture: ViewModel-oriented UI, repository layer, Room persistence, DataStore preferences.
+- Database: Room / SQLite, schema version 3.
+- Cryptography: Bouncy Castle Argon2id and JCA AES/GCM/NoPadding.
+- Local biometric key wrapping: Android Keystore AES-GCM and androidx.biometric.
+- Networking: OkHttp for OTA metadata/APK downloads.
+- Update verification: Android apksig library, candidate APK digest and signer checks, installed signer comparison and package/version verification.
+- Build: Android Gradle Plugin 9.1.1, Kotlin 2.2.10, KSP 2.3.5, Gradle wrapper properties for Gradle 9.3.1, Java 17 in GitHub Actions.
+- Source app config: applicationId com.tpeditz.privatevault; namespace com.example; minSdk 24; targetSdk 36; compile SDK 36.1; versionCode 4; versionName 1.0.3.
+
+The applicationId and namespace being different is not, by itself, a security defect. Do not change the applicationId because doing so would create a different Android app identity and may break updates/data continuity.
+
+Features found in source:
+- Private notes and note folders.
+- Saved credentials and custom credential fields.
+- Password generator.
+- Offline password-strength checker.
+- Separate primary and decoy slots.
+- Master-password vault unlock and session locking.
+- Optional biometric unlock when decoy mode is disabled.
+- Clipboard copy and timed sensitive-clipboard clearing.
+- Encrypted .pvault backup export and restore.
+- OTA update checking, downloading, signature verification and installer handoff.
+- Theme, lock and privacy preferences.
+
+Backend/cloud assessment:
+No account backend, cloud note synchronization, remote vault database, Firebase service, or server-side note API was found in the supplied source. The network use visible in the manifest and source is principally for OTA update metadata and APK retrieval. This means server-side account authorization, multi-device sync, BOLA/IDOR and E2EE protocol review are NOT APPLICABLE to the implementation discovered in this source snapshot. That conclusion should be revisited if any remote service or cloud feature exists outside the supplied archive.
+
+Data flow at a high level:
+1. The user supplies a vault password.
+2. Argon2id derives a 256-bit key-encryption key using the slot’s stored salt and KDF parameters.
+3. AES-256-GCM verifies/decrypts the slot’s authenticated wrapped envelope.
+4. The envelope yields a random 256-bit data-encryption key (DEK).
+5. The DEK encrypts/decrypts each note, credential or folder payload with AES-GCM and AAD binding the slot, record ID and schema version.
+6. SQLite stores the envelope metadata and encrypted record rows.
+7. The decrypted records exist in process memory/UI state while the vault is unlocked and must be cleared/invalidated on lock.
+
+========================================================================
+4. CRYPTOGRAPHY AND KEY MANAGEMENT REVIEW
+========================================================================
+
+Positive implementation evidence:
+
+A. Password-based key derivation
+CryptoEngine.kt uses Argon2id v1.3 through Bouncy Castle. The source defines a standard profile of 32 MiB memory, 3 iterations and parallelism 2, and a constrained-heap profile of 16 MiB, 4 iterations and parallelism 2. The profile is selected using the runtime maximum heap threshold. Each envelope uses a 16-byte salt, and the derived key is 32 bytes. The code validates KDF bounds before allocating Argon2 memory and wipes temporary password UTF-8 bytes in a finally block.
+
+OWASP’s current Password Storage Cheat Sheet recommends Argon2id and gives minimum parameter sets including 19 MiB / 2 iterations / parallelism 1, as well as alternative trade-offs. The source’s standard profile is above the common 19 MiB / 2 / 1 baseline; the constrained profile is below 19 MiB memory but uses 4 iterations. Both profiles must be benchmarked on supported low-memory devices. Do not increase parameters blindly and create unlock crashes or unusably slow logins.
+
+The source also permits KDF values down to 4 MiB / 1 iteration / 1 lane for bounds and test compatibility. Do not mistake the 4 MiB test profile in ExampleRobolectricTest.kt for the production default. Imported backup KDF parameters are read from the header and bounded before derivation. Keep untrusted parameter limits and ensure old backup compatibility is not broken by any future minimum increase.
+
+B. Encryption and integrity
+The source uses AES/GCM/NoPadding, a 256-bit key, 12-byte nonce and 128-bit authentication tag. Nonces are generated with SecureRandom. Record AAD includes vault slot, record ID and schema version. Envelope and backup AAD bind their relevant version/KDF metadata. This is a sound standard construction when nonce uniqueness is preserved for each key and all tag failures are rejected.
+
+C. Key hierarchy
+The source creates random DEKs and wraps the key in an AES-GCM envelope protected by a key derived from the vault password. A separate Android Keystore AES-GCM key may wrap the real-vault DEK for biometric convenience. Biometric enrollment requires user authentication and is invalidated on biometric enrollment changes. Decoy mode disables the biometric wrapper path.
+
+D. Limits and caveats
+- Android Keystore use does not automatically prove hardware backing. `BiometricKeyEnvelopeHelper.hasHardwareKey()` simply checks whether the alias exists. No proof of StrongBox or trusted execution environment backing can be established from that method.
+- Passwords and note bodies also pass through Kotlin Strings, Compose state, JSON conversion and managed-runtime objects. Byte arrays are wiped in several crypto paths, but immutable String copies cannot be reliably zeroized. Do not promise perfect in-memory erasure.
+- A copied encrypted database can be attacked offline against the user’s password-derived envelope. Argon2id slows guessing; a weak human password remains a risk.
+- No server exists in the supplied source to verify a zero-knowledge or end-to-end cloud-sync claim. This is a local encrypted vault with OTA networking, not a multi-device E2EE service.
+- Ciphertext authenticity protects against undetected modification, but not all deletion/rollback attacks if an attacker can manipulate local database state or restore older database copies.
+
+========================================================================
+5. DATA AT REST, PRIVACY AND DECOY-MODE LIMITS
+========================================================================
+
+Storage matrix based on source review:
+
+1. Room table encrypted_records
+   - Record title/body/username/password/category/timestamps and other payload fields are serialized into ciphertext.
+   - Visible columns include record_id, vault_slot, schema_version, nonce and ciphertext bytes.
+   - Per-record payloads are AES-GCM protected; SQLite schema and metadata are not encrypted as a whole.
+   - An offline database copy can expose record counts, slot association, IDs and ciphertext sizes.
+
+2. Room table vault_envelopes
+   - Stores slot ID, envelope version, KDF algorithm, salt, KDF memory/iterations/parallelism, nonce, wrapped payload ciphertext and optional biometric wrapper fields.
+   - DEK material is wrapped, not stored as a plain key in the entity.
+   - These metadata fields remain visible to an examiner who copies the database.
+
+3. DataStore preferences
+   - Stores UI/security preferences and local operational state. No full trace of every preference field or all runtime writes was conducted. Inspect for any future sensitive metadata or exact unlock timestamps before expanding telemetry.
+
+4. Backup staging
+   - Backup export creates an encrypted .pvault file and stages encrypted bytes in app cache before writing to the user-selected document URI. The encrypted backup framing and AES-GCM verification are implemented.
+   - Plaintext JSON and immutable String copies exist briefly during backup assembly/decryption; minimize their lifetime and copies.
+
+5. Logs, crash reports and analytics
+   - No Firebase analytics/crash SDK or cloud telemetry integration was identified in the supplied dependency/source inventory. A complete runtime logcat/crash-report/network trace was not performed. Recheck all future diagnostic code and redact note bodies, passwords, DEKs and tokens.
+
+6. Android backup
+   - Manifest uses android:allowBackup="false" and references backup/data-extraction exclusions. This is a positive control. Test actual OEM/device-transfer behavior because platform backup semantics vary.
+
+7. External storage, screenshots, clipboard and notifications
+   - The app uses FLAG_SECURE while locked and when screenshot blocking is enabled; the setting has a ViewModel guard that prevents a decoy session from disabling it. Sensitive clipboard handling has ownership checks. No full device-level capture or clipboard test was executed.
+
+Decoy-mode warning:
+The source intentionally keeps two envelope rows and uses a shared encrypted-records table with a visible vault_slot column. The data classes explicitly state that slot 0 and slot 1 are structurally present. The count of encrypted rows by slot is observable. Therefore decoy mode can separate/decrypt different data under different passwords, but the source does not demonstrate forensic-proof plausible deniability against an examiner with a database image, filesystem history or device access. Do not advertise it as undetectable or guarantee that an attacker cannot infer decoy usage. The same warning applies to record counts, file sizes, database journals, backups and timing patterns.
+
+========================================================================
+6. CONFIRMED FINDINGS
+========================================================================
+
+PV-REL-001 — OTA release workflow signing variables do not match Gradle signing configuration
+Category: Build / release integrity
+Status: CONFIRMED SOURCE CONFIGURATION MISMATCH
+Severity: HIGH (production release blocker; not a direct app-runtime crypto exploit)
+Confidence: HIGH
+
+Evidence:
+- app/build.gradle.kts:23-30 reads KEYSTORE_PATH, STORE_PASSWORD and KEY_PASSWORD, defaults to ${rootDir}/my-upload-key.jks, and hardcodes keyAlias = "upload".
+- .github/workflows/publish-ota.yml:113-117 exports PV_RELEASE_STORE_FILE, PV_RELEASE_STORE_PASSWORD, PV_RELEASE_KEY_ALIAS and PV_RELEASE_KEY_PASSWORD.
+- .github/workflows/publish-ota.yml:74-101 creates a keystore in the runner temp folder and publishes the path as a workflow output; the Gradle process receives it under PV_RELEASE_STORE_FILE, which Gradle does not read.
+- No my-upload-key.jks exists in the supplied project archive.
+
+Impact:
+The default production release path cannot reliably locate/read the generated release keystore and may fail to sign the release APK. The configured key alias may also differ from the hardcoded “upload”. This blocks dependable production OTA releases and can create dangerous pressure to switch to debug signing.
+
+Required fix:
+Make one exact variable contract across Gradle and GitHub Actions. Prefer reading PV_RELEASE_STORE_FILE, PV_RELEASE_STORE_PASSWORD, PV_RELEASE_KEY_ALIAS and PV_RELEASE_KEY_PASSWORD in the release signing config, or change the workflow to export the exact names consumed by Gradle. Read the alias from the configured secret; never hardcode it unless the owner confirms it is permanently the actual alias. For release_keystore mode, fail fast if any input is missing, the file is absent or the alias cannot be opened. Do not fall back to debug signing for production.
+
+Regression tests:
+- Run the real release workflow with test signing material in a protected test environment.
+- Verify the APK signature with apksigner/apksig.
+- Compare the candidate certificate SHA-256 with the currently installed production APK signer.
+- Prove that missing secrets and wrong alias fail before the release artifact is uploaded.
+- Verify the final APK package name and versionCode before OTA publication.
+
+PV-REL-002 — Debug signing material is included in the source archive
+Category: OTA signing trust / build separation
+Status: CONFIRMED ARTIFACT; PRODUCTION USE NOT VERIFIED
+Severity: MEDIUM IF USED FOR USER-DISTRIBUTED/OTA BUILDS; INFORMATIONAL IF STRICTLY TEST-ONLY
+Confidence: HIGH that the file is present; LOW on whether the uploaded APK uses that certificate
+
+Evidence:
+- The source archive contains `.aistudio/artifacts/brain/2a19f8cf-e32e-491f-8c69-a22bba937042/debug.keystore.base64`.
+- `.gitignore` ignores `debug.keystore` but does not ignore `*.base64`.
+- `.github/workflows/publish-ota.yml:6-13` supports a `debug_compatibility` signing mode, and lines 92-99 can decode the bundled debug keystore if no debug secret is provided.
+- `OtaUpdateManager` intentionally trusts an update only when the candidate APK signer matches the currently installed signer.
+
+Impact and condition:
+A debug keystore is not a production signing key. If it is used only for developer/test APKs, this is not a production vulnerability. But if a build distributed to real users is signed with this key, anyone who obtains the source archive can obtain the same signing identity and create APKs that satisfy the app’s signer comparison, subject to also controlling the approved OTA publication path. This weakens the OTA signer as an independent security boundary. The uploaded APK’s signer was not decoded, so do not assume it is or is not using this key.
+
+Required fix:
+Treat the bundled key as public test material. Ensure production release workflows can use only the owner-controlled private release keystore. Keep debug compatibility isolated and visibly labelled as non-production. Remove the encoded debug key from the repository/archive and clean relevant history if it is not needed for a documented compatibility workflow; otherwise understand that it must never sign a production build. Before removing or rotating any signer, inspect the installed APK signer and plan update continuity. Do not silently change the production signing certificate.
+
+Regression tests:
+- Production workflow fails if only debug key material is available.
+- Debug compatibility build is clearly marked as test-only.
+- Production signer digest is compared to the owner’s expected production certificate.
+- Confirm the currently installed user APK signer before any signing-key migration.
+
+PV-DATA-001 — Missing or invalid records array is silently accepted as an empty backup
+Category: Backup parsing / data integrity
+Status: CONFIRMED SOURCE LOGIC DEFECT; destructive outcome follows from existing Replace semantics
+Severity: MEDIUM
+Confidence: HIGH
+
+Evidence:
+- app/src/main/java/com/example/data/PortableBackupEngine.kt:190-193 parses the authenticated JSON and uses `root.optJSONArray("records") ?: JSONArray()`.
+- app/src/main/java/com/example/data/PortableBackupEngine.kt:195-215 then accepts that array and returns a BackupPayload with zero items.
+- app/src/main/java/com/example/data/PrivateVaultDatabase.kt:54-60 implements Replace by deleting all records for the selected slot and inserting the new list only when non-empty.
+- app/src/main/java/com/example/data/VaultRepository.kt:1274 onward applies verified backup restore and selects Replace/Merge behavior.
+
+Preconditions:
+A backup must pass the outer AES-GCM authentication check. This is not a claim that a random attacker can alter ciphertext without the backup password/key. The issue can still affect a damaged/buggy backup produced by a trusted tool, a malformed validly encrypted backup or a crafted file made by someone who knows the backup password. It can cause accidental loss when the user deliberately selects Replace.
+
+Impact:
+A file whose root JSON has no `records` array, or has a wrong type such as a string/object, may be interpreted as a valid empty backup. Replace can then delete the current active vault records and save none. The user gets a valid-looking restore flow instead of a malformed-backup rejection.
+
+Required fix:
+Require the root object to contain a `records` field and require that field to be a JSON array. Reject null, absent or wrong-typed values before returning BackupPayload. Keep an explicit empty array valid if empty backups are supported. Add an explicit second confirmation when a valid backup contains zero records and Replace is selected; show the target vault and explain that it will become empty. Do not touch the database until the complete backup is parsed and validated.
+
+Regression tests:
+- Valid backup with records array restores normally.
+- Valid backup with `records: []` is handled as an intentional empty backup.
+- Missing records, null records, string/object records and malformed elements all fail validation.
+- For each malformed case, verify byte-for-byte relevant database rows remain unchanged.
+- Wrong password, modified ciphertext and truncated file remain rejected before any DB mutation.
+
+========================================================================
+7. ADDITIONAL RELIABILITY, SECURITY AND QUALITY FINDINGS
+========================================================================
+
+PV-BUILD-001 — Incomplete Gradle wrapper in supplied source archive
+Category: Build reproducibility
+Status: CONFIRMED
+Severity: MEDIUM (development/release-process risk)
+Confidence: HIGH
+
+Evidence: gradle/wrapper/ contains only gradle-wrapper.properties. There is no gradlew, gradlew.bat or gradle-wrapper.jar. The workflows install Gradle 9.3.1 separately and invoke `gradle`, which means the CI can work even though a standard local wrapper build from this ZIP cannot.
+
+Impact: Developers and AI coding tools cannot reproduce the same build using the normal ./gradlew commands. This makes verification and handoff less reliable and encourages undocumented environment-specific builds.
+
+Fix: Generate and commit the official Gradle wrapper for the project’s compatible Gradle version (the properties file specifies 9.3.1), including wrapper JAR and platform scripts. Verify the wrapper distribution checksum and use ./gradlew in CI. Do not upgrade AGP/Gradle/Kotlin together unless compatibility and tests are checked.
+
+PV-DEP-001 — Cryptographic dependency is behind the current upstream release
+Category: Dependency maintenance / supply-chain review
+Status: CONFIRMED VERSION; EXPLOITABILITY NOT ESTABLISHED
+Severity: LOW to MEDIUM maintenance priority
+Confidence: HIGH on version; LOW on direct app impact
+
+Evidence: gradle/libs.versions.toml:26 pins Bouncy Castle `bcprov-jdk18on` 1.80. Bouncy Castle’s official site announced Java 1.86 on 15 September 2026. The application’s visible source imports Argon2 APIs, and it validates KDF bounds before derivation. This audit did not perform a complete dependency scan or prove that any specific 1.80 CVE is reachable through the APIs used by this app.
+
+Fix: Review official 1.80–1.86 release notes and current advisories, update to a maintained patched version after compatibility testing, and run Argon2 known-answer/round-trip tests, backup compatibility tests and release dependency scanning. Do not claim that 1.80 is directly exploitable solely because it is old. Review OkHttp 4.10.0 and all transitive dependencies in the same SCA run.
+
+PV-SEC-001 — `hasHardwareKey()` does not verify hardware backing
+Category: Key storage claim accuracy
+Status: CONFIRMED SOURCE / CLAIM MISMATCH
+Severity: LOW / INFORMATIONAL
+Confidence: HIGH
+
+Evidence: app/src/main/java/com/example/security/BiometricKeystoreManager.kt:35-41 returns true when KeyStore contains the alias. It does not inspect KeyInfo security level or `isInsideSecureHardware`. The key is generated through AndroidKeyStore with user authentication, but hardware-backed/StrongBox backing is device-dependent.
+
+Impact: UI, comments or documentation may overstate the storage guarantee. A Keystore key can be software-backed on some devices.
+
+Fix: Rename the method to `hasKeystoreKey()` unless backing is queried. Where supported, inspect KeyInfo security level / hardware backing and expose accurate status. Treat StrongBox as optional capability, not a universal requirement. Never make unlock fail solely because StrongBox is unavailable unless that is a documented product requirement.
+
+PV-BACKUP-001 — Backup completion silently returns when the mutex is already locked
+Category: Backup workflow / concurrency
+Status: CONFIRMED SOURCE CONTROL-FLOW GAP; USER IMPACT NOT REPRODUCED
+Severity: LOW
+Confidence: MEDIUM
+
+Evidence: app/src/main/java/com/example/ui/VaultViewModel.kt:1364-1366 starts completeExportToUri and immediately returns from the coroutine when `backupMutex.tryLock()` is false. The return has no error/status update or explicit cleanup of the passed operation state. The normal path releases the lock in finally (lines 1410-1413).
+
+Impact: A duplicate or overlapping completion callback can silently do nothing. The user may not know whether the file was saved, and staged-file/UI-state cleanup can be left to another path. Normal UI disablement may reduce how often this occurs, but no concurrency test was run.
+
+Fix: On lock failure, publish an explicit “backup already in progress” state or safely queue/reject the second operation, and ensure the operation metadata/staging file has a single clear owner. Add a test that triggers overlapping completion requests. Do not call unlock unless the coroutine actually acquired the mutex.
+
+PV-QUALITY-001 — Password strength/entropy number is a heuristic, not a rigorous entropy estimate
+Category: User-facing security feedback
+Status: CONFIRMED CALCULATION LIMITATION
+Severity: LOW
+Confidence: HIGH
+
+Evidence: app/src/main/java/com/example/security/OfflinePasswordStrengthEstimator.kt:121-128 computes `length * log2(poolSize)` using character classes observed in the supplied password. It then applies penalties based on a small curated common-password/stem list and simple pattern checks. It does not use a mature probabilistic password guessability model or a comprehensive dictionary. PasswordGeneratorEngine uses SecureRandom and a required-character-class generation policy, but reports length × log2(combinedPool) (lines 100-130), which does not exactly describe the distribution created by the required-class constraint and shuffle.
+
+Impact: The numeric entropy or “Fortress” label may overstate certainty. A user may mistake the score for a real-world cracking-time calculation.
+
+Fix: Label the result as a rough offline heuristic; avoid presenting an exact crack-time promise. Improve model/testing or adopt a maintained offline estimator with a suitable license and data source. Calculate generator entropy from its actual output distribution, or use a conservative labelled approximation. Keep all analysis offline and never transmit passwords.
+
+PV-CRYPTO-001 — Authenticated inner-envelope flags/reserved bytes are not strictly validated
+Category: Ciphertext format robustness
+Status: HARDENING GAP IN SOURCE
+Severity: LOW
+Confidence: MEDIUM
+
+Evidence: app/src/main/java/com/example/security/CryptoEngine.kt:347-370 checks the `PVE1` magic but reads role and decoy-policy flag bytes and discards the two reserved bytes without enforcing legal values. `isActiveVault` and `isDecoyPolicyEnabled` only evaluate exact expected values; invalid values may be treated as inactive/disabled rather than malformed.
+
+Impact: Invalid but authenticated legacy/corrupt payloads may enter ambiguous state handling instead of failing closed. This is not a claim that a network attacker can flip the flags; AES-GCM authentication prevents unauthenticated modification.
+
+Fix: Require role in {SLOT_ROLE_DUMMY, SLOT_ROLE_ACTIVE}, policy in {DECOY_POLICY_DISABLED, DECOY_POLICY_ENABLED}, reserved bytes equal the defined reserved value, and timestamps within plausible bounds where appropriate. Return a structured corruption error and test every invalid flag/reserved-byte combination using controlled test keys.
+
+PV-PRIV-001 — Decoy database structure is observable; do not claim forensic-proof deniability
+Category: Privacy / product security claim
+Status: CONFIRMED ARCHITECTURAL LIMITATION
+Severity: INFORMATIONAL (can become a product-risk issue if stronger claims are advertised)
+Confidence: HIGH
+
+Evidence: app/src/main/java/com/example/data/VaultEntities.kt:16-50 describes two envelope rows, slot IDs and KDF metadata. EncryptedRecordEntity at lines 64-83 exposes vault_slot, record_id and schema_version in SQLite. The app’s record table therefore exposes the number of rows associated with each slot and related metadata.
+
+Impact: Note and credential payloads are encrypted, but a database examiner may infer structural information about slots and record counts. Similar information can exist in WAL/journal files, file sizes and filesystem history.
+
+Fix: Document the threat-model boundary clearly. Do not describe decoy mode as undetectable against forensic examination. If stronger deniability is a product requirement, treat it as a separate architecture project with an explicit adversary model and expert review; do not merely add filler records and call it solved. Preserve current encryption and user-data compatibility.
+
+PV-DOC-001 — Architecture handover version does not match source build configuration
+Category: Documentation / release management
+Status: CONFIRMED
+Severity: LOW
+Confidence: HIGH
+
+Evidence: PRIVATE_VAULT_ARCHITECTURE_AND_HANDOVER.md identifies v1.0.1 / versionCode 2, while app/build.gradle.kts identifies versionName 1.0.3 / versionCode 4. The document’s crypto description broadly matches the source, but the release identity is stale.
+
+Impact: Developers and AI Studio may build or publish the wrong version and misunderstand which APK the report refers to.
+
+Fix: Update the handover document from the authoritative Gradle version fields and generate release metadata from one source of truth. Do not change applicationId or signer identity to solve a documentation mismatch.
+
+========================================================================
+8. HISTORICAL ISSUES THAT APPEAR FIXED IN THIS SOURCE SNAPSHOT
+========================================================================
+
+The project contains an internal handover dated 05 November 2026. It lists old findings. Comparing those claims with the supplied current source shows several changes. These should be recorded as “appears remediated in source; tests not run here,” not as passed.
+
+- N01 cross-vault ID collision: current EncryptedRecordEntity uses composite primary key (vault_slot, record_id); Room migration 2->3 is present. See VaultEntities.kt:64-83 and PrivateVaultDatabase.kt:138-166.
+- N02 corrupted records silently omitted: current repository comments and code paths abort backup/merge when corruption is found and include explicit recovery handling. See VaultRepository.kt around 1274 onward.
+- N03 late unlock completion after lock: current ViewModel/repository use generation-aware session/auth request state; named Robolectric test covers this case.
+- N05 decoy password change wiping data: current repository has a rotate-decoy-password path that rewraps/preserves existing records and a separate destructive reset path.
+- N06 multi-step vault configuration not atomic: current DAO has transactions for initialization, decoy provisioning/reset and decoy disable. See PrivateVaultDatabase.kt:54-111.
+- R01 active empty decoy recognition: current authenticated decoy-policy flag exists in the real vault envelope; named test covers active empty decoy behavior.
+- R06 clipboard ownership issue: current clipboard manager uses ownership-aware cleanup; test names include this regression.
+- R09 decoy weakening screenshot protection: current ViewModel prevents a session without security-management authority from disabling screenshot protection. See VaultViewModel.kt:2053-2063.
+- U01/U02 export/restore: current source uses root-level activity result launchers, ViewModel-owned URI flow, IO stream handling, encrypted staging, preview/verification and a round-trip test. The actual user-reported phone crash still needs device reproduction and logcat evidence.
+- U04 Instagram/developer contact and clipboard flow: source includes a clipboard regression test, but verify the About screen actions in the final APK before marking the old request closed.
+
+U03 keyboard black/blank screen:
+The uploaded historical file reports a keyboard-related black/blank area on the owner’s phone. The current source includes edge-to-edge and inset changes, but a visual layout issue is not proven fixed by reading code alone. It must be re-tested on the actual Realme 11 Pro+ / Android 15 device (and at least one additional Android form factor) with log/recording evidence. Distinguish an actually visible black panel from FLAG_SECURE redaction in screenshots or screen recordings.
+
+========================================================================
+9. TEST EXECUTION STATUS AND REQUIRED TEST PLAN
+========================================================================
+
+Tests actually run in this review:
+- Source archive extraction and inventory: YES.
+- APK ZIP/container structure listing and SHA-256: YES.
+- Static source/configuration inspection: YES.
+- Gradle build: NOT RUN.
+- Robolectric/JUnit tests: NOT RUN.
+- Android instrumentation: NOT RUN.
+- Physical-device testing: NOT RUN.
+- APK compiled manifest/signature decoding: NOT RUN.
+- Dependency/SCA scan: NOT RUN.
+- Dynamic network/filesystem/logcat analysis: NOT RUN.
+
+Mandatory regression tests before production:
+1. Build debug and release variants from a clean checkout using the committed wrapper.
+2. Verify release signing variables and key alias in CI. Assert production release mode cannot fall back to debug credentials.
+3. Compare release signer certificate digest against the installed production build; confirm Android update continuity.
+4. Test .pvault restore with correct password, wrong password, truncated file, changed tag, missing records, wrong-type records, empty records array, duplicate IDs, malformed records and oversized values.
+5. For every rejected restore, prove the active and inactive vault database rows are unchanged.
+6. Test Replace and Merge for both real and decoy slots, identical IDs across slots, corrupt existing rows and cross-slot switching during backup preview.
+7. Test lock, screen-off, process death and app backgrounding during unlock, save, backup export, restore and decoy password rotation.
+8. Test overlapping backup export requests and cancellation/provider failures (read-only URI, unavailable provider, low storage, revoked permission, null URI).
+9. Run crypto vectors and tampering tests: wrong key, wrong AAD, invalid nonce/ciphertext, invalid envelope flags, nonce generation uniqueness review and old backup compatibility.
+10. Run SCA for direct and transitive dependencies; inspect Bouncy Castle 1.80 advisories and update path; generate an SBOM and license report.
+11. Test biometric unlock on devices with different hardware/security-level capabilities, including biometric enrollment change and fallback to master password.
+12. Test keyboard open/close in setup, unlock, notes, credentials, password generator/checker and backup forms on the owner’s Realme device. Check portrait, landscape, navigation mode, larger text and at least two keyboards if possible.
+13. Test actual Android backup/restore and device transfer behavior with synthetic notes despite allowBackup=false.
+14. Verify no note content, password, DEK or recovery secret is written to logcat, diagnostics, clipboard after expiry or external network payloads.
+
+========================================================================
+10. PRIORITIZED REMEDIATION ROADMAP
+========================================================================
+
+IMMEDIATE — BEFORE ANY PRODUCTION OTA RELEASE
+1. Fix PV-REL-001 signing variable/alias mismatch. Do not publish until CI builds with the intended production key and the signer matches installed production builds.
+2. Confirm whether any user-distributed APK was signed with the bundled debug key (PV-REL-002). Do not use that key for production OTA releases.
+3. Fix PV-DATA-001 parser acceptance of missing/wrong-type records. Add regression tests proving malformed restores cannot alter the database.
+4. Restore a complete Gradle wrapper and use it in CI. Confirm clean checkout build reproducibility.
+5. Keep the existing applicationId and signing identity. Do not silently rotate the production key.
+
+SHORT TERM
+6. Run the full test suite in Google AI Studio/CI and capture actual output.
+7. Execute dependency/SCA and secret scanning; review Bouncy Castle 1.80 and OkHttp 4.10.0. Upgrade with compatibility tests.
+8. Fix the backup-mutex silent-return path and add concurrency/UI-state coverage.
+9. Enforce strict inner-envelope flag and reserved-byte validation.
+10. Rename or strengthen `hasHardwareKey()` so claims match actual Keystore security level.
+11. Update architecture handover version and make version metadata derive from the Gradle source of truth.
+
+MEDIUM TERM
+12. Improve the password-strength model and label its output honestly as heuristic unless a validated estimator is adopted.
+13. Add Room schema export and keep migration snapshots under version control; run migration tests from every supported previous version.
+14. Perform physical-device testing for the owner’s backup/restore and keyboard issues.
+15. Document the metadata exposed by SQLite and the limits of decoy mode.
+16. Evaluate R8/minification only after keep rules, reflection, Room, Compose and OTA flows are regression-tested. `isMinifyEnabled=false` is a hardening/build-size opportunity, not by itself a vulnerability.
+
+========================================================================
+11. FINAL RELEASE READINESS OPINION
+========================================================================
+
+Opinion: NOT READY for production OTA release based on this static review snapshot.
+
+Reasons:
+- The production release-signing contract is inconsistent between Gradle and GitHub Actions.
+- The source contains a bundled debug signing key; whether any user-distributed APK uses it is not yet known and must be verified before relying on OTA signer checks.
+- A malformed authenticated backup can be accepted as empty and may erase the target slot when Replace is selected.
+- The source archive is not independently buildable with the standard Gradle wrapper workflow because wrapper files are missing.
+- No build, automated test suite or physical-device verification was executed as part of this review.
+- The supplied APK’s signer, compiled manifest, package/version and source correspondence were not verified.
+
+This does NOT mean the entire encryption design is broken. The inspected source contains several sound controls and appears to have remediated many earlier issues. It does mean that the release pipeline and backup edge case need repair and evidence before the app should be trusted for a production release involving irreplaceable private notes and credentials.
+
+========================================================================
+12. REFERENCES
+========================================================================
+
+Project source files (paths relative to extracted repository root):
+- app/build.gradle.kts
+- .github/workflows/publish-ota.yml
+- .github/workflows/build-apk.yml
+- gradle/wrapper/gradle-wrapper.properties
+- gradle/libs.versions.toml
+- app/src/main/AndroidManifest.xml
+- app/src/main/java/com/example/security/CryptoEngine.kt
+- app/src/main/java/com/example/security/BiometricKeystoreManager.kt
+- app/src/main/java/com/example/data/VaultEntities.kt
+- app/src/main/java/com/example/data/PrivateVaultDatabase.kt
+- app/src/main/java/com/example/data/PortableBackupEngine.kt
+- app/src/main/java/com/example/data/VaultRepository.kt
+- app/src/main/java/com/example/ota/OtaUpdateManager.kt
+- app/src/main/java/com/example/ui/VaultViewModel.kt
+- app/src/main/java/com/example/security/OfflinePasswordStrengthEstimator.kt
+- app/src/main/java/com/example/security/PasswordGeneratorEngine.kt
+- app/src/test/java/com/example/ExampleRobolectricTest.kt
+
+External authoritative starting points (verify again when implementing):
+- OWASP Password Storage Cheat Sheet: https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html
+- RFC 9106 Argon2: https://www.rfc-editor.org/rfc/rfc9106.html
+- Bouncy Castle Java 1.86 release (15 Sep 2026): https://www.bouncycastle.org/resources/new-release-bouncy-castle-java-1-86/
+- Android Keystore System: https://developer.android.com/privacy-and-security/keystore
+- OWASP MASVS: https://mas.owasp.org/MASVS/
+- OWASP MASWE: https://mas.owasp.org/MASWE/
+- OWASP MASTG: https://mas.owasp.org/MASTG/
+- OWASP Cryptographic Storage Cheat Sheet: https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html
+- OWASP Key Management Cheat Sheet: https://cheatsheetseries.owasp.org/cheatsheets/Key_Management_Cheat_Sheet.html
+- NIST SP 800-57 Part 1: https://doi.org/10.6028/NIST.SP.800-57pt1r5
+- CWE: https://cwe.mitre.org/
+
+END OF REVIEW

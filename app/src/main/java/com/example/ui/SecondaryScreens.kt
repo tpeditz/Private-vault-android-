@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -38,6 +40,8 @@ import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -71,7 +75,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.example.BuildConfig
 import com.example.data.AppPreferencesRepository
@@ -83,7 +89,240 @@ import com.example.ota.OtaUpdateManager
 import com.example.security.CryptoEngine
 
 // ============================================================================================
-// 1. Encrypted Backup & Restore Screen (.pvault) — Fixes U01, U02, N02, R10, R16
+// 0. Settings Hub Screen (PrimaryTab.SETTINGS — Friendly 4-Tab Consolidation)
+// ============================================================================================
+
+@Composable
+fun SettingsHubScreen(
+    uiState: VaultUiState,
+    preferences: VaultAppPreferences,
+    otaState: OtaUpdateManager.OtaState,
+    viewModel: VaultViewModel
+) {
+    val context = LocalContext.current
+    val installedVersionName = remember(context) { OtaUpdateManager.getInstalledVersionName(context) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .imePadding()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Text(
+            text = "Vault Settings & Tools",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = "Manage encrypted backups, appearance, auto-lock preferences, and verified app updates.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        // Quick Appearance Switcher Card (Friendly Light Default + Dark Obsidian + System)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Appearance & Theme",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = "Choose a clean light palette, deep dark obsidian, or follow your Android system setting.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = preferences.themePreference == ThemePreference.LIGHT_CLEAN,
+                        onClick = { viewModel.setThemePreference(ThemePreference.LIGHT_CLEAN) },
+                        label = { Text("Light (Clean)") },
+                        modifier = Modifier.testTag("theme_chip_light_clean")
+                    )
+                    FilterChip(
+                        selected = preferences.themePreference == ThemePreference.DARK_OBSIDIAN,
+                        onClick = { viewModel.setThemePreference(ThemePreference.DARK_OBSIDIAN) },
+                        label = { Text("Dark (Obsidian)") },
+                        modifier = Modifier.testTag("theme_chip_dark_obsidian")
+                    )
+                    FilterChip(
+                        selected = preferences.themePreference == ThemePreference.SYSTEM,
+                        onClick = { viewModel.setThemePreference(ThemePreference.SYSTEM) },
+                        label = { Text("Match System") },
+                        modifier = Modifier.testTag("theme_chip_system")
+                    )
+                }
+            }
+        }
+
+        // Hub Navigation Cards
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { viewModel.openSecondaryDestination(SecondaryDestination.BACKUP_RESTORE) }
+                .testTag("settings_open_backup_card"),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.SaveAlt,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Backup & Restore (.pvault)",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Export or restore encrypted backups (${uiState.notes.size} notes, ${uiState.credentials.size} passwords)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { viewModel.openSecondaryDestination(SecondaryDestination.SECURITY_SETTINGS) }
+                .testTag("settings_open_security_card"),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Security,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Security, Passwords & Auto-Lock",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Change vault password, configure biometric quick-unlock, auto-lock timeout, and advanced security policy",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { viewModel.openSecondaryDestination(SecondaryDestination.OTA_UPDATES) }
+                .testTag("settings_open_ota_card"),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.SystemUpdate,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "App Updates (OTA)",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    val otaSubtitle = when (otaState) {
+                        is OtaUpdateManager.OtaState.UpdateAvailable -> "Update available: v${otaState.manifest.versionName}"
+                        else -> "Installed v$installedVersionName • Check for verified updates"
+                    }
+                    Text(
+                        text = otaSubtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { viewModel.openSecondaryDestination(SecondaryDestination.ABOUT_CREDITS) }
+                .testTag("settings_open_about_card"),
+            shape = RoundedCornerShape(18.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(18.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Info,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "About & Developer Credits",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Developed by Tp Editz • Security specifications & contact links",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================================
+// 1. Encrypted Backup & Restore Screen (.pvault) — Fixes U01, U02, N02, R10, R16, PV-DATA-001, PV-BUG-009
 // ============================================================================================
 
 @Composable
@@ -99,10 +338,53 @@ fun BackupAndRestoreScreen(
     // Section 05, BUG 02, BUG 12 & T09 Fix: Keep backup/restore passwords in non-saveable memory.
     var exportPassword by remember { mutableStateOf("") }
     var confirmExportPassword by remember { mutableStateOf("") }
+    var showExportPassword by remember { mutableStateOf(false) }
 
     var restorePassword by remember { mutableStateOf("") }
+    var showRestorePassword by remember { mutableStateOf(false) }
     var restoreMode by rememberSaveable {
         mutableStateOf(PortableBackupEngine.RestoreMode.MERGE_KEEP_NEWEST)
+    }
+    var showConfirmEmptyReplaceDialog by remember { mutableStateOf(false) }
+
+    if (showConfirmEmptyReplaceDialog) {
+        AlertDialog(
+            onDismissRequest = { showConfirmEmptyReplaceDialog = false },
+            icon = {
+                Icon(
+                    Icons.Filled.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+            },
+            title = { Text("Replace Vault with Empty Backup?") },
+            text = {
+                Text(
+                    "The selected .pvault backup contains 0 records. Proceeding with 'Replace all records in active vault slot' will delete all ${uiState.notes.size} notes and ${uiState.credentials.size} credentials in this vault."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showConfirmEmptyReplaceDialog = false
+                        val submittedPass = restorePassword
+                        restorePassword = ""
+                        viewModel.verifyAndRestoreSelectedUri(
+                            backupPassword = submittedPass,
+                            restoreMode = restoreMode
+                        )
+                    },
+                    modifier = Modifier.testTag("confirm_empty_backup_replace_button")
+                ) {
+                    Text("Replace & Wipe Active Vault")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirmEmptyReplaceDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     Column(
@@ -202,7 +484,7 @@ fun BackupAndRestoreScreen(
             }
         }
 
-        // Export Card (U01 Fix)
+        // Export Card (U01 & PV-BUG-009 Fix)
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
@@ -227,12 +509,49 @@ fun BackupAndRestoreScreen(
                     )
                 }
 
+                // PV-BUG-009 Fix: Selective Backup Export Scope
+                Text(
+                    text = "Export Scope:",
+                    style = MaterialTheme.typography.labelMedium
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PortableBackupEngine.BackupExportScope.entries.forEach { scope ->
+                        FilterChip(
+                            selected = uiState.backupExportScope == scope,
+                            onClick = { viewModel.setBackupExportScope(scope) },
+                            label = { Text(scope.label) },
+                            modifier = Modifier.testTag("backup_scope_${scope.name.lowercase()}")
+                        )
+                    }
+                }
+
                 OutlinedTextField(
                     value = exportPassword,
                     onValueChange = { exportPassword = it },
                     label = { Text("Backup Encryption Password (min 8 chars)") },
                     singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrectEnabled = false
+                    ),
+                    visualTransformation = if (showExportPassword) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    trailingIcon = {
+                        IconButton(onClick = { showExportPassword = !showExportPassword }) {
+                            Icon(
+                                imageVector = if (showExportPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (showExportPassword) "Hide backup password" else "Show backup password"
+                            )
+                        }
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("backup_export_password_input")
@@ -243,7 +562,15 @@ fun BackupAndRestoreScreen(
                     onValueChange = { confirmExportPassword = it },
                     label = { Text("Confirm Backup Password") },
                     singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrectEnabled = false
+                    ),
+                    visualTransformation = if (showExportPassword) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("backup_export_confirm_password_input")
@@ -294,7 +621,7 @@ fun BackupAndRestoreScreen(
             }
         }
 
-        // Restore Card (U02 Fix)
+        // Restore Card (U02 & PV-DATA-001 Fix)
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
@@ -324,7 +651,23 @@ fun BackupAndRestoreScreen(
                     onValueChange = { restorePassword = it },
                     label = { Text("Backup Decryption Password") },
                     singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrectEnabled = false
+                    ),
+                    visualTransformation = if (showRestorePassword) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    trailingIcon = {
+                        IconButton(onClick = { showRestorePassword = !showRestorePassword }) {
+                            Icon(
+                                imageVector = if (showRestorePassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (showRestorePassword) "Hide restore password" else "Show restore password"
+                            )
+                        }
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("backup_restore_password_input")
@@ -406,12 +749,20 @@ fun BackupAndRestoreScreen(
 
                     Button(
                         onClick = {
-                            val submittedPass = restorePassword
-                            restorePassword = ""
-                            viewModel.verifyAndRestoreSelectedUri(
-                                backupPassword = submittedPass,
-                                restoreMode = restoreMode
-                            )
+                            val isReplacingNonEmptyWithEmpty =
+                                restoreMode == PortableBackupEngine.RestoreMode.REPLACE_ACTIVE_VAULT &&
+                                    uiState.verifiedRestorePreview?.isEmptyBackup == true &&
+                                    (uiState.notes.isNotEmpty() || uiState.credentials.isNotEmpty())
+                            if (isReplacingNonEmptyWithEmpty) {
+                                showConfirmEmptyReplaceDialog = true
+                            } else {
+                                val submittedPass = restorePassword
+                                restorePassword = ""
+                                viewModel.verifyAndRestoreSelectedUri(
+                                    backupPassword = submittedPass,
+                                    restoreMode = restoreMode
+                                )
+                            }
                         },
                         enabled = !uiState.isBusy && restorePassword.isNotBlank(),
                         modifier = Modifier
@@ -437,7 +788,11 @@ fun BackupAndRestoreScreen(
                 val preview = uiState.verifiedRestorePreview
                 if (preview != null) {
                     Surface(
-                        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
+                        color = if (preview.isEmptyBackup) {
+                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.65f)
+                        } else {
+                            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f)
+                        },
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -450,13 +805,21 @@ fun BackupAndRestoreScreen(
                             Text(
                                 text = "Authenticated Backup Preview (${preview.fileName})",
                                 style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.primary,
+                                color = if (preview.isEmptyBackup) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
                                 text = "Records: ${preview.notesCount} notes • ${preview.credentialsCount} credentials • ${preview.foldersCount} folders",
                                 style = MaterialTheme.typography.bodySmall
                             )
+                            if (preview.isEmptyBackup) {
+                                Text(
+                                    text = "Warning: This backup contains 0 records. Restoring in Replace mode will empty the active vault.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                             Text(
                                 text = "Created by PRIVATE VAULT v${preview.appVersionName}",
                                 style = MaterialTheme.typography.labelSmall,
@@ -471,7 +834,7 @@ fun BackupAndRestoreScreen(
 }
 
 // ============================================================================================
-// 2. Security, Active-Vault Password & Plausible Deniability Policy Screen (N05, R02, R07)
+// 2. Security, Active-Vault Password & Plausible Deniability Policy Screen (N05, R02, R07, PV-SEC-008, PV-SEC-010)
 // ============================================================================================
 
 @Composable
@@ -488,6 +851,8 @@ fun SecurityAndDecoySettingsScreen(
     var currentVaultPass by remember { mutableStateOf("") }
     var newVaultPass by remember { mutableStateOf("") }
     var confirmNewVaultPass by remember { mutableStateOf("") }
+    var showChangePasswords by remember { mutableStateOf(false) }
+    var rekeyAllRecordsWithNewDek by rememberSaveable { mutableStateOf(false) }
 
     // R02 & N05 Fix: Password-gated Plausible Deniability Policy Sheet state
     var showPolicyGateDialog by rememberSaveable { mutableStateOf(false) }
@@ -520,6 +885,10 @@ fun SecurityAndDecoySettingsScreen(
                         onValueChange = { gatePasswordInput = it },
                         label = { Text("Master Password") },
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Password,
+                            autoCorrectEnabled = false
+                        ),
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -688,7 +1057,7 @@ fun SecurityAndDecoySettingsScreen(
             }
         }
 
-        // R02 Fix: Generic Active-Vault Password Rotation Card (works in both Real and Decoy vaults!)
+        // R02 & PV-SEC-010 Fix: Generic Active-Vault Password Rotation Card + Optional Full DEK Re-encryption
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
@@ -713,7 +1082,7 @@ fun SecurityAndDecoySettingsScreen(
                     )
                 }
                 Text(
-                    text = "Re-wraps the active vault's 256-bit Data Encryption Key (DEK) with a fresh 16-byte Argon2id salt and 12-byte GCM nonce without re-encrypting every record.",
+                    text = "Re-wraps the active vault's 256-bit Data Encryption Key (DEK) with a fresh 16-byte Argon2id salt and 12-byte GCM nonce, or optionally rotates the DEK and re-encrypts every record.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -723,7 +1092,23 @@ fun SecurityAndDecoySettingsScreen(
                     onValueChange = { currentVaultPass = it },
                     label = { Text("Current Vault Password") },
                     singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrectEnabled = false
+                    ),
+                    visualTransformation = if (showChangePasswords) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    trailingIcon = {
+                        IconButton(onClick = { showChangePasswords = !showChangePasswords }) {
+                            Icon(
+                                imageVector = if (showChangePasswords) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                contentDescription = if (showChangePasswords) "Hide passwords" else "Show passwords"
+                            )
+                        }
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("change_vault_current_password_input")
@@ -733,7 +1118,15 @@ fun SecurityAndDecoySettingsScreen(
                     onValueChange = { newVaultPass = it },
                     label = { Text("New Vault Password (min 8 chars)") },
                     singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrectEnabled = false
+                    ),
+                    visualTransformation = if (showChangePasswords) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("change_vault_new_password_input")
@@ -743,18 +1136,39 @@ fun SecurityAndDecoySettingsScreen(
                     onValueChange = { confirmNewVaultPass = it },
                     label = { Text("Confirm New Vault Password") },
                     singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Password,
+                        autoCorrectEnabled = false
+                    ),
+                    visualTransformation = if (showChangePasswords) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("change_vault_confirm_password_input")
                 )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = rekeyAllRecordsWithNewDek,
+                        onCheckedChange = { rekeyAllRecordsWithNewDek = it },
+                        modifier = Modifier.testTag("change_vault_rekey_dek_checkbox")
+                    )
+                    Text(
+                        text = "Also generate a brand-new 256-bit DEK and re-encrypt all vault records atomically",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
 
                 Button(
                     onClick = {
                         viewModel.changeActiveVaultPassword(
                             currentPassword = currentVaultPass,
                             newPassword = newVaultPass,
-                            confirmNewPassword = confirmNewVaultPass
+                            confirmNewPassword = confirmNewVaultPass,
+                            rekeyAllRecordsWithNewDek = rekeyAllRecordsWithNewDek
                         )
                         currentVaultPass = ""
                         newVaultPass = ""
@@ -770,7 +1184,7 @@ fun SecurityAndDecoySettingsScreen(
             }
         }
 
-        // Biometric Quick-Unlock Card (Neutral copy across sessions — R02)
+        // Biometric Quick-Unlock Card (PV-SEC-008 & PV-SEC-001 Fix: Identical copy in Real+Decoy and Decoy sessions)
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
@@ -795,15 +1209,25 @@ fun SecurityAndDecoySettingsScreen(
                     )
                 }
 
-                if (uiState.isDecoyModeEnabled) {
+                if (uiState.isBiometricBlockedByPolicy) {
                     Text(
-                        text = "Biometric quick-unlock is disabled while multi-envelope policy is active so an observer cannot infer additional password-only vaults.",
+                        text = "Biometric quick-unlock is disabled by active security policy for this vault configuration.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.tertiary
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.testTag("biometric_policy_disabled_text")
                     )
                 } else {
+                    val keyBackingDescription = if (uiState.isBiometricEnrolled) {
+                        if (uiState.isBiometricHardwareBacked) {
+                            "Enrolled • Hardware-backed Android Keystore (TEE / StrongBox)"
+                        } else {
+                            "Enrolled • Android Keystore (software-backed on this device)"
+                        }
+                    } else {
+                        "Wraps the vault DEK using a biometric-authenticated AES-256-GCM key in Android Keystore."
+                    }
                     Text(
-                        text = "Wraps the vault DEK using a biometric-authenticated AES-256-GCM key in Android Keystore.",
+                        text = keyBackingDescription,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -902,6 +1326,10 @@ fun SecurityAndDecoySettingsScreen(
                         onValueChange = { realPassForDecoy = it },
                         label = { Text("Confirm Primary Master Password") },
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Password,
+                            autoCorrectEnabled = false
+                        ),
                         visualTransformation = PasswordVisualTransformation(),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -922,6 +1350,10 @@ fun SecurityAndDecoySettingsScreen(
                             onValueChange = { decoyPass = it },
                             label = { Text("Decoy Password (min 8 chars)") },
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Password,
+                                autoCorrectEnabled = false
+                            ),
                             visualTransformation = PasswordVisualTransformation(),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -933,6 +1365,10 @@ fun SecurityAndDecoySettingsScreen(
                             onValueChange = { confirmDecoyPass = it },
                             label = { Text("Confirm Decoy Password") },
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Password,
+                                autoCorrectEnabled = false
+                            ),
                             visualTransformation = PasswordVisualTransformation(),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -989,6 +1425,10 @@ fun SecurityAndDecoySettingsScreen(
                             onValueChange = { currentDecoyPass = it },
                             label = { Text("Current Decoy Password") },
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Password,
+                                autoCorrectEnabled = false
+                            ),
                             visualTransformation = PasswordVisualTransformation(),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -999,6 +1439,10 @@ fun SecurityAndDecoySettingsScreen(
                             onValueChange = { decoyPass = it },
                             label = { Text("New Decoy Password (min 8 chars)") },
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Password,
+                                autoCorrectEnabled = false
+                            ),
                             visualTransformation = PasswordVisualTransformation(),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1009,6 +1453,10 @@ fun SecurityAndDecoySettingsScreen(
                             onValueChange = { confirmDecoyPass = it },
                             label = { Text("Confirm New Decoy Password") },
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Password,
+                                autoCorrectEnabled = false
+                            ),
                             visualTransformation = PasswordVisualTransformation(),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1212,7 +1660,7 @@ fun SecurityAndDecoySettingsScreen(
 }
 
 // ============================================================================================
-// 3. OTA Updates Screen & 3-Option Update Prompt Dialog
+// 3. OTA Updates Screen & 3-Option Update Prompt Dialog (PV-BUG-010)
 // ============================================================================================
 
 @Composable
@@ -1278,6 +1726,27 @@ fun OtaUpdatesScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                // PV-BUG-010 Fix: User-configurable startup OTA check toggle
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Check for Updates Automatically on Launch")
+                        Text(
+                            text = "Queries the public GitHub update manifest once on startup.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = preferences.autoCheckOtaOnStartup,
+                        onCheckedChange = viewModel::setAutoCheckOtaOnStartup,
+                        modifier = Modifier.testTag("ota_auto_check_switch")
+                    )
+                }
 
                 Button(
                     onClick = viewModel::checkForOtaUpdatesManual,
@@ -1387,6 +1856,14 @@ fun OtaUpdatesScreen(
                             text = "${otaState.bytesDownloaded / 1024} KB / ${otaState.totalBytes / 1024} KB",
                             style = MaterialTheme.typography.labelSmall
                         )
+                        OutlinedButton(
+                            onClick = viewModel::cancelOtaDownload,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("ota_cancel_download_button")
+                        ) {
+                            Text("Cancel Download")
+                        }
                     }
 
                     is OtaUpdateManager.OtaState.Verifying -> {
@@ -1524,6 +2001,7 @@ fun OtaUpdatesScreen(
                         onValueChange = { manifestUrlInput = it },
                         label = { Text("HTTPS update.json Manifest URL (Debug Override)") },
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedButton(

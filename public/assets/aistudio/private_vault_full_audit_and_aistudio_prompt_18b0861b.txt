@@ -1,0 +1,1166 @@
+================================================================================
+PRIVATE VAULT — DEEP SECURITY, CRYPTOGRAPHY, BUG, PRIVACY & QUALITY AUDIT REPORT
+AND GOOGLE AI STUDIO MASTER REPAIR & IMPLEMENTATION PROMPT
+================================================================================
+
+Document Date: 10 November 2026
+Application Name: PRIVATE VAULT
+Android Application ID: com.tpeditz.privatevault
+Source Code Version Audited: versionName = "1.0.3", versionCode = 4 (Version 5 / Build 4 snapshot)
+Developer Credits Verified: Tp Editz | Telegram: @Tp_Editz | Instagram: @tp_ediitz
+Uploaded Source Archive: Private-vault-android--main.zip
+Uploaded Source Archive Size: 346,682 bytes
+Uploaded Source Archive SHA-256: e5d30f3e242dc5f9acab6bcbb2ddd4949c280939345799f1481f5a024daf958a
+Uploaded Audit Specification: private_vault_deep_audit_prompt.txt
+Uploaded Audit Specification SHA-256: 927ae4aaffea03a644299a28522c3486e19cc84259661bc5d928570e68514b83
+Uploaded APK Reference: PRIVATE VAULT.apk (Google Drive File ID: 1VSnpurGLCltgscpcLGp4qNv8Hmlo0xns, 23,559,281 bytes, URL: https://drive.google.com/file/d/1VSnpurGLCltgscpcLGp4qNv8Hmlo0xns/view?usp=drivesdk)
+
+================================================================================
+HOW TO USE THIS FILE
+================================================================================
+This plain-text (.txt) file contains two complete parts in English:
+- PART I (Sections 1 to 17): The complete, evidence-driven Deep Security, Cryptography, Bug, Privacy, and Quality Audit Report covering every file in your uploaded project, all 26 newly discovered security/functional bugs (PV-SEC-001 to PV-SEC-012 and PV-BUG-001 to PV-BUG-014), and a verification audit of all 28 historical issues (N01-N08 and BUG 01-BUG 20).
+- PART II: The complete, copy-pasteable "GOOGLE AI STUDIO MASTER REPAIR PROMPT". You can give this entire file (or copy-paste Part II directly) into Google AI Studio so it edits and fixes every remaining bug and security flaw in your application cleanly without breaking existing features or user vaults.
+
+
+================================================================================
+PART I — COMPLETE TECHNICAL AUDIT REPORT (SECTIONS 1 TO 17)
+================================================================================
+
+--------------------------------------------------------------------------------
+1. EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+
+1.1 Overall Security Posture and Product Quality Assessment
+PRIVATE VAULT (v1.0.3, versionCode 4) is a native Android application built with Kotlin, Jetpack Compose, Material 3, Room SQLite, BouncyCastle Argon2id v1.3 (https://www.rfc-editor.org/rfc/rfc9106.html), and JCA AES-256-GCM authenticated encryption (https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html). Unlike superficial demo vaults, this codebase implements genuine cryptographic primitives:
+- Two-slot unified 72-byte AES-256-GCM key envelopes (`vault_envelopes`) where both Slot 0 (Real Vault) and Slot 1 (Decoy Vault) rows always exist on disk and are sequentially derived via Argon2id on every password unlock attempt.
+- Per-record AES-256-GCM authenticated encryption (`encrypted_records`) with composite primary key `(vault_slot, record_id)` and Associated Authenticated Data (`AAD = "PV1-REC|slot=$vaultSlot|id=$recordId|ver=$schemaVersion"`), leaving zero plaintext note titles, bodies, usernames, passwords, URLs, folders, or tags in SQLite columns.
+- Self-contained portable `.pvault` backups (`PortableBackupEngine.kt`) with independent Argon2id key derivation, 52-byte header bound via AAD, and in-memory AEAD verification prior to database modification.
+- Direct HTTPS OTA update checking (`OtaUpdateManager.kt`) verified via SHA-256 digest, official Android `com.android.apksig.ApkVerifier`, and installed signer certificate comparison.
+
+However, a rigorous line-by-line review of all 18 Kotlin source files, Gradle configurations, CI/CD workflows (`.github/workflows/build-apk.yml` and `.github/workflows/publish-ota.yml`), and hidden repository directories (`.aistudio/`) revealed 12 Security & Cryptography Findings (`PV-SEC-001` through `PV-SEC-012`) and 14 Functional, Concurrency, UX & Completeness Bugs (`PV-BUG-001` through `PV-BUG-014`).
+
+1.2 Most Important Risks to Confidentiality, Integrity, and Availability
+1. CRITICAL SIGNING KEY EXPOSURE IN SOURCE ZIP (`PV-SEC-001`): The private PKCS#12 keystore used to sign builds (`alias: androiddebugkey`, password `android`, SHA-256 cert fingerprint `12:94:3A:91:69:28:04:92:69:C0:2D:8D:97:1B:59:67:A0:41:FB:6C:7D:B2:5A:12:79:D3:41:4E:45:CF:B5:61`) is committed directly inside `.aistudio/artifacts/brain/2a19f8cf-e32e-491f-8c69-a22bba937042/debug.keystore.base64` (line 1) AND referenced as a fallback in both `.github/workflows/build-apk.yml` (lines 74-76) and `.github/workflows/publish-ota.yml` (lines 95-96). Anyone with access to the ZIP or repository can forge valid APK signatures that pass `OtaUpdateManager.verifyCandidateApkFile`.
+2. BROKEN RELEASE SIGNING ENVIRONMENT VARIABLE MISMATCH (`PV-SEC-002` / `PV-BUG-001`): In `.github/workflows/publish-ota.yml` (lines 114-117), the workflow exports `PV_RELEASE_STORE_FILE`, `PV_RELEASE_STORE_PASSWORD`, `PV_RELEASE_KEY_ALIAS`, and `PV_RELEASE_KEY_PASSWORD`. However, `app/build.gradle.kts` (lines 25-29) reads `KEYSTORE_PATH`, `STORE_PASSWORD`, hardcodes `keyAlias = "upload"`, and reads `KEY_PASSWORD`. Consequently, running `publish-ota.yml` in `release_keystore` mode will ALWAYS fail to find the keystore (`${rootDir}/my-upload-key.jks` does not exist) or fail with null passwords.
+3. DEAD CODE & MODULO BIAS IN ACTIVE PASSWORD GENERATOR (`PV-SEC-003` / `PV-BUG-002`): Although the developer created an unbiased rejection-sampling generator (`PasswordGeneratorEngine.kt`, lines 17-157), it is NEVER called anywhere in the app! Instead, `VaultViewModel.kt` (lines 310, 1164, 1174) and `PasswordsScreen.kt` (line 754) call `OfflinePasswordStrengthEstimator.generatePassword()`, which uses biased modulo arithmetic (`(randomBytes[i].toInt() and 0xFF) % pool.length` and `% (i + 1)` at lines 280, 286, 292) and silently falls back to lowercase+digits instead of rejecting all-categories-disabled configurations.
+4. MISSING KEYBOARD PRIVACY FLAGS & PLAINTEXT IME CACHING (`PV-SEC-004` / `PV-BUG-003`): In `NotesScreen.kt` (lines 677, 779, 843, 895), `PasswordsScreen.kt` (lines 707, 717, 734, 779, 831, 839, 929, 940), and `GeneratorAndStrengthScreens.kt` (line 342), `OutlinedTextField` components do not configure `KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password)` on sensitive fields (such as the Strength Checker input, non-secret custom fields, usernames, or note bodies). The Strength Checker input at `GeneratorAndStrengthScreens.kt` line 342 even displays typed passwords in unmasked plaintext without `PasswordVisualTransformation()`, allowing Android IMEs to learn and cache tested passwords in the user's keyboard dictionary.
+5. BIOMETRIC KEYSTORE CONFIGURATION LACKS EXPLICIT AUTHENTICATION VALIDITY & STRONGBOX ATTEMPT (`PV-SEC-005`): In `BiometricKeystoreManager.kt` (lines 48-60), `KeyGenParameterSpec.Builder` sets `.setUserAuthenticationRequired(true)` without setting `.setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)` (on API 30+) or `.setUserAuthenticationValidityDurationSeconds(-1)`. While Android defaults to per-operation authentication when duration is omitted, explicit strong biometric binding and optional StrongBox hardware-backed key generation (`setIsStrongBoxBacked(true)` with graceful fallback) should be enforced per Android Keystore best practices (https://developer.android.com/privacy-and-security/keystore).
+6. FIXED DUMMY PASSWORD WHEN DISABLING DECOY VAULT (`PV-SEC-006`): In `VaultRepository.kt` (line 945), `disableDecoyVault()` initializes the replacement dummy Slot 1 envelope using a hardcoded password `val dummyChars = CharArray(16) { 'x' }` (`"xxxxxxxxxxxxxxxx"`), whereas `initializeNewVault()` (lines 140-143) uses CSPRNG random characters. Anyone who knows the source code can test `"xxxxxxxxxxxxxxxx"` against Slot 1 of a vault where Decoy Mode was previously enabled and then disabled, proving forensically that Decoy Mode was once enabled and subsequently disabled!
+7. MULTIPLE MISSING FEATURES REQUIRED BY MASTER SPECIFICATION (`PV-BUG-004` to `PV-BUG-011`):
+   - Generator screen (`GeneratorAndStrengthScreens.kt`) lacks Show/Hide toggle for the generated candidate, lacks "Save to Passwords" / "Use in Credential" action, and lacks the configuration/pool explanation text.
+   - Credential model (`VaultDomainModels.kt` line 55 & `PasswordsScreen.kt`) lacks the `accountLabel` field (e.g., Personal / Work) and lacks Duplicate Credential / Archive Credential actions.
+   - Note model (`VaultDomainModels.kt` line 30 & `NotesScreen.kt`) lacks Duplicate Note, Archive Note (`isArchived`), numbered list formatting preview, explicit autosave status indicator (`Saving...` / `Saved`), and confirmation dialogs before Permanent Deletion of notes, credentials, or folders.
+   - OTA Updates (`AppPreferencesRepository.kt` & `SecondaryScreens.kt`) lacks a user toggle to enable/disable Automatic Startup Update Checks (`autoCheckOtaOnStartup`) and lacks an in-flight Download Cancel button.
+   - Note Editor debounced autosave (`NotesScreen.kt` lines 581-597) triggers 850ms after opening an existing note even when zero changes were made, causing every opened note's `updatedAtEpochMs` timestamp to be overwritten and re-sorting the note to the top of the list just from viewing it!
+
+1.3 Explicit Scope and Assessment Limitations
+- Static Source Review: 100% completed across all files in `Private-vault-android--main.zip`.
+- Gradle / Robolectric Execution: Not executed in this sandbox because the uploaded ZIP omits `gradlew` and `gradle/wrapper/gradle-wrapper.jar` (`PV-BUG-013`), and the audit sandbox operates with outbound internet disabled.
+- Binary APK Inspection: `PRIVATE VAULT.apk` (`23,559,281` bytes on Google Drive, `https://drive.google.com/file/d/1VSnpurGLCltgscpcLGp4qNv8Hmlo0xns/view?usp=drivesdk`) exceeds the 10 MB direct MCP transfer limit; binary verification steps are provided in Section 13 and Part II.
+- Physical Android Hardware Testing: Not executed here (no physical Android 15 / Realme 11 Pro+ device attached to this container). All hardware-dependent items (TEE/StrongBox Keystore behavior, live SAF picker providers, OEM keyboard inset animations, `FLAG_SECURE` hardware display flags, and live `PackageInstaller` upgrades) are explicitly marked `NOT TESTED (Requires Physical Device)`.
+
+
+--------------------------------------------------------------------------------
+2. APPLICATION PROFILE
+--------------------------------------------------------------------------------
+
+- Application Name: `PRIVATE VAULT`
+- Application ID: `com.tpeditz.privatevault`
+- Source Namespace: `com.example` (`app/build.gradle.kts` line 8)
+- Version Audited: `versionName = "1.0.3"`, `versionCode = 4` (`app/build.gradle.kts` lines 15-16; note that `PRIVATE_VAULT_ARCHITECTURE_AND_HANDOVER.md` line 6 still states `1.0.1` / `versionCode = 2`)
+- SDK Levels: `minSdk = 24` (Android 7.0), `targetSdk = 36`, `compileSdk = 36 (minorApiLevel = 1)`, Java compatibility `VERSION_11`
+- Architecture Pattern: Single-Activity (`MainActivity : FragmentActivity`) MVVM architecture with Jetpack Compose UI, `VaultViewModel`, `VaultRepository`, `VaultSessionManager`, `PortableBackupEngine`, `OtaUpdateManager`, and Room SQLite (`PrivateVaultDatabase` v3).
+- Resolved Dependency Catalog (`gradle/libs.versions.toml`):
+  - Android Gradle Plugin (`agp`): `9.1.1`
+  - Kotlin (`kotlin`): `2.2.10` | KSP (`googleDevtoolsKsp`): `2.3.5`
+  - Jetpack Compose BOM: `2024.09.00` (`material3`, `ui`, `material-icons-extended`)
+  - AndroidX Core KTX: `1.18.0`
+  - AndroidX Activity Compose: `1.10.1`
+  - AndroidX Fragment KTX: `1.8.6` (explicitly pinned to resolve the legacy 16-bit `requestCode` crash)
+  - AndroidX Lifecycle (`runtime-ktx`, `viewmodel-compose`, `runtime-compose`): `2.8.7`
+  - AndroidX Navigation Compose: `2.8.9` (declared in `app/build.gradle.kts` line 100, though navigation uses state-driven `when` blocks in `MainActivity.kt`)
+  - AndroidX Room (`room-runtime`, `room-ktx`, `room-compiler`): `2.7.0`
+  - AndroidX DataStore Preferences: `1.1.7`
+  - AndroidX Biometric: `1.1.0`
+  - BouncyCastle Provider (`org.bouncycastle:bcprov-jdk18on`): `1.80`
+  - Android APK Signer/Verifier (`com.android.tools.build:apksig`): `8.7.3`
+  - Square OkHttp (`com.squareup.okhttp3:okhttp`): `4.10.0`
+  - Kotlinx Coroutines (`core`, `android`, `test`): `1.10.2`
+  - Test Libraries: `junit:4.13.2`, `androidx.test.ext:junit:1.3.0`, `espresso-core:3.7.0`, `robolectric:4.16.1`
+- Permissions Declared (`app/src/main/AndroidManifest.xml` lines 6-10):
+  - `android.permission.INTERNET` (used strictly by `OtaUpdateManager`)
+  - `android.permission.REQUEST_INSTALL_PACKAGES` (used for verified OTA APK handoff)
+  - `android.permission.USE_BIOMETRIC` (used for Slot 0 hardware Keystore quick-unlock when Decoy Mode is disabled)
+
+
+--------------------------------------------------------------------------------
+3. ARCHITECTURE AND DATA-FLOW MAP
+--------------------------------------------------------------------------------
+
+3.1 Core Data Flows
+1. Vault Provisioning Flow (`VaultViewModel.setupNewVault` -> `VaultRepository.initializeNewVault`):
+   - User enters `realPassword` (and optional `decoyPassword`) in `SetupVaultScreen.kt`.
+   - `VaultViewModel` converts `String` to `CharArray` (`VaultViewModel.kt` lines 407-408) and invokes `VaultRepository.initializeNewVault` under `kdfMutex`.
+   - `CryptoEngine` generates two 16-byte CSPRNG salts (`salt0`, `salt1`), two 12-byte GCM nonces (`nonce0`, `nonce1`), and two 32-byte random DEKs (`dek0`, `dek1`).
+   - Argon2id v1.3 derives `kek0` from `realMasterPasswordChars` and `kek1` from either `optionalDecoyPasswordChars` or a 16-char random dummy secret (`VaultRepository.kt` lines 140-143, 177-181).
+   - `CryptoEngine.wrapEnvelopePayload` packs a 56-byte inner struct (`"PVE1" | slotRoleFlag | decoyPolicyFlag | 0x0000 | createdAtEpochMs | rotatedAtEpochMs | 32B DEK`) and encrypts it with AES-256-GCM under `kek0`/`kek1` and AAD `"PV1-ENV|slot=$slotId|ver=1|alg=ARGON2ID_V13|m=...|t=...|p=..."`, yielding two 72-byte `wrappedPayloadCiphertext` blobs.
+   - Starter folders and optional sample records are serialized via `VaultRecordCodec.encode` and encrypted with `dek0`/`dek1`.
+   - `vaultDao.initializeVaultAtomically` writes both envelopes and initial records in one SQLite `@Transaction`.
+2. Password Unlock Flow (`VaultViewModel.unlockWithPassword` -> `VaultRepository.unlockWithPassword`):
+   - Checks DataStore backoff (`unlockCooldownUntilEpochMs` clamped to `MAX_COOLDOWN_MS = 30_000L`).
+   - Captures `capturedAuthGen = sessionManager.currentAuthRequestGeneration()`.
+   - Acquires `kdfMutex`. Loads both `slotId = 0` and `slotId = 1` envelopes from SQLite.
+   - Validates KDF parameter bounds (`memoryKb in 4096..131072`, `iterations in 1..12`, `parallelism in 1..4`).
+   - Sequentially runs Argon2id + AES-256-GCM unwrap on Slot 0 (`kek0`, `unwrapped0`) AND Slot 1 (`kek1`, `unwrapped1`).
+   - Opens `VaultSessionManager.SessionState.Unlocked` via `openSessionIfGenerationMatches(expectedAuthGeneration, ...)` only if no lock/screen-off event occurred during KDF execution.
+   - Zeroes `kek0`, `kek1`, `unwrapped0`, `unwrapped1`, and `passwordChars` in `finally` blocks.
+3. Record CRUD Flow (`VaultRepository.loadDecryptedSlotSnapshotForSession` / `saveVaultItem`):
+   - Every `NoteRecord`, `CredentialRecord`, and `VaultFolder` is encoded to UTF-8 JSON (`VaultRecordCodec.encode`), encrypted with AES-256-GCM using a fresh 12-byte random nonce and `AAD = "PV1-REC|slot=$vaultSlot|id=$recordId|ver=1"`, and stored in `encrypted_records` (`PRIMARY KEY(vault_slot, record_id)`).
+4. Portable `.pvault` Backup & Restore Flow (`PortableBackupEngine.kt` & `VaultViewModel.kt`):
+   - Export: Decrypts active slot snapshot (aborting if `hasCorruptedRecords && !allowSkipCorruptedRecords`), serializes to JSON, derives a 256-bit backup KEK via Argon2id with a fresh 16-byte salt, encrypts with AES-256-GCM (`AAD = "PV1-BACKUP|ver=1|alg=...|m=...|t=...|p=..."`), writes to `context.cacheDir/backup_staging/pending_export_<opId>.pvault`, opens a 90-second SAF picker window, copies to user-chosen `Uri` on `Dispatchers.IO`, and deletes the staging file in `finally`.
+   - Restore: Reads up to 32 MiB from selected `Uri` on `Dispatchers.IO`, validates `"PVAULTB1"` header and KDF bounds, verifies AES-256-GCM tag and parses all records in memory before modifying SQLite, then commits via `replaceAllRecordsForSlot` or `upsertRecords`.
+5. OTA Update Flow (`OtaUpdateManager.kt`):
+   - Uses `OkHttpClient` with `followRedirects(false)` and `followSslRedirects(false)`, validating every redirect hop against `ALLOWED_HOSTS` (`raw.githubusercontent.com`, `github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`), port 443, HTTPS scheme, no userinfo, and no `..` traversal before sending the next HTTP request.
+   - Downloads candidate APK to `context.cacheDir/ota_updates/` only after user taps "Update Now", verifies byte size, SHA-256 digest, `com.android.apksig.ApkVerifier`, installed signer certificate SHA-256 match, and non-null `getPackageArchiveInfo` (`packageName` match and `versionCode > installedCode`).
+
+3.2 Trust Boundaries & Plaintext Exposure Map
+- Boundary 1 (UI / Compose Memory): Plaintext `String` objects exist in `VaultUiState` (`notes`, `credentials`, `activeNoteDraft`, `activeCredentialDraft`, `generatedCandidate`, `strengthCheckerInput`) while the vault is `Unlocked`. Cleared to empty lists/strings when `SessionState.Locked` is emitted (`VaultViewModel.kt` lines 273-292).
+- Boundary 2 (SQLite Persistence): `private_vault_encrypted.db` stores only `vault_envelopes` and `encrypted_records`. All user content is AES-256-GCM ciphertext. Unencrypted columns are limited to `slot_id`, KDF parameters/salts, nonces, `record_id` (UUID or builtin default folder ID), and `schema_version`.
+- Boundary 3 (DataStore Preferences): `private_vault_preferences` stores theme, auto-lock timeout, boolean flags, OTA snooze timestamps, coarse failed unlock count, and manual KDF benchmark numbers. Zero secrets or vault keys are stored in DataStore.
+- Boundary 4 (System Clipboard & IME): Controlled by `SensitiveClipboardManager` (`EXTRA_IS_SENSITIVE` + SHA-256 digest ownership check + TTL countdown). However, IME keyboard dictionary learning is NOT blocked on several text fields (`PV-SEC-004`).
+- Boundary 5 (Network / GitHub OTA): Only `OtaUpdateManager` makes network requests. Zero vault data is accessible to `OtaUpdateManager`.
+
+
+--------------------------------------------------------------------------------
+4. THREAT MODEL AND SECURITY CLAIMS VERIFICATION
+--------------------------------------------------------------------------------
+
+4.1 Evaluation of Threat Scenarios
+1. Lost or Stolen Device While Vault is Locked:
+   - Existing Control: DEK is zeroed in memory on lock; records and envelopes are encrypted with AES-256-GCM; Keystore biometric key requires biometric authentication; Auto Backup and Device Transfer are disabled (`AndroidManifest.xml` lines 13-15, `backup_rules.xml`, `data_extraction_rules.xml`).
+   - Gap / Residual Risk: Protection against offline brute-force after physical flash extraction depends on the user's Master Password entropy and Argon2id parameters (`32 MiB`, `t=3`, `p=2`).
+2. Device Seized While Vault is Unlocked or Recently Unlocked:
+   - Existing Control: `BroadcastReceiver(Intent.ACTION_SCREEN_OFF)` immediately locks the vault when `lockOnScreenOff == true` (`MainActivity.kt` lines 124-130); `ON_STOP`/`ON_START` lifecycle observer enforces `autoLockTimeoutMs` (`MainActivity.kt` lines 178-196); `FLAG_SECURE` blocks task-switcher snapshots and screen capture (`MainActivity.kt` lines 163-174).
+   - Gap / Residual Risk: `VaultViewModel.onAppBackgrounded()` only records a timestamp and waits until `onAppForegrounded()` to call `lockNow()`! While the app is in the background, the decrypted `dekBytes` and all plaintext `notes`/`credentials` remain in RAM until the user re-opens the app or turns off the screen (`PV-SEC-007`).
+3. Casual Coercion / Plausible Deniability (Attacker Demands Password):
+   - Existing Control: Entering the Decoy Password unlocks Slot 1 with identical UI chrome, generic settings labels, and zero "Decoy" indicators. Both Slot 0 and Slot 1 envelopes are always 72 bytes and evaluated on every unlock.
+   - Gap / Residual Risk:
+     (a) If the user previously enabled Decoy Mode and later disabled it, `disableDecoyVault()` wraps Slot 1 with the hardcoded password `"xxxxxxxxxxxxxxxx"` (`PV-SEC-006`), allowing an attacker who inspects the database to prove Decoy Mode was disabled.
+     (b) In raw SQLite (`encrypted_records`), `vault_slot` (`0` or `1`) is a plaintext integer column (`VaultEntities.kt` line 74). If a forensic examiner has root/ADB access to `/data/data/com.tpeditz.privatevault/databases/private_vault_encrypted.db`, they can see exact row counts in `vault_slot = 0` vs `vault_slot = 1` (accurately disclosed in `SecondaryScreens.kt` lines 1980-1981).
+     (c) In `SecurityAndDecoySettingsScreen` (`SecondaryScreens.kt` line 798), if a user in the Real Vault enables Decoy Mode, `uiState.isDecoyModeEnabled` is `true` and the Biometric card displays: `"Biometric quick-unlock is disabled while multi-envelope policy is active..."`. However, when unlocked into the Decoy Vault (`slotId = 1`), `isDecoyModeEnabled` is always `false` (`VaultRepository.kt` line 93), so the Biometric card displays the `"Enable Biometrics"` button—and tapping it fails with `"Biometric settings are not available in this session."` (`VaultRepository.kt` line 385). This behavioral difference in Settings fingerprints whether the active session is Real or Decoy (`PV-SEC-008`)!
+4. Malicious / Compromised OTA Update or Network MITM:
+   - Existing Control: Cleartext HTTP is blocked (`network_security_config.xml`), redirects are validated hop-by-hop (`OtaUpdateManager.kt` lines 334-382), and APKs must pass SHA-256 + `apksig` + installed signer certificate match.
+   - Gap / Residual Risk: Because the private key for `debug.keystore` is committed inside `.aistudio/artifacts/brain/.../debug.keystore.base64` (`PV-SEC-001`), any APK built in `debug` or `debug_compatibility` mode shares a publicly exposed private key.
+5. Malicious / Curious Keyboard (IME) or Clipboard Snooping:
+   - Existing Control: `SensitiveClipboardManager` marks clips with `ClipDescription.EXTRA_IS_SENSITIVE` and clears owned clips after TTL (default 30s).
+   - Gap / Residual Risk: Text fields in Notes, Passwords, and Strength Audit do not disable IME personalized learning/autocorrect (`PV-SEC-004`).
+
+4.2 Verification of Security Claims
+- Claim: "100% Offline Vault (except OTA)" -> CONFIRMED in source code (`OkHttpClient` is instantiated solely in `OtaUpdateManager.kt`). Note: `metadata.json` line 5 misleadingly lists `"MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"` (`PV-BUG-012`), which is an AI Studio project metadata artifact and not used in Kotlin code.
+- Claim: "AES-256-GCM Authenticated Encryption with AAD Slot Binding" -> CONFIRMED (`CryptoEngine.kt` lines 242-422).
+- Claim: "Argon2id v1.3 Key Derivation" -> CONFIRMED (`CryptoEngine.kt` lines 159-189, using `org.bouncycastle:bcprov-jdk18on:1.80`).
+
+
+--------------------------------------------------------------------------------
+5. CRYPTOGRAPHY AND KEY-MANAGEMENT DEEP REVIEW
+--------------------------------------------------------------------------------
+
+5.1 Encryption Primitive, Mode, Nonce & AAD Construction
+- Algorithm & Mode: `AES/GCM/NoPadding` via standard Android/Java JCA `javax.crypto.Cipher` (`CryptoEngine.kt` lines 389, 414) with 256-bit keys (`DEK_BYTES = 32`) and 128-bit authentication tags (`GCM_TAG_BITS = 128`).
+- Nonce Generation: 96-bit (`NONCE_BYTES = 12`) generated fresh on every encryption and envelope wrap via `java.security.SecureRandom` (`CryptoEngine.kt` lines 72, 145-153). Under random 96-bit nonces, the birthday bound for asingle DEK is $2^{32}$ (~4.29 billion) record writes, which is well beyond local mobile vault scale.
+- Context Binding (AAD):
+  - Envelopes: `"PV1-ENV|slot=$slotId|ver=$envelopeVersion|alg=${params.algorithm}|m=${params.memoryKb}|t=${params.iterations}|p=${params.parallelism}"` (`CryptoEngine.kt` line 247). Prevents moving an envelope between Slot 0 and Slot 1 or tampering with KDF cost columns in SQLite.
+  - Records: `"PV1-REC|slot=$vaultSlot|id=$recordId|ver=$schemaVersion"` (`CryptoEngine.kt` line 259). Prevents copying a ciphertext from Slot 0 to Slot 1 or swapping ciphertexts between different `record_id` rows.
+  - Backups: `"PV1-BACKUP|ver=$schemaVersion|alg=${params.algorithm}|m=${params.memoryKb}|t=${params.iterations}|p=${params.parallelism}"` (`CryptoEngine.kt` line 270). Authenticates the `.pvault` header fields before decryption.
+
+5.2 Password Key Derivation (Argon2id)
+- Implementation: BouncyCastle `Argon2BytesGenerator` with `Argon2Parameters.ARGON2_id` and `ARGON2_VERSION_13` (`CryptoEngine.kt` lines 171-180).
+- Parameters:
+  - Standard profile (`maxHeapMb >= 192`): `memoryKb = 32768` (32 MiB per slot; 64 MiB sequential across 2 slots), `iterations = 3`, `parallelism = 2`. Exceeds the OWASP Password Storage Cheat Sheet minimum baseline (19 MiB, t=2, p=1; https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html).
+  - Constrained profile (`maxHeapMb < 192`): `memoryKb = 16384` (16 MiB per slot), `iterations = 4`, `parallelism = 2`.
+- Salt: 16 bytes (128 bits) generated via `SecureRandom` per slot and per password rotation (`CryptoEngine.kt` line 31).
+- Password Byte Conversion: `charArrayToUtf8Bytes(chars)` (`CryptoEngine.kt` lines 424-433) encodes `CharBuffer` to UTF-8 and zeroes the backing `ByteBuffer` array if present. Note: Unicode normalization (such as NFC/NFKD per RFC 9106 / NIST SP 800-63B) is not applied prior to UTF-8 encoding (`PV-SEC-011`), which can cause cross-device backup restore failures if a user's password contains accented/composed Unicode characters typed on different keyboards.
+
+5.3 Key Hierarchy and Lifecycle Table
+
+| Key Identifier | Purpose | Generation Method | Storage Location | Access Control / Binding | Lifecycle & Rotation | Exposure Risk & Finding |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Slot 0 DEK (`dek0`, 256-bit) | Encrypts all Real Vault notes, credentials, and folders | `SecureRandom` 32 bytes (`CryptoEngine.generateDek`) | Wrapped inside `vault_envelopes` (`slot_id = 0`) + optional `biometric_wrapped_dek`; held in `SessionState.Unlocked.internalDekBytes` while unlocked | Unwrapped via Slot 0 KEK or Android Keystore biometric cipher; bound to AAD `slot=0` | Generated on vault init; preserved across password rotations (`changeActiveVaultPassword`); zeroed on `lockNow()` | Retained in RAM while backgrounded until foreground return (`PV-SEC-007`); ordinary password change re-wraps same DEK without Compromise Rekey option (`PV-SEC-010`) |
+| Slot 1 DEK (`dek1`, 256-bit) | Encrypts all Decoy Vault notes, credentials, and folders (or dummy slot) | `SecureRandom` 32 bytes (`CryptoEngine.generateDek`) | Wrapped inside `vault_envelopes` (`slot_id = 1`); held in `SessionState.Unlocked.internalDekBytes` when Slot 1 is unlocked | Unwrapped via Slot 1 KEK; bound to AAD `slot=1` | Generated on vault init or Decoy provisioning; preserved on `rotateDecoyPasswordPreservingRecords`; replaced on destructive reset/disable | When Decoy is disabled via `disableDecoyVault()`, `dek1` is wrapped with a hardcoded password `"xxxxxxxxxxxxxxxx"` (`PV-SEC-006`) |
+| Slot 0 & Slot 1 KEKs (`kek0`, `kek1`, 256-bit) | Wrap/unwrap the 56-byte inner key envelopes for Slot 0 and Slot 1 | Argon2id v1.3 from user password + 16B salt | Ephemeral in RAM only during unlock, setup, or password rotation | Zeroed in `finally` blocks via `Arrays.fill(kek, 0)` | Re-derived on each unlock or password change with fresh 16B salt and 12B nonce | UI passes passwords as immutable JVM `String` objects from Compose `OutlinedTextField` before `.toCharArray()` conversion (inherent Compose `String` limitation, mitigated by avoiding `rememberSaveable`) |
+| Biometric KEK (`com.tpeditz.privatevault.real_bio_kek_v1`) | Hardware-backed AES-256-GCM key wrapping Slot 0 DEK when Decoy Mode is disabled | Android Keystore `KeyGenerator` (AES-256-GCM) | Hardware TEE / Android Keystore (`AndroidKeyStore`) | `setUserAuthenticationRequired(true)` + `setInvalidatedByBiometricEnrollment(true)` + `BiometricPrompt.CryptoObject(cipher)` | Deleted immediately when Decoy Mode is enabled (`VaultRepository.kt` line 711) or when biometric unlock is disabled/invalidated | Missing explicit `setUserAuthenticationParameters(0, AUTH_BIOMETRIC_STRONG)` on API 30+ (`PV-SEC-005`) |
+| Backup KEK (`backupKek`, 256-bit) | Encrypts/decrypts portable `.pvault` backup payload | Argon2id v1.3 from backup password + 16B `backupKdfSalt` | Ephemeral in RAM during export/restore (`PortableBackupEngine.kt`) | Bound to `.pvault` header via AAD; zeroed in `finally` | One-time per `.pvault` file export | Lack of NFC Unicode normalization on password (`PV-SEC-011`) |
+| APK Signing Key (`androiddebugkey` / `release`) | Signs APK for Android package installer and `OtaUpdateManager` signer check | RSA 2048-bit (`SHA256withRSA`) | `.aistudio/.../debug.keystore.base64` and CI secrets | Verified by `OtaUpdateManager.verifyCandidateApkFile` via `apksig` | Persistent across updates | CRITICAL: Private key committed in `.aistudio/.../debug.keystore.base64` (`PV-SEC-001`) and CI env vars mismatch `app/build.gradle.kts` (`PV-SEC-002`) |
+
+
+--------------------------------------------------------------------------------
+6. DATA-AT-REST AND PLAINTEXT EXPOSURE MATRIX
+--------------------------------------------------------------------------------
+
+| Storage Location / Surface | Data Present | Encryption Status | Access Path & Protection | Test / Verification Status | Remediation Needed |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Room SQLite `vault_envelopes` (`private_vault_encrypted.db`) | `slot_id` (0,1), `envelope_version` (1), `kdf_*` params, `kdf_salt` (16B), `envelope_nonce` (12B), `wrapped_payload_ciphertext` (72B), `biometric_nonce`, `biometric_wrapped_dek` | Inner 56B payload (`slotRoleFlag`, `decoyPolicyFlag`, timestamps, 32B DEK) is AES-256-GCM encrypted; outer columns are public KDF params | App-private `/data/data/com.tpeditz.privatevault/databases/`; excluded from Auto Backup | Source-Confirmed & covered by `ExampleRobolectricTest` | Fix hardcoded `"xxxxxxxxxxxxxxxx"` dummy password in `disableDecoyVault()` (`PV-SEC-006`) |
+| Room SQLite `encrypted_records` (`private_vault_encrypted.db`) | `vault_slot` (0,1), `record_id` (UUID or default folder ID), `schema_version` (1), `nonce` (12B), `ciphertext` (blob) | All titles, bodies, checklists, service names, usernames, passwords, custom fields, URLs, folders, tags, timestamps, and flags are AES-256-GCM encrypted | App-private database; bound to `(vault_slot, record_id)` via AAD | Source-Confirmed & covered by `ExampleRobolectricTest` | Randomize or hash default folder `record_id` (`"builtin-folder-notes-general"`) so raw SQLite does not display readable folder ID strings (`PV-SEC-009`) |
+| SQLite WAL / SHM Files (`-wal`, `-shm`) | Write-ahead log frames of `vault_envelopes` and `encrypted_records` | Contains only encrypted blobs because encryption happens in `VaultRepository` before Room DAO calls | App-private database directory | Source-Confirmed | None required for plaintext; encryption occurs prior to SQLite |
+| Preferences DataStore (`private_vault_preferences.preferences_pb`) | Theme, auto-lock timeout, screen-off lock bool, screenshot bool, clipboard TTL, OTA URL & snooze state, failed unlock count, manual KDF benchmark stats | Unencrypted protobuf in app-private `files/datastore/` | App-private storage; excluded from backup (`backup_rules.xml`, `data_extraction_rules.xml`) | Source-Confirmed | Add `<exclude domain=" root" />` & `<exclude domain="file" />` verification (already present) |
+| Backup Staging Cache (`cacheDir/backup_staging/pending_export_<opId>.pvault`) | Temporary `.pvault` file created before SAF Save As picker completes | Encrypted with Argon2id + AES-256-GCM (`PortableBackupEngine`) | Deleted in `completeExportToUri` `finally`, on lock (outside picker window), in `init`, and in `onCleared()` | Source-Confirmed | If app is backgrounded while picker is open and user takes >90s, background timer does not proactively delete the staged file until next launch or foreground return (`PV-SEC-007`) |
+| OTA Download Cache (`cacheDir/ota_updates/private_vault_update_v<code>.apk`) | Downloaded candidate APK file | Public signed APK binary | Exposed only via non-exported `FileProvider` with `FLAG_GRANT_READ_URI_PERMISSION` | Source-Confirmed | Clean up verified APK file after installation completes (`OtaUpdateManager.kt`) |
+| Android System Clipboard | Copied username, password, custom field, generated password, or developer handle | Plaintext in system clipboard service; marked with `ClipDescription.EXTRA_IS_SENSITIVE` | Auto-cleared after `clipboardClearTtlSeconds` (default 30s) or on `lockVaultNow()` if SHA-256 digest still matches | Source-Confirmed | None; `SensitiveClipboardManager` properly tracks ownership and deferred foreground clear |
+| Android IME / Keyboard Dictionary Cache | Characters typed into Compose `OutlinedTextField` inputs | Unencrypted inside third-party or OEM keyboard app sandbox | `SetupAndUnlockScreens.kt` sets `KeyboardType.Password`, but `NotesScreen.kt`, `PasswordsScreen.kt`, and `GeneratorAndStrengthScreens.kt` omit `autoCorrectEnabled = false` and `KeyboardType.Password` on sensitive fields | Source-Confirmed Defect (`PV-SEC-004`) | Add `KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password)` and masking to Strength Checker and secret inputs |
+| Screenshots & Recents Task Switcher | Rendered UI pixels | Blocked by `WindowManager.LayoutParams.FLAG_SECURE` | Enforced in `MainActivity.onCreate` before `setContent` and kept active whenever locked or `blockScreenshots == true` | Source-Confirmed | None; `FLAG_SECURE` is properly enforced |
+
+
+--------------------------------------------------------------------------------
+7. SECURITY FINDINGS (DETAILED EVIDENCE, IMPACT & REMEDIATION)
+--------------------------------------------------------------------------------
+
+================================================================================
+FINDING ID: PV-SEC-001
+Title: Private Signing Keystore (`debug.keystore.base64`) Committed Inside Project Archive and Used by CI Workflows
+Category: Supply Chain / APK Signing / OTA Authenticity
+Affected Component:
+- `.aistudio/artifacts/brain/2a19f8cf-e32e-491f-8c69-a22bba937042/debug.keystore.base64` (line 1)
+- `.github/workflows/build-apk.yml` (lines 68-77)
+- `.github/workflows/publish-ota.yml` (lines 92-101)
+- `app/build.gradle.kts` (lines 30-36)
+Status: CONFIRMED
+Severity: CRITICAL
+Confidence: High
+CVSS v4.0 Vector & Score: CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:A/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N (8.6 High / Critical in OTA Context)
+CWE / OWASP Mapping: CWE-798 (Use of Hard-coded Credentials), CWE-321 (Use of Hard-coded Cryptographic Key), OWASP MASVS-CODE-1, MASWE-0009
+Evidence:
+1. The file `.aistudio/artifacts/brain/2a19f8cf-e32e-491f-8c69-a22bba937042/debug.keystore.base64` contains a 3,668-character Base64-encoded PKCS#12 keystore.
+2. Decoding and inspecting this file with `keytool -list -v -storepass android` confirmed it is a `PrivateKeyEntry` (`alias: androiddebugkey`, 2048-bit RSA private key, valid until 2054) with certificate SHA-256 fingerprint:
+   `12:94:3A:91:69:28:04:92:69:C0:2D:8D:97:1B:59:67:A0:41:FB:6C:7D:B2:5A:12:79:D3:41:4E:45:CF:B5:61`
+3. Both `.github/workflows/build-apk.yml` (lines 74-76) and `.github/workflows/publish-ota.yml` (lines 95-96) explicitly look for `./debug.keystore.base64` or `DEBUG_KEYSTORE_BASE64` with storepass/keypass `"android"`.
+Preconditions & Attacker Capabilities:
+Any attacker who obtains the source archive, accesses the repository, or extracts the compromised debug key can sign an arbitrary trojanized APK with `packageName = "com.tpeditz.privatevault"` and higher `versionCode`.
+Technical Root Cause & Impact:
+`OtaUpdateManager.verifyCandidateApkFile` (`OtaUpdateManager.kt` lines 435-448) trusts any candidate APK whose signing certificate SHA-256 matches the installed app's signing certificate. Because the private key corresponding to certificate `12:94:3A:91...` is exposed inside the archive and uses password `"android"`, any APK installed with that certificate has zero cryptographic protection against forged updates if an attacker compromises the GitHub release asset or tricks the user into side-loading an update.
+Recommended Fix:
+1. Delete `.aistudio/artifacts/brain/2a19f8cf-e32e-491f-8c69-a22bba937042/debug.keystore.base64` and `debug.keystore.base64.metadata.json` from the repository and add `*.keystore`, `*.jks`, and `*.keystore.base64` to `.gitignore`.
+2. Remove the `elif [ -f "./debug.keystore.base64" ]` fallback from `.github/workflows/build-apk.yml` and `.github/workflows/publish-ota.yml`.
+3. Generate a fresh, uncompromised 4096-bit RSA or ECDSA P-256 release keystore offline on the owner's computer, store it only in GitHub Actions Secrets (`RELEASE_KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD`), and never commit any keystore file or Base64 dump into the project tree.
+Regression Verification:
+Run a repository-wide scan (`find . -name "*.keystore*" -o -name "*.jks"`) in CI preflight and fail the build if any keystore or `.base64` key file exists in the working tree.
+
+================================================================================
+FINDING ID: PV-SEC-002 (Also Tracked as Build Blocker PV-BUG-001)
+Title: Release Signing Environment Variable Mismatch Between `app/build.gradle.kts` and `publish-ota.yml` Breaks Production Release Signing
+Category: Build & Release Security / CI/CD
+Affected Component:
+- `app/build.gradle.kts` (lines 24-30)
+- `.github/workflows/publish-ota.yml` (lines 110-128)
+Status: CONFIRMED
+Severity: HIGH
+Confidence: High
+CVSS v4.0 Vector & Score: Not Applicable (Build/Release Pipeline Failure Preventing Secure Release Signing)
+CWE / OWASP Mapping: CWE-16 (Configuration), OWASP MASVS-CODE-1
+Evidence:
+In `app/build.gradle.kts` (lines 24-30):
+```kotlin
+    create("release") {
+      val keystorePath = System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"
+      storeFile = file(keystorePath)
+      storePassword = System.getenv("STORE_PASSWORD")
+      keyAlias = "upload"
+      keyPassword = System.getenv("KEY_PASSWORD")
+    }
+```
+However, in `.github/workflows/publish-ota.yml` (lines 113-117):
+```yaml
+        env:
+          SIGNING_MODE: ${{ inputs.signing_mode }}
+          PV_RELEASE_STORE_FILE: ${{ steps.signing_prep.outputs.keystore_path }}
+          PV_RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          PV_RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          PV_RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+```
+Technical Root Cause & Impact:
+`publish-ota.yml` sets `PV_RELEASE_*` environment variables, whereas `app/build.gradle.kts` reads `KEYSTORE_PATH`, `STORE_PASSWORD`, `KEY_PASSWORD`, and hardcodes `keyAlias = "upload"` (ignoring `PV_RELEASE_KEY_ALIAS` / `RELEASE_KEY_ALIAS`). When the owner runs `Publish Verified OTA Update` in `release_keystore` mode, Gradle looks for `${rootDir}/my-upload-key.jks` with `null` passwords and crashes immediately, forcing the owner back onto the compromised `debug_compatibility` mode!
+Recommended Fix:
+Keeping AI Studio's required env var fallbacks intact, update `app/build.gradle.kts` (lines 24-30) to support both `KEYSTORE_PATH` and `PV_RELEASE_STORE_FILE` (and `RELEASE_KEY_ALIAS` fallback to `"upload"`), AND export both sets of environment variables in `.github/workflows/publish-ota.yml`:
+```kotlin
+    create("release") {
+      val keystorePath = System.getenv("KEYSTORE_PATH")
+        ?: System.getenv("PV_RELEASE_STORE_FILE")
+        ?: "${rootDir}/my-upload-key.jks"
+      storeFile = file(keystorePath)
+      storePassword = System.getenv("STORE_PASSWORD") ?: System.getenv("PV_RELEASE_STORE_PASSWORD")
+      keyAlias = System.getenv("KEY_ALIAS") ?: System.getenv("PV_RELEASE_KEY_ALIAS") ?: "upload"
+      keyPassword = System.getenv("KEY_PASSWORD") ?: System.getenv("PV_RELEASE_KEY_PASSWORD")
+    }
+```
+Regression Verification:
+Verify that `gradle :app:assembleRelease` succeeds when `PV_RELEASE_*` or `KEYSTORE_PATH` environment variables are provided.
+
+================================================================================
+FINDING ID: PV-SEC-003 (Also Tracked as PV-BUG-002)
+Title:Modulo Bias and Silent Policy Downgrade in Active Password & Passphrase Generator (`OfflinePasswordStrengthEstimator`) While Unbiased `PasswordGeneratorEngine` is Unused Dead Code
+Category: Cryptography / Randomness Quality
+Affected Component:
+- `app/src/main/java/com/example/security/OfflinePasswordStrengthEstimator.kt` (lines 250-330)
+- `app/src/main/java/com/example/security/PasswordGeneratorEngine.kt` (lines 17-157)
+- `app/src/main/java/com/example/ui/VaultViewModel.kt` (lines 310, 1164, 1174)
+- `app/src/main/java/com/example/ui/PasswordsScreen.kt` (line 754)
+Status: CONFIRMED
+Severity: MEDIUM
+Confidence: High
+CVSS v4.0 Vector & Score: CVSS:4.0/AV:L/AC:H/AT:N/PR:N/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N (4.0 Medium)
+CWE / OWASP Mapping: CWE-330 (Use of Insufficiently Random Values), OWASP MASVS-CRYPTO-1
+Evidence:
+1. `PasswordGeneratorEngine.kt` implements unbiased rejection sampling (`nextUnbiasedInt`, lines 142-156) and explicit `GenerationResult.InvalidConfig` when all character classes are disabled (lines 83-87). However, `PasswordGeneratorEngine` is NEVER imported or called by any file in the project!
+2. Instead, `VaultViewModel.kt` and `PasswordsScreen.kt` call `OfflinePasswordStrengthEstimator.generatePassword(config)` (lines 250-299) and `generatePassphrase` (lines 304-330):
+   - Line 267-270: If the user unchecks all 4 character switches (Uppercase, Lowercase, Digits, Symbols), instead of showing an error, `generatePassword` silently re-enables Lowercase and Digits (`if (pools.isEmpty()) { pools.add(filterAmbiguous(LOWER)); pools.add(filterAmbiguous(DIGITS)) }`), violating the requirement to reject impossible combinations rather than silently generating a password that contradicts the UI toggles.
+   - Lines 280, 286, 292: Uses `(randomBytes[i].toInt() and 0xFF) % pool.length` and `(randomBytes[safeLength + i].toInt() and 0xFF) % (i + 1)`. Because 256 is not divisible by most pool lengths (e.g., 24, 58, 82, 88) or shuffle indices `i + 1`, this introduces classic modulo bias into every generated password and Fisher-Yates shuffle step.
+   - Line 314-315: `generatePassphrase` uses `(((randomBytes[idx * 2].toInt() and 0xFF) shl 8) or (randomBytes[idx * 2 + 1].toInt() and 0xFF)) % EFF_PASSPHRASE_WORDS.size` (where `EFF_PASSPHRASE_WORDS.size` is 202, which does not divide 65,536 evenly) and line 325 uses `% 90` (which does not divide 256 evenly).
+   - Furthermore, `EFF_PASSPHRASE_WORDS` only contains 202 words (~7.65 bits/word, so a 5-word passphrase has only ~38.2 bits of word entropy plus ~6.5 bits from the 2-digit number = ~44.7 bits total), yet `OfflinePasswordStrengthEstimator.evaluate()` scores a 5-word capitalized passphrase like `"Amber-Anchor-Apollo-Arctic-Arrow-42"` (~35 chars across Upper, Lower, Digits, Symbols) as `35 * log2(94) = 229 bits` of entropy ("Fortress 100/100")!
+Recommended Fix:
+1. Route all password generation in `VaultViewModel` and `PasswordsScreen` through `PasswordGeneratorEngine.generate()`, or replace the modulo operations in `OfflinePasswordStrengthEstimator` with `PasswordGeneratorEngine.nextUnbiasedInt()` and surface `InvalidConfig` errors in the Generator UI when all character classes are disabled.
+2. In `OfflinePasswordStrengthEstimator.evaluate()`, detect passphrases composed of words from `EFF_PASSPHRASE_WORDS` (or hyphen-separated dictionary words) and calculate realistic word-list entropy (~7.65 to 11 bits per word) rather than multiplying character length by `log2(94)`.
+Regression Verification:
+Add a unit test verifying that disabling all 4 character classes returns a validation error and that passphrase entropy is not inflated to 200+ bits.
+
+================================================================================
+FINDING ID: PV-SEC-004 (Also Tracked as PV-BUG-003)
+Title: Missing Keyboard Privacy Options (`autoCorrectEnabled = false`, `KeyboardType.Password`) and Unmasked Strength Checker Input Leak Secrets to Android IME Dictionaries
+Category: Privacy / Local Plaintext Leakage (Phase 4 & Phase 5B)
+Affected Component:
+- `app/src/main/java/com/example/ui/GeneratorAndStrengthScreens.kt` (lines 342-350)
+- `app/src/main/java/com/example/ui/NotesScreen.kt` (lines 677-685, 779-785, 843-853, 895-903)
+- `app/src/main/java/com/example/ui/PasswordsScreen.kt` (lines 707-773, 831-847, 929-956)
+- `app/src/main/java/com/example/ui/SecondaryScreens.kt` (lines 230-250, 322-331, 518-527, 721-750, 900-909, 920-940, 987-1016)
+Status: CONFIRMED
+Severity: MEDIUM
+Confidence: High
+CVSS v4.0 Vector & Score: CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:A/VC:M/VI:N/VA:N/SC:N/SI:N/SA:N (4.8 Medium)
+CWE / OWASP Mapping: CWE-200 (Exposure of Sensitive Information), CWE-522 (Insufficiently Protected Credentials), OWASP MASVS-PRIVACY-1, MASWE-0053
+Evidence:
+1. In `GeneratorAndStrengthScreens.kt` (lines 342-350), the interactive password strength checker input is:
+```kotlin
+OutlinedTextField(
+    value = uiState.strengthCheckerInput,
+    onValueChange = viewModel::setStrengthCheckerInput,
+    label = { Text("Enter password to analyze") },
+    singleLine = true,
+    modifier = Modifier.fillMaxWidth().testTag("strength_checker_input")
+)
+```
+It has NO `visualTransformation = PasswordVisualTransformation()`, NO show/hide toggle, and NO `KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false)`. Any password typed into the Strength Checker is displayed in plain text on screen and sent to the Android keyboard with default text autocorrect/learning enabled!
+2. In `PasswordsScreen.kt` (lines 734-773, 940-956) and `SecondaryScreens.kt` (lines 230-250, 322-331, 518-527, 721-750, 900-1016), password `OutlinedTextField`s set `visualTransformation = PasswordVisualTransformation()`, but omit `keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false)`! In Jetpack Compose, setting `PasswordVisualTransformation()` masks visual glyphs but does NOT automatically set `KeyboardType.Password` or disable keyboard dictionary learning unless `KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false)` is explicitly passed.
+3. In `NotesScreen.kt` (lines 677, 895) and `PasswordsScreen.kt` (lines 717, 839), encrypted note title/body and credential username/notes fields do not set `KeyboardOptions(autoCorrectEnabled = false)`, allowing keyboards to cache sensitive words in user dictionary files on unencrypted storage.
+Recommended Fix:
+1. On every password/secret `OutlinedTextField` across `PasswordsScreen.kt`, `SecondaryScreens.kt`, and `GeneratorAndStrengthScreens.kt`, explicitly pass:
+   `keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false)`
+2. In `GeneratorAndStrengthScreens.kt` (`StrengthAuditTabScreen`), mask `strengthCheckerInput` by default with `PasswordVisualTransformation()` and add a Show/Hide eye icon button in `trailingIcon`.
+3. On note editor and credential editor text fields (`NotesScreen.kt`, `PasswordsScreen.kt`), set `KeyboardOptions(autoCorrectEnabled = false)` so the IME does not persist private note words into its unencrypted personal dictionary.
+Regression Verification:
+Inspect all `OutlinedTextField` calls and verify via Compose UI semantics tests that password fields declare `KeyboardType.Password` and `autoCorrectEnabled = false`.
+
+================================================================================
+FINDING ID: PV-SEC-005
+Title: Android Keystore Biometric Key Generation Omits Explicit `setUserAuthenticationParameters` (API 30+) and Hardware StrongBox Probing
+Category: Platform Security / Biometric Keystore (Phase 3C & Phase 3F)
+Affected Component: `app/src/main/java/com/example/security/BiometricKeystoreManager.kt` (lines 44-69)
+Status: CONFIRMED
+Severity: MEDIUM
+Confidence: High
+CVSS v4.0 Vector & Score: CVSS:4.0/AV:L/AC:H/AT:P/PR:L/UI:N/VC:M/VI:N/VA:N/SC:N/SI:N/SA:N (3.6 Low/Medium)
+CWE / OWASP Mapping: CWE-326, OWASP MASVS-STORAGE-1, MASVS-AUTH-2, Android Keystore Documentation (https://developer.android.com/privacy-and-security/keystore)
+Evidence:
+In `BiometricKeystoreManager.kt` (lines 48-61):
+```kotlin
+            val builder = KeyGenParameterSpec.Builder(
+                KEY_ALIAS_REAL_VAULT_BIO,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .setUserAuthenticationRequired(true)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                builder.setInvalidatedByBiometricEnrollment(true)
+            }
+```
+While `setUserAuthenticationRequired(true)` defaults to requiring authentication on every use, on Android 11+ (API 30+, including the owner's Android 15 target device) Android recommends explicitly calling `builder.setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)` so the Keystore hardware layer strictly enforces Class 3 (`BIOMETRIC_STRONG`) per-operation authentication rather than relying on legacy implicit defaults (which on API < 30 without `setUserAuthenticationValidityDurationSeconds(-1)` only enforce keyguard state).
+Recommended Fix:
+In `BiometricKeyEnvelopeHelper.getEncryptCipherForEnrollment()` (`BiometricKeystoreManager.kt`):
+```kotlin
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                builder.setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+            } else {
+                @Suppress("DEPRECATION")
+                builder.setUserAuthenticationValidityDurationSeconds(-1)
+            }
+```
+Additionally, on Android 9+ (`Build.VERSION.SDK_INT >= Build.VERSION_CODES.P`), optionally attempt StrongBox backing or expose `KeyInfo.isInsideSecurityHardware` / `securityLevel` only when genuinely supported, falling back cleanly to TEE when StrongBox is unavailable.
+Regression Verification:
+Verify biometric enrollment and unlock on API 24–36 without breaking Robolectric JVM fallbacks.
+
+================================================================================
+FINDING ID: PV-SEC-006
+Title: Hardcoded Dummy Password (`"xxxxxxxxxxxxxxxx"`) Used When Disabling Decoy Vault Creates a Forensic Oracle Proving Decoy Mode Was Previously Enabled and Disabled
+Category: Cryptography / Plausible Deniability (Phase 3C & Phase 3D)
+Affected Component: `app/src/main/java/com/example/data/VaultRepository.kt` (lines 945-946)
+Status: CONFIRMED
+Severity: MEDIUM
+Confidence: High
+CVSS v4.0 Vector & Score: CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:M/VI:N/VA:N/SC:N/SI:N/SA:N (4.8 Medium)
+CWE / OWASP Mapping: CWE-798 (Use of Hard-coded Credentials), CWE-330 (Use of Insufficiently Random Values), OWASP MASVS-CRYPTO-1
+Evidence:
+When a brand-new vault is created without Decoy Mode in `initializeNewVault()` (`VaultRepository.kt` lines 140-143), Slot 1's dummy envelope is derived from 16 CSPRNG random characters:
+```kotlin
+val dummySecretChars = ByteArray(16).let { rnd ->
+    CryptoEngine.randomBytes(16).copyInto(rnd)
+    CharArray(16) { idx -> ((rnd[idx].toInt() and 0x7F) + 33).toChar() }
+}
+```
+However, when a user later disables Decoy Mode via `disableDecoyVault()` (`VaultRepository.kt` lines 945-946), Slot 1's replacement dummy envelope is derived from a hardcoded constant password of 16 `'x'` characters:
+```kotlin
+val dummyChars = CharArray(16) { 'x' }
+val kek1 = CryptoEngine.deriveKeyArgon2id(dummyChars, salt1, params0)
+```
+Technical Root Cause & Impact:
+Because the source code of `VaultRepository.kt` is known, any forensic examiner or attacker who extracts `vault_envelopes` from a device can run `CryptoEngine.deriveKeyArgon2id("xxxxxxxxxxxxxxxx".toCharArray(), env1.kdfSalt, params1)` and call `unwrapEnvelopePayloadOrNull()`. If it unwraps successfully with `slotRoleFlag == SLOT_ROLE_DUMMY`, it mathematically proves that the user had previously enabled Decoy Mode and subsequently disabled it—destroying the indistinguishability of the dummy envelope!
+Recommended Fix:
+In `VaultRepository.disableDecoyVault()` (line 945), replace `CharArray(16) { 'x' }` with a CSPRNG random 32-byte dummy secret (or derive `kek1 = CryptoEngine.generateDek()` directly from `SecureRandom`, which also saves an unnecessary Argon2id invocation during `disableDecoyVault()`!). Even better, in both `initializeNewVault()` (when `!hasDecoy`) and `disableDecoyVault()`, generate `val dummySecretChars = CharArray(24) { ... SecureRandom ... }` or use a random 256-bit `kek1 = CryptoEngine.randomBytes(32)` so no password exists that can unwrap a dummy slot!
+Regression Verification:
+Add a unit test in `ExampleRobolectricTest` verifying that after `disableDecoyVault()`, attempting to unwrap Slot 1 with `"xxxxxxxxxxxxxxxx"` returns `null`.
+
+================================================================================
+FINDING ID: PV-SEC-007
+Title: Vault Key (`dekBytes`) and Decrypted Plaintext Records Remain in Memory While App is Backgrounded Until the User Returns to Foreground
+Category: Runtime & Process Memory Security (Phase 5A)
+Affected Component:
+- `app/src/main/java/com/example/security/VaultSessionManager.kt` (lines 235-267)
+- `app/src/main/java/com/example/ui/VaultViewModel.kt` (lines 613-632)
+Status: CONFIRMED
+Severity: MEDIUM
+Confidence: High
+CVSS v4.0 Vector & Score: CVSS:4.0/AV:L/AC:L/AT:P/PR:L/UI:N/VC:M/VI:N/VA:N/SC:N/SI:N/SA:N (4.6 Medium)
+CWE / OWASP Mapping: CWE-316 (Cleartext Storage of Sensitive Information in Memory), CWE-613 (Insufficient Session Expiration), OWASP MASVS-AUTH-3, MASWE-0055
+Evidence:
+In `VaultSessionManager.kt` (lines 235-239):
+```kotlin
+fun onAppBackgrounded(nowMonotonicMs: Long = monotonicClockMs()) {
+    if (_sessionState.value is SessionState.Unlocked) {
+        lastBackgroundedAtMonotonicMs = nowMonotonicMs
+    }
+}
+```
+And in `VaultViewModel.kt` (lines 613-615):
+```kotlin
+fun onAppBackgrounded() {
+    vaultRepository.sessionManager.onAppBackgrounded()
+}
+```
+`lockNow()` is only called inside `onAppForegrounded()` (`VaultSessionManager.kt` lines 247-266) when the user switches back to the app!
+Technical Root Cause & Impact:
+1. Even if the user sets Auto-Lock Timeout to `"Immediate"` (`autoLockTimeoutMs == 0L`) or `"1m"` (`60_000L`), pressing the Home button or switching to another app does NOT lock the vault or wipe `dekBytes` in the background! Instead, the decrypted `dekBytes`, all decrypted `notes` and `credentials` in `VaultUiState`, and any active clipboard or staged backup file remain in process memory for hours until either (a) the screen turns off (if `lockOnScreenOff` is enabled) or (b) the user brings PRIVATE VAULT back to the foreground.
+2. If an attacker dumps memory (via ADB/root/forensic tools) while the app is backgrounded on an unlocked phone, or if the user abandons the SAF file picker for >90 seconds without returning to the app, the vault remains unlocked in memory and the staged `.pvault` file in `cacheDir/backup_staging/` is not deleted until the app is next foregrounded.
+Recommended Fix:
+In `VaultViewModel.onAppBackgrounded()`:
+1. If `_preferences.value.autoLockTimeoutMs <= 0L` AND `!vaultRepository.sessionManager.isInFilePickerTransitionWindow()`, call `lockVaultNow("Vault automatically locked.")` immediately during `ON_STOP`!
+2. If `autoLockTimeoutMs > 0L` (or if in the 90-second file picker window), launch a background timer Job (`backgroundLockJob`) in `viewModelScope` that delays for `effectiveTimeoutMs` (e.g., `maxOf(autoLockTimeoutMs, 90_000L)` when in picker window, or `autoLockTimeoutMs` otherwise) and then proactively calls `lockVaultNow("Vault automatically locked.")` and `deleteStagedBackupFile(_uiState.value.stagedBackupMetadata)` even while the app is still in the background! Cancel `backgroundLockJob` in `onAppForegrounded()` while keeping the monotonic elapsed time check in `onAppForegrounded()` as a fallback in case OS doze suspended the coroutine timer.
+Regression Verification:
+Add a test verifying that when `autoLockTimeoutMs == 0L` (outside a picker window), calling `viewModel.onAppBackgrounded()` immediately transitions `sessionState` to `Locked` and zeroes the DEK without waiting for `onAppForegrounded()`.
+
+================================================================================
+FINDING ID: PV-SEC-008
+Title: Biometric Settings Card in Decoy Session Exposes Active "Enable Biometrics" Button That Fails With Error, Fingerprinting Decoy vs. Real Vault
+Category: Plausible Deniability / Session Isolation (Phase 2 & Section 08 BUG 04)
+Affected Component:
+- `app/src/main/java/com/example/ui/SecondaryScreens.kt` (lines 798-830)
+- `app/src/main/java/com/example/data/VaultRepository.kt` (lines 91-95, 382-391)
+Status: CONFIRMED
+Severity: MEDIUM
+Confidence: High
+CVSS v4.0 Vector & Score: CVSS:4.0/AV:P/AC:L/AT:N/PR:N/UI:N/VC:M/VI:N/VA:N/SC:N/SI:N/SA:N (4.4 Medium)
+CWE / OWASP Mapping: CWE-203 (Observable Discrepancy), CWE-204 (Observable Response Discrepancy)
+Evidence:
+1. In `VaultRepository.kt` (lines 91-95):
+```kotlin
+suspend fun isDecoyModeEnabledForRealSession(sessionId: Long): Boolean = withContext(Dispatchers.IO) {
+    val session = sessionManager.requireActiveSession(sessionId)
+    if (!session.canManageVaultSecurity) return@withContext false
+    session.isDecoyConfiguredInRealVault
+}
+```
+2. In `SecondaryScreens.kt` (lines 798-830), `SecurityAndDecoySettingsScreen` checks `if (uiState.isDecoyModeEnabled)`:
+   - In the Real Vault (`slotId = 0`) when Decoy Mode is active, `uiState.isDecoyModeEnabled` is `true`, so the Biometric Quick-Unlock card hides the button and shows: `"Biometric quick-unlock is disabled while multi-envelope policy is active..."`.
+   - In the Decoy Vault (`slotId = 1`), `isDecoyModeEnabledForRealSession` returns `false`! Therefore, the Biometric Quick-Unlock card shows the active `"Enable Biometrics"` button!
+   - If a coerced user or attacker inside the Decoy Vault taps `"Enable Biometrics"`, `VaultRepository.getCipherForBiometricEnrollment` (`VaultRepository.kt` line 384) throws `IllegalArgumentException("Biometric settings are not available in this session.")`, displaying an error banner that immediately proves the currently unlocked vault is a restricted Decoy session!
+Recommended Fix:
+In `SecondaryScreens.kt` (and `VaultUiState`), never expose an `"Enable Biometrics"` button that throws `"Biometric settings are not available in this session."` inside a Decoy session! Instead:
+- Either require Master Password verification (or check whether `canManageVaultSecurity` is false) and display the exact same neutral message (`"Biometric quick-unlock is disabled under the current key-envelope policy."`) in both a Real Vault with Decoy enabled AND a Decoy Vault session! Because a Decoy session can only ever be unlocked if Decoy Mode is enabled, showing `"Biometric quick-unlock is disabled under the current key-envelope policy."` in BOTH the Real Vault (when Decoy is enabled) and the Decoy Vault makes the two sessions 100% identical in `SecurityAndDecoySettingsScreen`!
+Regression Verification:
+Verify that `uiState` in a Decoy session (`slotId = 1`) renders the exact same Biometric card state as a Real session (`slotId = 0`) that has Decoy Mode enabled.
+
+================================================================================
+FINDING ID: PV-SEC-009
+Title: Built-in Default Folder IDs Stored as Readable Plaintext Constants in `encrypted_records.record_id` Column Leak Active Slot Initialization
+Category: Metadata Minimization / Plausible Deniability (Phase 4)
+Affected Component:
+- `app/src/main/java/com/example/data/VaultDomainModels.kt` (lines 89-90)
+- `app/src/main/java/com/example/data/VaultRepository.kt` (lines 214-225, 1487-1504)
+Status: CONFIRMED
+Severity: LOW
+Confidence: High
+CVSS v4.0 Vector & Score: CVSS:4.0/AV:L/AC:H/AT:N/PR:H/UI:N/VC:L/VI:N/VA:N/SC:N/SI:N/SA:N (2.3 Low)
+CWE / OWASP Mapping: CWE-312 (Cleartext Storage of Sensitive Information), OWASP MASVS-STORAGE-1
+Evidence:
+`VaultFolder.DEFAULT_NOTE_FOLDER_ID = "builtin-folder-notes-general"` and `DEFAULT_CREDENTIAL_FOLDER_ID = "builtin-folder-credentials-general"` (`VaultDomainModels.kt` lines 89-90) are used as the `record_id` primary key in `encrypted_records`.
+1. Every other record in `encrypted_records` uses a random UUID v4 (`record_id`), whereas these two rows have human-readable ASCII primary keys in SQLite.
+2. When a vault is initialized with `hasDecoy = false` (`VaultRepository.kt` lines 214-231), `"builtin-folder-notes-general"` and `"builtin-folder-credentials-general"` are inserted ONLY for `vault_slot = 0`, and NOT for `vault_slot = 1`.
+Recommended Fix:
+Keep `DEFAULT_NOTE_FOLDER_ID` and `DEFAULT_CREDENTIAL_FOLDER_ID` as virtual in-memory default folders in `normalizeFoldersAndLinks()` (`VaultRepository.kt` lines 1342-1375) without writing unencrypted `"builtin-folder-*"` strings as `record_id` rows into `encrypted_records` (or map them to deterministic per-slot HMAC/UUID identifiers). Note that `normalizeFoldersAndLinks()` already synthesizes the two default General folders in memory whenever they are absent from SQLite!
+Regression Verification:
+Inspect `SELECT record_id FROM encrypted_records` and confirm all stored `record_id` values are standard UUIDs.
+
+================================================================================
+FINDING ID: PV-SEC-010
+Title: No Compromise-Recovery Full Vault Rekey Option (Re-Encrypting All Records With a Fresh DEK) When Master Password is Changed After Device/Backup Compromise
+Category: Key Lifecycle & Rotation (Phase 3D & Section 08 BUG 10)
+Affected Component:
+- `app/src/main/java/com/example/data/VaultRepository.kt` (lines 483-588)
+- `app/src/main/java/com/example/ui/SecondaryScreens.kt` (lines 691-771)
+Status: CONFIRMED
+Severity: LOW / HARDENING
+Confidence: High
+CVSS v4.0 Vector & Score: Informational / Defense-in-Depth Hardening
+CWE / OWASP Mapping: NIST SP 800-57 Part 1 Rev. 5 (Key Rotation / Compromise Recovery), OWASP Key Management Cheat Sheet (https://cheatsheetseries.owasp.org/cheatsheets/Key_Management_Cheat_Sheet.html)
+Evidence:
+`VaultRepository.changeActiveVaultPassword()` (`VaultRepository.kt` lines 559-586) unwraps the existing 32-byte `dekBytes` and re-wraps the exact same `dekBytes` under the new password's Argon2id KEK (`newKek`).
+Technical Root Cause & Impact:
+For routine password changes, envelope DEK re-wrapping is fast and safe. However, if an attacker previously obtained a copy of the unlocked DEK or cracked an old backup/database copy, re-wrapping the same DEK does not revoke that old DEK's ability to decrypt newly added records in the database. Furthermore, if biometric unlock was enrolled on Slot 0, `changeActiveVaultPassword` leaves the old `biometricWrappedDek` untouched (which still wraps the same DEK), but does not offer a checkbox to "Also rotate Data Encryption Key (re-encrypt all records and reset biometric key)".
+Recommended Fix:
+Add an optional checkbox `"Full Compromise-Recovery Rekey (generate a brand-new 256-bit DEK and re-encrypt all records in this vault)"` inside the Change Vault Password card in `SecurityAndDecoySettingsScreen` (`SecondaryScreens.kt`). When checked, generate a fresh 32-byte `newDek = CryptoEngine.generateDek()`, re-encrypt all intact records in the active slot with `newDek` inside an atomic `@Transaction` (aborting if any record is corrupted so no unreadable record is lost), clear any biometric wrapper on Slot 0, and update the active session's in-memory DEK.
+Regression Verification:
+Add a test verifying that when Full Rekey is selected during password change, every record in the active slot receives a fresh nonce and ciphertext encrypted under the new DEK.
+
+================================================================================
+FINDING ID: PV-SEC-011
+Title: Passwords Are Not Normalized (Unicode NFC) Before UTF-8 Conversion in Argon2id Key Derivation
+Category: Cryptography / Cross-Device Interoperability (Phase 3A & Phase 3B)
+Affected Component: `app/src/main/java/com/example/security/CryptoEngine.kt` (lines 424-433)
+Status: CONFIRMED
+Severity: LOW
+Confidence: High
+CVSS v4.0 Vector & Score: Informational / Reliability
+CWE / OWASP Mapping: RFC 9106 Section 2 / NIST SP 800-63B Section 5.1.1.2
+Evidence:
+`CryptoEngine.charArrayToUtf8Bytes(chars: CharArray)` (`CryptoEngine.kt` lines 424-433) directly encodes the raw `CharArray` to UTF-8 without Unicode normalization (`java.text.Normalizer.Form.NFC`).
+Impact:
+For ASCII passwords (code points `<= 0x7F`), NFC and NFD are identical (100% backward compatible). However, if a user includes non-ASCII characters (such as accented Latin characters or Indic/Devanagari characters) in a `.pvault` backup password and restores that backup on another device or keyboard whose IME emits decomposed Unicode (NFD) instead of composed Unicode (NFC), Argon2id will derive a different key and fail to decrypt the backup.
+Recommended Fix:
+In `CryptoEngine.charArrayToUtf8Bytes(chars: CharArray)`, if any character in `chars` is non-ASCII (`chars.any { it.code > 0x7F }`), normalize via `Normalizer.normalize(CharBuffer.wrap(chars), Normalizer.Form.NFC)` before UTF-8 encoding (leaving ASCII passwords untouched so existing vaults have zero compatibility change).
+Regression Verification:
+Test that composed (`\u00E9`) and decomposed (`e\u0301`) representations of the same password derive the exact same Argon2id key.
+
+================================================================================
+FINDING ID: PV-SEC-012
+Title: `isMinifyEnabled = false` in Release Build Configuration Ships Unminified Bytecode and Symbols
+Category: Build & Release Hardening (Phase 11 & Section 08 BUG 18)
+Affected Component: `app/build.gradle.kts` (lines 40-47)
+Status: CONFIRMED
+Severity: INFORMATIONAL / HARDENING
+Confidence: High
+CVSS v4.0 Vector & Score: Informational (Defense-in-Depth)
+CWE / OWASP Mapping: OWASP MASVS-RESILIENCE-3
+Evidence:
+In `app/build.gradle.kts` (line 42):
+```kotlin
+    release {
+      isCrunchPngs = false
+      isMinifyEnabled = false
+      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+```
+Although `app/proguard-rules.pro` was prepared with keep rules for Room, BouncyCastle Argon2, and `apksig`, `isMinifyEnabled` is still `false`.
+Recommended Fix:
+Once all functional and signing fixes are verified, enable `isMinifyEnabled = true` and `isShrinkResources = true` for the `release` buildType (or make it configurable and test `assembleRelease` to ensure R8 keeps all Room, Compose, BouncyCastle, and `apksig` classes intact).
+
+
+--------------------------------------------------------------------------------
+8. FUNCTIONAL BUGS, UX DEFECTS & SPECIFICATION GAPS
+--------------------------------------------------------------------------------
+
+================================================================================
+BUG ID: PV-BUG-001 (Cross-Ref: PV-SEC-002)
+Title: Release Signing Fails in GitHub Actions Because `publish-ota.yml` Exports `PV_RELEASE_*` Env Vars While `app/build.gradle.kts` Reads `KEYSTORE_PATH` / `STORE_PASSWORD` / `KEY_PASSWORD`
+Component: `app/build.gradle.kts` (lines 24-30) & `.github/workflows/publish-ota.yml` (lines 113-117)
+Status: CONFIRMED
+Severity: HIGH
+Reproduction Steps:
+1. Trigger `.github/workflows/publish-ota.yml` with `signing_mode = release_keystore`.
+2. Step `Build signed candidate APK` runs `gradle :app:assembleRelease`.
+3. `app/build.gradle.kts` evaluates `System.getenv("KEYSTORE_PATH") ?: "${rootDir}/my-upload-key.jks"`, ignoring `PV_RELEASE_STORE_FILE`.
+Expected vs. Actual Behavior:
+Expected: Gradle uses the keystore decoded by `signing_prep` (`PV_RELEASE_STORE_FILE`).
+Actual: Gradle fails because `my-upload-key.jks` does not exist and `storePassword` is null.
+Fix: Update `app/build.gradle.kts` to read `KEYSTORE_PATH ?: PV_RELEASE_STORE_FILE` (and matching password/alias env vars) and export both in `publish-ota.yml`.
+
+================================================================================
+BUG ID: PV-BUG-002 (Cross-Ref: PV-SEC-003)
+Title: `PasswordGeneratorEngine.kt` Is Completely Unused Dead Code; Active Generator Uses Biased Modulo and Silently Ignores All-Off Toggles
+Component: `PasswordGeneratorEngine.kt`, `OfflinePasswordStrengthEstimator.kt`, `VaultViewModel.kt`, `GeneratorAndStrengthScreens.kt`
+Status: CONFIRMED
+Severity: MEDIUM
+Reproduction Steps:
+1. Open the Generator tab (`GeneratorAndStrengthScreens.kt`).
+2. Toggle OFF all four character switches (Uppercase, Lowercase, Digits, Symbols).
+Expected vs. Actual Behavior:
+Expected: The app displays a clear validation message (`"Enable at least one character category"`) via `PasswordGeneratorEngine.GenerationResult.InvalidConfig` instead of silently generating a weaker password.
+Actual: `OfflinePasswordStrengthEstimator.generatePassword()` silently generates a lowercase+digits password even though all switches on screen are turned OFF!
+Fix: Wire `PasswordGeneratorEngine` into `VaultViewModel` and `GeneratorAndStrengthScreens.kt` so impossible toggle combinations display an explicit validation message and all random selections use `nextUnbiasedInt()`.
+
+================================================================================
+BUG ID: PV-BUG-003
+Title: Opening Any Existing Note Without Editing It Triggers Debounced Autosave After 850ms, Overwriting `updatedAtEpochMs` and Re-Sorting the Note to the Top
+Component: `app/src/main/java/com/example/ui/NotesScreen.kt` (lines 580-597) & `app/src/main/java/com/example/ui/VaultViewModel.kt` (lines 69-87, 723-789)
+Status: CONFIRMED
+Severity: MEDIUM
+Reproduction Steps:
+1. Unlock the vault and sort notes by "Recently Updated" (`SortOrder.UPDATED_DESC`).
+2. Tap on an older note at the bottom of the list to read it. Do NOT type or change anything.
+3. Wait 1 second (850ms) and press Back.
+Expected vs. Actual Behavior:
+Expected: Reading a note without modifying any field must NOT re-encrypt the note, overwrite `updatedAtEpochMs` with `System.currentTimeMillis()`, or jump the note to the top of the list.
+Actual: In `NotesScreen.kt` (lines 581-597), `LaunchedEffect(draft.title, draft.body, ...)` runs immediately when `NoteEditorView` enters composition! Because `draft.title.isNotBlank() || draft.body.isNotBlank()` is true for every existing note, after `delay(850L)` it calls `onSilentAutosave()` -> `commitActiveNoteDraft()`, which sets `updatedAtEpochMs = System.currentTimeMillis()` and re-writes the note to SQLite! Furthermore, pressing Back (`NotesScreen.kt` line 125) ALSO calls `commitActiveNoteDraft()` unconditionally whenever `title.isNotBlank()`!
+Technical Root Cause:
+`NoteEditorDraftState` does not track an `isDirty: Boolean` flag (or compare against the original note fields), so both the 850ms `LaunchedEffect` and the Back button treat an unmodified existing note as having unsaved changes.
+Fix:
+Add `val isDirty: Boolean = false` and `val autosaveStatus: String? = null` to `NoteEditorDraftState`. Set `isDirty = true` only inside `onUpdateDraft` when user-editable fields (`title`, `body`, `format`, `category`, `folderId`, `tagsText`, `colorAccentIndex`, `isPinned`, `isFavorite`, `checklistItems`, `pendingNewChecklistText`) actually change. In `NoteEditorView`'s `LaunchedEffect` and `onCloseWithoutDiscard`, trigger `onSilentAutosave()` ONLY when `draft.isDirty` is `true`!
+
+================================================================================
+BUG ID: PV-BUG-004
+Title: Note Editor Lacks Explicit Saving / Saved Status Indicator Required by Specification
+Component: `app/src/main/java/com/example/ui/NotesScreen.kt` (lines 609-660) & `VaultViewModel.kt` (lines 723-789)
+Status: CONFIRMED
+Severity: LOW
+Evidence & Impact:
+Section 07 of the Master Specification requires: `"Implement autosave through encrypted persistence... Clear saving/saved/error status and safe draft handling. Do not falsely display 'Saved' before persistence has actually succeeded."` Currently, silent autosave (`isSilentAutosave = true` at `VaultViewModel.kt` line 778) suppresses the status banner and shows zero indicator in the Note Editor header (`Saving…` vs `All changes encrypted & saved`).
+Fix:
+Add an `autosaveStatus: NoteAutosaveStatus` (`IDLE`, `UNSAVED_CHANGES`, `SAVING`, `SAVED`, `ERROR`) to `NoteEditorDraftState` and display a compact status badge in the Note Editor top bar that transitions to `SAVED` only after `vaultRepository.saveVaultItem` completes on disk.
+
+================================================================================
+BUG ID: PV-BUG-005
+Title: Generator Screen Lacks Show/Hide Toggle, "Save to Passwords" / "Use in Credential" Action, and Pool/Entropy Explanation Text
+Component: `app/src/main/java/com/example/ui/GeneratorAndStrengthScreens.kt` (lines 45-220)
+Status: CONFIRMED
+Severity: MEDIUM
+Evidence & Impact:
+Section 09 of the Master Specification explicitly requires on the Generator screen:
+1. `"Show/hide and copy controls."` (Currently `generated_password_display` at line 92 is always visible plaintext with no Show/Hide eye icon).
+2. `"An explicit 'Use in credential' or 'Save to Passwords' action."` (Currently there is only `Copy`, `Random Password`, and `Generate 5-Word High-Entropy Passphrase`—there is NO button to save the generated password into a new Credential draft!).
+3. `"A short local explanation of the selected settings."` (`PasswordGeneratorEngine.kt` line 124 generates `configExplanation`, e.g., `"20 characters using Uppercase, Lowercase, Digits, Symbols (excluding look-alike characters) • Pool: 82 symbols"`, but it is never displayed in the UI!).
+4. Passphrase word count selector (4 to 8 words): `uiState.passphraseWordCount` is hardcoded to `5` (`VaultViewModel.kt` line 190) with no UI slider or chips to choose 4, 5, 6, 7, or 8 words.
+Fix:
+In `GeneratorAndStrengthScreen`:
+1. Add a Show/Hide eye icon toggle on the generated password card.
+2. Display the `configExplanation` string from `PasswordGeneratorEngine`.
+3. Add a `"Use in New Saved Password"` button (`testTag("generator_use_in_credential_button")`) that opens `PrimaryTab.PASSWORDS` with a new `CredentialEditorDraftState(password = candidate)`.
+4. Add word-count FilterChips (`4`, `5`, `6`, `7`, `8` words) for the passphrase generator.
+
+================================================================================
+BUG ID: PV-BUG-006
+Title: Missing Destructive Action Confirmation Dialogs Before Permanent Deletion of Notes, Credentials, or Folders
+Component:
+- `app/src/main/java/com/example/ui/NotesScreen.kt` (lines 463-475, 639-650, 1036-1046)
+- `app/src/main/java/com/example/ui/PasswordsScreen.kt` (lines 483-495, 668-679)
+Status: CONFIRMED
+Severity: MEDIUM
+Evidence & Impact:
+Phase 9E of the Audit Prompt and Section 07 of the Master Specification state: `"Permanent deletion requires clear confirmation."`
+Currently:
+1. Tapping the red trash icon on a note in Trash (`perm_delete_note_${note.id}`, `NotesScreen.kt` line 464) or inside the Note Editor (`note_editor_delete_button`, line 641) immediately calls `viewModel.deleteNote(note.id)` and permanently erases the encrypted record from SQLite with ZERO confirmation dialog!
+2. Tapping the red trash icon on a credential in Trash (`perm_delete_credential_${credential.id}`, `PasswordsScreen.kt` line 484) or inside the Credential Editor (`credential_editor_delete_button`, line 670) immediately permanently deletes the credential from SQLite with ZERO confirmation dialog! (Furthermore, deleting from inside the Note/Credential Editor permanently deletes the record instead of moving it to Trash or asking for confirmation!).
+3. Tapping delete on a custom folder (`NotesScreen.kt` line 1037) immediately deletes the folder without a confirmation dialog.
+Fix:
+Add an `AlertDialog` confirmation prompt (`"Delete Permanently?"` / `"Move to Trash or Delete?"`) before executing permanent record deletion in `NotesScreen.kt` and `PasswordsScreen.kt`.
+
+================================================================================
+BUG ID: PV-BUG-007
+Title: Missing Duplicate & Archive Actions for Notes and Credentials, and Missing `accountLabel` Field on Credentials
+Component:
+- `app/src/main/java/com/example/data/VaultDomainModels.kt` (lines 30-72)
+- `app/src/main/java/com/example/ui/NotesScreen.kt`
+- `app/src/main/java/com/example/ui/PasswordsScreen.kt`
+Status: CONFIRMED
+Severity: LOW / COMPLETENESS
+Evidence & Impact:
+1. Section 07 of the Master Specification requires: `"Create, view, edit, duplicate and delete notes... Archive and recoverable trash with a documented retention policy."` Currently `NoteRecord` has `isTrashed` (`VaultDomainModels.kt` line 43), but no `isArchived: Boolean = false` field, no Archive filter chip, and no Duplicate Note action.
+2. Section 08 of the Master Specification requires:
+   - `"Account label, such as Personal or Work."` (Currently `CredentialRecord` has `serviceName`, `username`, `password`, `websiteUrl`, `category`, `folderName`, but no `accountLabel: String = ""` field).
+   - `"Add, view, edit, duplicate, organise, search, archive if appropriate, delete and restore from trash."` (Currently there is no Duplicate Credential button and `search` in `PasswordsScreen.kt` lines 142-147 does not search `accountLabel` or `notes` or custom field labels).
+Fix:
+1. Add backward-compatible optional fields `val isArchived: Boolean = false` to `NoteRecord` and `CredentialRecord`, and `val accountLabel: String = ""` to `CredentialRecord` in `VaultDomainModels.kt` (using `root.optBoolean("isArchived", false)` and `root.optString("accountLabel", "")` in `VaultRecordCodec` so all existing v1 records deserialize with zero migration issues).
+2. Add Duplicate and Archive actions to Note and Credential cards/editors, and include `accountLabel` in the Credential editor, card subtitle, and search filter.
+
+================================================================================
+BUG ID: PV-BUG-008
+Title: Markdown Preview Block (`NotesScreen.kt`) Omits Numbered List Rendering (`1. `, `2. `)
+Component: `app/src/main/java/com/example/ui/NotesScreen.kt` (lines 1063-1103)
+Status: CONFIRMED
+Severity: LOW
+Evidence & Impact:
+Section 07 of the Master Specification requires: `"Lightweight formatting: headings, paragraphs, bullets, numbered lists and checklists."`
+In `NotesScreen.kt` (lines 1068-1100), `MarkdownPreviewBlock` handles `### `, `## `, `# `, `- `, `* `, `> `, and ```` ``` ````, but has no branch for numbered list items (`Regex("^\\d+\\.\\s+.*")`).
+Fix:
+Add numbered list matching (`val numberedMatch = Regex("^(\\d+\\.)\\s+(.*)").find(trimmed)`) in `MarkdownPreviewBlock` with clean indented alignment and bold number prefixes.
+
+================================================================================
+BUG ID: PV-BUG-009
+Title: Backup Export Does Not Offer Section Selection (All Active Vault Data vs. Notes Only vs. Passwords Only)
+Component:
+- `app/src/main/java/com/example/data/PortableBackupEngine.kt`
+- `app/src/main/java/com/example/ui/SecondaryScreens.kt` (lines 205-295)
+- `app/src/main/java/com/example/ui/VaultViewModel.kt` (lines 1222-1319)
+Status: CONFIRMED
+Severity: LOW / COMPLETENESS
+Evidence & Impact:
+Section 17 of the Master Specification states: `"Let the user select all supported active-vault data or Notes/Passwords sections."`
+Currently, `BackupAndRestoreScreen` exports all items in the active slot without filter chips to choose `All Vault Data`, `Notes Only`, or `Passwords Only`.
+Fix:
+Add an `ExportScope` enum (`ALL_DATA`, `NOTES_ONLY`, `PASSWORDS_ONLY`) with `FilterChip` selectors in `BackupAndRestoreScreen` and filter `snapshot.items` accordingly in `VaultRepository.prepareEncryptedBackupBytes` (including relevant `VaultFolder` items for the chosen scope).
+
+================================================================================
+BUG ID: PV-BUG-010
+Title: OTA Updates Screen Lacks Automatic Startup Check Toggle (`autoCheckOtaOnStartup`) and In-Flight Download Cancel Action
+Component:
+- `app/src/main/java/com/example/data/AppPreferencesRepository.kt` (lines 33-55)
+- `app/src/main/java/com/example/ota/OtaUpdateManager.kt` (lines 231-329)
+- `app/src/main/java/com/example/ui/SecondaryScreens.kt` (lines 1219-1546)
+Status: CONFIRMED
+Severity: LOW / COMPLETENESS
+Evidence & Impact:
+1. Section 19 of the Master Specification states: `"Provide a user setting for automatic update checks and a manual Check for Updates action. A rate-limited launch check may be the default with clear disclosure."` Currently, `VaultViewModel` has `private val enableStartupOtaCheck: Boolean = true` (line 207), which is hardcoded to `true` in `VaultViewModel.Factory` with no user-facing Switch in `OtaUpdatesScreen` or `VaultAppPreferences` to disable automatic startup network checks!For a privacy-sensitive user who wants zero startup network connections, this toggle is essential.
+2. Section 12 of the Version 5 Specification states: `"Update Now: start a real download, show progress/cancel/retry, verify, then ask Android to install with user confirmation."` Currently, `OtaState.Downloading` in `MainActivity.kt` (lines 749-773) and `SecondaryScreens.kt` (lines 1375-1390) shows progress but has no `"Cancel Download"` button!
+Fix:
+1. Add `val autoCheckOtaOnStartup: Boolean = true` to `VaultAppPreferences` and `AppPreferencesRepository`, check `currentPrefs.autoCheckOtaOnStartup` in `VaultViewModel.initializeStartupChecks()`, and add a Switch `"Check for updates automatically on app launch"` in `OtaUpdatesScreen`.
+2. Store `downloadJob: Job?` in `VaultViewModel` (or `Call` in `OtaUpdateManager`) and add a `"Cancel"` button to `OtaState.Downloading` in both `MainActivity.kt` and `SecondaryScreens.kt` that cancels the in-flight download, deletes the partial candidate APK file, and returns `otaState` to `Idle` or `UpdateAvailable`.
+
+================================================================================
+BUG ID: PV-BUG-011
+Title: Strength Checker Screen Missing Explicit Offline Breach-Database Limitation Disclosure and Passphrase Entropy Adjustment
+Component: `app/src/main/java/com/example/ui/GeneratorAndStrengthScreens.kt` (lines 246-411)
+Status: CONFIRMED
+Severity: LOW
+Evidence & Impact:
+Section 10 of the Master Specification requires on the Strength Check screen:
+- `"A clear statement that the rating is an estimate and cannot prove safety."`
+- `"With this offline-only design, the app cannot determine whether a password appears in a current online breach database. Label this limitation accurately."`
+- `"If the user chooses a generated replacement, explain that they also need to update that password with the actual service before relying on the new saved value."`
+Currently, `StrengthAuditTabScreen` (`GeneratorAndStrengthScreens.kt` line 283) only says `"Evaluates entropy, keyboard walks, repeated sequences, common dictionary stems, and local reuse with zero network calls"`, omitting the explicit disclosure that offline estimation cannot check online breach databases and that changing a saved password in the vault requires updating it on the external service as well.
+Fix:
+Add a clear disclosure notice on `StrengthAuditTabScreen` and inside `CredentialEditorView` when generating a replacement password.
+
+================================================================================
+BUG ID: PV-BUG-012
+Title: Stale Version Numbers in `PRIVATE_VAULT_ARCHITECTURE_AND_HANDOVER.md` (`v1.0.1` / `versionCode = 2`) and Misleading `MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API` in `metadata.json`
+Component:
+- `PRIVATE_VAULT_ARCHITECTURE_AND_HANDOVER.md` (lines 1, 6)
+- `metadata.json` (line 5)
+- `app/src/main/java/com/example/data/PortableBackupEngine.kt` (line 57)
+- `app/src/main/java/com/example/data/VaultRepository.kt` (line 1248)
+Status: CONFIRMED
+Severity: LOW
+Evidence:
+1. `app/build.gradle.kts` (lines 15-16) sets `versionCode = 4` and `versionName = "1.0.3"`, but `PRIVATE_VAULT_ARCHITECTURE_AND_HANDOVER.md` (lines 1, 6) and default parameters in `PortableBackupEngine.kt` (line 57) and `VaultRepository.kt` (line 1248) still say `"1.0.1"`.
+2. `metadata.json` (line 5) contains `"majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]`, which contradicts the 100% offline non-AI architecture.
+Fix:
+Update default version strings to `BuildConfig.VERSION_NAME` (`"1.0.3"`), update `PRIVATE_VAULT_ARCHITECTURE_AND_HANDOVER.md`, and set `"majorCapabilities": []` in `metadata.json`.
+
+================================================================================
+BUG ID: PV-BUG-013
+Title: Missing `gradlew`, `gradlew.bat`, and `gradle/wrapper/gradle-wrapper.jar` in Exported Project Archive
+Component: Project Root & `gradle/wrapper/`
+Status: CONFIRMED
+Severity: LOW (Build Portability)
+Evidence:
+The uploaded archive contains `gradle/wrapper/gradle-wrapper.properties` (specifying `gradle-9.3.1-bin.zip`), `.github/workflows/build-apk.yml` (which uses `gradle/actions/setup-gradle@v4` with `gradle-version: '9.3.1'`), and `.github/workflows/publish-ota.yml`. However, `gradlew`, `gradlew.bat`, and `gradle/wrapper/gradle-wrapper.jar` are absent from the ZIP. While GitHub Actions builds succeed because `setup-gradle@v4` provisions Gradle 9.3.1 directly, a developer cloning the repo locally cannot run `./gradlew` without a local Gradle installation.
+Fix:
+Generate or include standard Gradle wrapper scripts (`gradlew`, `gradlew.bat`) or document `gradle wrapper --gradle-version 9.3.1` in the handover instructions.
+
+================================================================================
+BUG ID: PV-BUG-014
+Title: Unused Dependency `androidx.navigation:navigation-compose` in `app/build.gradle.kts`
+Component: `app/build.gradle.kts` (line 100) & `gradle/libs.versions.toml` (lines 14, 48)
+Status: CONFIRMED
+Severity: INFORMATIONAL
+Evidence:
+`implementation(libs.androidx.navigation.compose)` is declared in `app/build.gradle.kts` (line 100), but `MainActivity.kt` manages all primary tabs and secondary screens cleanly via `VaultUiState` (`PrimaryTab` and `SecondaryDestination` enums) without using `NavHost` or `NavController`. Removing unused dependencies reduces APK size and attack surface.
+
+
+--------------------------------------------------------------------------------
+9. VERIFICATION OF PREVIOUSLY REPORTED 28 HISTORICAL ISSUES (N01–N08 & BUG 01–BUG 20)
+--------------------------------------------------------------------------------
+
+To ensure complete traceability across your previous audit reports (`PRIVATE_VAULT_VERSION_5_Consolidated_Upgrade_Prompt`), every one of the 28 historical issues was inspected against the current code in `Private-vault-android--main.zip`:
+
+| Historical ID | Summary of Issue | Status in Current Code (`v1.0.3` / `code 4`) | Source Evidence & Remaining Gap (If Any) |
+| :--- | :--- | :--- | :--- |
+| **N01** | Cross-vault primary key collision in `encrypted_records` | **FIXED IN SOURCE** | `VaultEntities.kt` line 66 defines `primaryKeys = ["vault_slot", "record_id"]`; `PrivateVaultDatabase.kt` lines 143-169 define `MIGRATION_2_3`. |
+| **N02** | Silent omission/deletion of corrupted records during export/merge | **FIXED IN SOURCE** | `VaultRepository.kt` lines 60-63, 1251-1257, 1299-1304 throw `VaultRecordIntegrityException` on corrupted records unless Recovery Export is explicitly checked. |
+| **N03** | Late unlock reopens vault after screen-off/manual lock | **FIXED IN SOURCE** | `VaultSessionManager.kt` lines 81, 126-151 bind unlock to `authRequestGenerationCounter` incremented on every `lockNow()`. |
+| **N04** | Null `getPackageArchiveInfo` accepted as valid in OTA verifier | **FIXED IN SOURCE** | `OtaUpdateManager.kt` lines 451-454 fail closed with `SecurityException` when `parseArchiveInfo` returns `null`. |
+| **N05** | Decoy password reconfiguration erases existing decoy data | **FIXED IN SOURCE** | `VaultRepository.kt` lines 795-901 implement `rotateDecoyPasswordPreservingRecords`, separating non-destructive rotation from destructive reset. |
+| **N06** | Non-atomic multi-step DAO mutations during setup/decoy changes | **FIXED IN SOURCE** | `PrivateVaultDatabase.kt` lines 68-111 wrap setup, decoy provisioning, and decoy disable in `@Transaction` methods. |
+| **N07** | Build reproducibility, debug/release separation & signing | **PARTIALLY FIXED — HAS CRITICAL BUGS** | `publish-ota.yml` was added, BUT `debug.keystore.base64` is still committed in `.aistudio/` (`PV-SEC-001`) and `PV_RELEASE_*` env vars mismatch `app/build.gradle.kts` (`PV-SEC-002` / `PV-BUG-001`). |
+| **N08** | Secret custom fields trimmed and displayed in plaintext | **FIXED IN SOURCE** | `PasswordsScreen.kt` lines 865-901, 948-950, 986 mask secret custom fields by default and preserve exact untrimmed values. |
+| **BUG 01** | Legacy 16-bit `requestCode` crash on `CreateDocument`/`OpenDocument` | **FIXED IN SOURCE** | `gradle/libs.versions.toml` line 28 and `app/build.gradle.kts` line 88 pin `androidx.fragment:fragment-ktx:1.8.6`. |
+| **BUG 02** | Picker state lost on navigation and streams opened on main thread | **FIXED IN SOURCE** | Launchers registered at root `MainActivity.kt` lines 249-259; streams run on `Dispatchers.IO` inside `use {}` (`VaultViewModel.kt` lines 1374-1388, 1507-1513). |
+| **BUG 03** | Decoy state inferred from Slot 1 record count (0 records = disabled) | **FIXED IN SOURCE** | `CryptoEngine.kt` line 53 & `VaultRepository.kt` line 149 store `decoyPolicyFlag` inside Slot 0's authenticated 56-byte inner envelope. |
+| **BUG 04** | Settings screen fingerprints Real vs. Decoy vault | **PARTIALLY FIXED — GAP REMAINS** | Password rotation and gated policy sheet use generic labels, BUT the Biometric card in `SecondaryScreens.kt` line 798 still shows `"Enable Biometrics"` in a Decoy session while hiding it in a Real session (`PV-SEC-008`), and `disableDecoyVault` uses hardcoded `'x'` password (`PV-SEC-006`). |
+| **BUG 05** | Concurrent Argon2id unlock spikes and restartable backoff | **FIXED IN SOURCE** | `kdfMutex` serializes all Argon2id calls (`VaultRepository.kt` line 38); `AppPreferencesRepository.kt` lines 184-202 persist backoff across restarts clamped to 30s. |
+| **BUG 06** | Unapproved OTA URLs and inconsistent CI signer | **FIXED IN CLIENT / BROKEN IN CI** | `OtaUpdateManager.kt` lines 625-687 enforce `/tpeditz/Private-vault-updates/` in production; CI release signing env vars need fix (`PV-SEC-002`). |
+| **BUG 07** | Clipboard digest wiped before clear succeeds on Android 10+ | **FIXED IN SOURCE** | `SensitiveClipboardManager.kt` lines 136-197 retain `pendingClearDigest` when background clipboard reads are blocked and retry on foreground/focus. |
+| **BUG 08** | Secret `String` and memory lifetime on lock | **PARTIALLY FIXED — GAP REMAINS** | Crypto boundaries wipe `ByteArray`/`CharArray` in `finally`, and `rememberSaveable` was removed from password fields, BUT `onAppBackgrounded()` does not lock or wipe memory until the user returns to foreground (`PV-SEC-007`), and IME caching is not disabled (`PV-SEC-004`). |
+| **BUG 09** | Routine unlock telemetry saved to DataStore | **FIXED IN SOURCE** | `AppPreferencesRepository.kt` lines 215-227 only save manual benchmark runs without timestamps. |
+| **BUG 10** | Ordinary password change vs. compromise recovery & biometric errors | **PARTIALLY FIXED — GAP REMAINS** | Biometric invalidation is handled cleanly (`VaultViewModel.kt` lines 550-560), but there is still no Compromise-Recovery Full Rekey option (`PV-SEC-010`). |
+| **BUG 11** | Decoy session can disable `FLAG_SECURE` screenshot blocking | **FIXED IN SOURCE** | `MainActivity.kt` line 164 enforces `FLAG_SECURE` while locked, and `VaultViewModel.kt` lines 2056-2063 block disabling `blockScreenshots` from a Decoy session. |
+| **BUG 12** | Editor drafts lost on screen rotation / keyboard resize | **FIXED IN SOURCE** | `activeNoteDraft` and `activeCredentialDraft` are held in session-scoped `VaultUiState` (`VaultViewModel.kt` lines 175-176). |
+| **BUG 13** | Save & Done closes editor before save succeeds | **PARTIALLY FIXED — NEW BUG INTRODUCED** | `commitActiveNoteDraft` waits for `saveVaultItem` before closing, BUT `NoteEditorView` (`NotesScreen.kt` line 581) triggers debounced autosave 850ms after opening any existing note even when nothing was edited (`PV-BUG-003`)! |
+| **BUG 14** | Folder names used as IDs and missing rename/delete management | **FIXED IN SOURCE** | `VaultFolder` uses stable `folderId`, `"All"` is reserved, and `FolderManagementDialog` supports create/rename/delete with reassignment to `"General"`. |
+| **BUG 15** | Pending checklist/custom field inputs silently dropped on save | **FIXED IN SOURCE** | `VaultViewModel.kt` lines 730-734 and 909-929 commit pending checklist items and validate/commit pending custom fields. |
+| **BUG 16** | Locked OTA update has invisible progress and broken permission return | **FIXED IN SOURCE** | `LockedOtaStatusDialogIfActive` (`MainActivity.kt` lines 741-880) and `refreshInstallPermissionState()` (`OtaUpdateManager.kt` lines 212-225) handle locked progress and settings return. |
+| **BUG 17** | Double startup manifest network request | **FIXED IN SOURCE** | `VaultViewModel.kt` lines 326-338 fetch once with `showDialogIfAvailable = false` and toggle `setPromptDialogVisible(true)` in memory. |
+| **BUG 18** | R8 minification disabled & `com.example` namespace | **STILL OPEN (R8 DISABLED)** | `app/build.gradle.kts` line 42 still has `isMinifyEnabled = false` (`PV-SEC-012`). |
+| **BUG 19** | Weak password estimator heuristics (`"maverick"` typo, single stem) | **PARTIALLY FIXED — GAP REMAINS** | `"maverick"` spelling and multi-stem penalties were fixed (`OfflinePasswordStrengthEstimator.kt` lines 57, 150-159), BUT generated passphrases still receive inflated 200+ bit character-pool entropy (`PV-SEC-003`). |
+| **BUG 20** | Credential pinning missing in UI and orphan clipboard coroutine scope | **FIXED IN SOURCE** | `PasswordsScreen.kt` lines 159-168, 443-452, 654-660 support credential pinning, and `SensitiveClipboardManager` uses `viewModelScope` with `shutdown()` in `onCleared()`. |
+
+
+--------------------------------------------------------------------------------
+10. BACKEND, API, NETWORK & OTA UPDATE SECURITY REVIEW
+--------------------------------------------------------------------------------
+
+- Transport Security: `app/src/main/res/xml/network_security_config.xml` sets `<base-config cleartextTrafficPermitted="false">` trusting only system root certificates.
+- Endpoint & Redirect Validation (`OtaUpdateManager.kt` lines 334-382, 625-687):
+  - Disables automatic OkHttp redirects (`followRedirects(false)`, `followSslRedirects(false)`).
+  - Validates every hop BEFORE sending the HTTP request: requires `https` scheme, port `-1` or `443`, `userInfo == null`, no `..` or `%2e%2e` path segments, and host in `ALLOWED_HOSTS`.
+  - In production builds (`!BuildConfig.DEBUG`), initial manifest URLs must start with `https://raw.githubusercontent.com/tpeditz/Private-vault-updates/` and initial APK URLs must start with `https://github.com/tpeditz/Private-vault-updates/releases/download/` or `https://raw.githubusercontent.com/tpeditz/Private-vault-updates/`. Redirect hops may resolve to `objects.githubusercontent.com` or `release-assets.githubusercontent.com`.
+- Manifest Parsing (`OtaUpdateManager.kt` lines 545-618):
+  - Enforces a 64 KiB cap (`MAX_MANIFEST_JSON_BYTES`), rejects duplicate JSON keys via regex scan, supports dual-schema compatibility (`apkUrl` and `downloadUrl`, rejecting conflicting values), validates 64-hex-char SHA-256 format, and bounds `fileSizeBytes` to `0..150 MiB`.
+  - Minor Parser Note: `requireNoDuplicateTopLevelJsonKeys` (`OtaUpdateManager.kt` line 705) scans the entire JSON string for `"key":` matches. Since `update.json` is flat (no nested objects), this works unless `releaseNotes` happens to contain a quoted substring followed by a colon like `"note":` that matches a top-level key name. Scoping duplicate-key detection to top-level keys outside string literals (or parsing with a streaming `JsonReader`) avoids false positives if release notes contain colons.
+
+
+--------------------------------------------------------------------------------
+11. PRIVACY & DATA GOVERNANCE REVIEW
+--------------------------------------------------------------------------------
+
+- Third-Party SDK Inventory: Zero analytics, zero ad networks, zero crash-reporting SDKs, zero Firebase/Google Play Services libraries, and zero AI/LLM SDKs are present in `gradle/libs.versions.toml` or `app/build.gradle.kts`.
+- Permissions Minimized: Only `INTERNET`, `REQUEST_INSTALL_PACKAGES`, and `USE_BIOMETRIC` are declared in `AndroidManifest.xml`. No storage, camera, microphone, location, contacts, or phone state permissions are requested.
+- External Link Privacy (`SecondaryScreens.kt` lines 1691-1730): Tapping "Open Telegram" (`https://t.me/Tp_Editz`) or "Open Instagram" (`https://www.instagram.com/tp_ediitz/`) displays a confirmation dialog that locks the active vault (`viewModel.lockVaultNow`) before firing `Intent(Intent.ACTION_VIEW)` with clean URLs free of tracking parameters (`igshid` removed).
+- Local Privacy Gaps to Remediate:
+  1. Disable keyboard dictionary learning (`autoCorrectEnabled = false`) across all vault text fields and mask `strengthCheckerInput` (`PV-SEC-004`).
+  2. Proactively lock and wipe memory in the background when `autoLockTimeoutMs` expires (`PV-SEC-007`).
+
+
+--------------------------------------------------------------------------------
+12. STANDARDS COVERAGE MATRIX (OWASP MASVS v2.1 / MASTG / NIST / RFC 9106)
+--------------------------------------------------------------------------------
+
+| Standard / Control ID | Requirement Description | Result | Evidence & Identified Gap | Recommended Action |
+| :--- | :--- | :--- | :--- | :--- |
+| **MASVS-STORAGE-1** | The app securely stores sensitive data in local storage. | **PARTIAL** | All notes/credentials/folders are AES-256-GCM encrypted in SQLite; however, default folder IDs are readable (`PV-SEC-009`) and `.aistudio/` contains `debug.keystore.base64` (`PV-SEC-001`). | Remove `debug.keystore.base64` (`PV-SEC-001`) and keep default folder IDs virtual (`PV-SEC-009`). |
+| **MASVS-STORAGE-2** | The app prevents leakage of sensitive data through platform mechanisms (backups, clipboard, keyboard, logs). | **PARTIAL** | Auto Backup disabled, `FLAG_SECURE` enforced, clipboard uses `EXTRA_IS_SENSITIVE` + ownership check; however, IME `autoCorrectEnabled = false` and `KeyboardType.Password` are missing on several fields (`PV-SEC-004`). | Add `KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password)` and mask Strength Checker input (`PV-SEC-004`). |
+| **MASVS-CRYPTO-1** | The app employs current strong cryptography according to industry best practices. | **PARTIAL** | Argon2id v1.3 + AES-256-GCM with 96-bit CSPRNG nonces and AAD binding are strong; however, `OfflinePasswordStrengthEstimator.generatePassword()` has modulo bias while unbiased `PasswordGeneratorEngine` is unused (`PV-SEC-003`). | Wire `PasswordGeneratorEngine` into `VaultViewModel` and `PasswordsScreen` (`PV-SEC-003`). |
+| **MASVS-CRYPTO-2** | The app performs key management according to industry best practices. | **PARTIAL** | Two-slot 72-byte envelopes and Keystore wrapping are well-structured; however, `disableDecoyVault` uses hardcoded `'x'` password (`PV-SEC-006`) and Compromise Rekey is missing (`PV-SEC-010`). | Use CSPRNG random key in `disableDecoyVault` (`PV-SEC-006`), add explicit API 30+ biometric auth params (`PV-SEC-005`), and add Full Rekey option (`PV-SEC-010`). |
+| **MASVS-AUTH-1 / AUTH-2** | The app uses secure authentication and biometric key binding. | **PARTIAL** | `BiometricPrompt.CryptoObject(cipher)` is used; however, Decoy session exposes an `"Enable Biometrics"` button that fails on tap (`PV-SEC-008`). | Render identical disabled biometric card state in Decoy session (`PV-SEC-008`). |
+| **MASVS-AUTH-3** | The app terminates sessions securely on lock/timeout. | **PARTIAL** | `authRequestGeneration` prevents late KDF unlock (`N03`); however, `onAppBackgrounded()` waits until `onAppForegrounded()` to lock (`PV-SEC-007`). | Lock immediately on background when `autoLockTimeoutMs == 0L` and schedule a background coroutine timer for non-zero timeouts (`PV-SEC-007`). |
+| **MASVS-NETWORK-1** | The app secures network traffic using TLS and validates endpoints. | **PASS** | `cleartextTrafficPermitted="false"`, hop-by-hop HTTPS redirect validation in `OtaUpdateManager.kt`. | Add startup OTA check toggle and cancel button (`PV-BUG-010`). |
+| **MASVS-PLATFORM-1 / 2** | Minimal permissions, safe IPC/FileProvider, safe WebViews (none used). | **PASS** | Only `MainActivity` is exported; `FileProvider` is non-exported and scoped to `cache/ota_updates/`. | None required. |
+| **MASVS-CODE-1 / 2** | Signed release builds with valid certificates and up-to-date dependencies. | **FAIL** | `publish-ota.yml` env vars `PV_RELEASE_*` do not match `app/build.gradle.kts` (`PV-SEC-002` / `PV-BUG-001`), and `debug.keystore.base64` is committed (`PV-SEC-001`). | Fix `app/build.gradle.kts` and `publish-ota.yml` env vars and remove committed keystore (`PV-SEC-001`, `PV-SEC-002`). |
+| **MASVS-RESILIENCE-1 / 3** | Obfuscation / minification and defense-in-depth. | **PARTIAL** | `proguard-rules.pro` exists, but `isMinifyEnabled = false` in `app/build.gradle.kts` (`PV-SEC-012`). | Enable `isMinifyEnabled = true` for verified release builds (`PV-SEC-012`). |
+
+
+--------------------------------------------------------------------------------
+13. TEST EXECUTION SUMMARY & LIMITATIONS
+--------------------------------------------------------------------------------
+
+13.1 Tests Executed During This Audit
+1. Full Static Source & Architecture Inspection (Executed):
+   - Inspected all 18 Kotlin source files (`MainActivity.kt`, `AppPreferencesRepository.kt`, `PortableBackupEngine.kt`, `PrivateVaultDatabase.kt`, `VaultDomainModels.kt`, `VaultEntities.kt`, `VaultRepository.kt`, `OtaUpdateManager.kt`, `BiometricKeystoreManager.kt`, `CryptoEngine.kt`, `OfflinePasswordStrengthEstimator.kt`, `PasswordGeneratorEngine.kt`, `SensitiveClipboardManager.kt`, `VaultSessionManager.kt`, `GeneratorAndStrengthScreens.kt`, `NotesScreen.kt`, `PasswordsScreen.kt`, `SecondaryScreens.kt`, `SetupAndUnlockScreens.kt`, `VaultViewModel.kt`, `Color.kt`, `Theme.kt`, `Type.kt`), 3 test classes (`ExampleRobolectricTest.kt`, `ExampleUnitTest.kt`, `ExampleInstrumentedTest.kt`), Gradle scripts, XML rules, and GitHub Actions workflows.
+2. Cryptographic Keystore Artifact Inspection (Executed):
+   - Decoded `.aistudio/artifacts/brain/2a19f8cf-e32e-491f-8c69-a22bba937042/debug.keystore.base64` and ran `keytool -list -v` on the sandbox VM, confirming the exposed PKCS#12 private key (`SHA256: 12:94:3A:91:69:28:04:92:69:C0:2D:8D:97:1B:59:67:A0:41:FB:6C:7D:B2:5A:12:79:D3:41:4E:45:CF:B5:61`).
+3. Snapshot Diff Analysis (Executed):
+   - Ran `diff -ru` between the earlier baseline archive and the current `Private-vault-android--main.zip` (`e5d30f3e242dc5f9acab6bcbb2ddd4949c280939345799f1481f5a024daf958a`), verifying all changes introduced in Version 5.
+
+13.2 Tests Not Executed in This Sandbox & How to Run Them
+1. Gradle / Robolectric Test Suite (`gradle :app:testDebugUnitTest`):
+   - Status: `NOT EXECUTED IN THIS SANDBOX` (Gradle binary and `gradle-wrapper.jar` are not pre-installed in this offline container).
+   - How to Run: In Google AI Studio / Android Studio or GitHub Actions (`publish-ota.yml` line 108), run `./gradlew :app:testDebugUnitTest`.
+2. Direct Binary Inspection of `PRIVATE VAULT.apk` (`23,559,281` bytes on Google Drive):
+   - Status: `METADATA VERIFIED; BINARY NOT DOWNLOADED` (File size 23.56 MB exceeds the 10 MB MCP download tool ceiling).
+   - Owner Verification Command: Run `apksigner verify --print-certs -v "PRIVATE VAULT.apk"` and `aapt2 dump badging "PRIVATE VAULT.apk"` to confirm `versionCode`, `versionName`, and whether the installed APK is signed with the debug certificate (`12:94:3A:91...`) or a release certificate.
+3. Physical Android 15 / Realme 11 Pro+ Device Verification:
+   - Status: `NOT TESTED (Requires Physical Device)`.
+
+
+--------------------------------------------------------------------------------
+14. PRIORITIZED REMEDIATION ROADMAP
+--------------------------------------------------------------------------------
+
+Phase 1 — Immediate Blockers (Before Next Build / Release):
+1. `PV-SEC-001`: Delete `.aistudio/artifacts/brain/.../debug.keystore.base64` (and `.metadata.json`), update `.gitignore`, and remove `./debug.keystore.base64` fallbacks from `.github/workflows/build-apk.yml` and `publish-ota.yml`.
+2. `PV-SEC-002` / `PV-BUG-001`: Fix the release signing environment variable mismatch between `app/build.gradle.kts` (`KEYSTORE_PATH` vs `PV_RELEASE_STORE_FILE`) and `.github/workflows/publish-ota.yml`.
+3. `PV-BUG-003`: Fix `NoteEditorView` in `NotesScreen.kt` so opening an existing note without editing it does NOT trigger debounced autosave after 850ms or overwrite `updatedAtEpochMs`, and add an explicit `Saving…` / `Saved` status indicator (`PV-BUG-004`).
+4. `PV-SEC-007`: Update `VaultViewModel.onAppBackgrounded()` and `VaultSessionManager` to lock immediately on `ON_STOP` when `autoLockTimeoutMs == 0L` (outside the SAF picker window) and schedule a background coroutine timer for non-zero timeouts so `dekBytes` and plaintext records are wiped in the background without waiting for `onAppForegrounded()`.
+
+Phase 2 — High-Priority Security & Plausible Deniability Fixes:
+5. `PV-SEC-006`: Replace `val dummyChars = CharArray(16) { 'x' }` in `VaultRepository.disableDecoyVault()` with CSPRNG random bytes so nobody can test `"xxxxxxxxxxxxxxxx"` against Slot 1 to prove Decoy Mode was disabled.
+6. `PV-SEC-008`: Make the Biometric Quick-Unlock card in `SecurityAndDecoySettingsScreen` (`SecondaryScreens.kt`) display the exact same disabled state in a Decoy session (`slotId = 1`) as in a Real session with Decoy enabled (`slotId = 0`), eliminating the Decoy session error oracle.
+7. `PV-SEC-003` / `PV-BUG-002`: Wire the unbiased `PasswordGeneratorEngine` into `VaultViewModel` and `PasswordsScreen`, reject all-off character class toggles with a clear validation message, and fix passphrase entropy calculation in `OfflinePasswordStrengthEstimator`.
+8. `PV-SEC-004`: Add `KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false)` to all password/secret inputs, add `KeyboardOptions(autoCorrectEnabled = false)` to note/credential editors, and mask `strengthCheckerInput` by default with a Show/Hide toggle.
+9. `PV-SEC-005`: Add `setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)` on API 30+ (and `setUserAuthenticationValidityDurationSeconds(-1)` on API 24-29) in `BiometricKeystoreManager.kt`.
+
+Phase 3 — Product Completeness & Hardening:
+10. `PV-BUG-005`: Add Show/Hide toggle, pool/entropy explanation text, passphrase word-count selector (4-8 words), and `"Use in New Saved Password"` button to `GeneratorAndStrengthScreen`.
+11. `PV-BUG-006`: Add confirmation `AlertDialog`s before permanent deletion of notes, credentials, or folders.
+12. `PV-BUG-007` & `PV-BUG-008`: Add `accountLabel` to `CredentialRecord`, add `isArchived` and Duplicate/Archive actions to Notes and Credentials, and add numbered list (`1. `) rendering to `MarkdownPreviewBlock`.
+13. `PV-BUG-009` & `PV-BUG-010` & `PV-BUG-011`: Add Backup Export section filter (`All`, `Notes Only`, `Passwords Only`), add Automatic Startup OTA Check toggle (`autoCheckOtaOnStartup`) and Download Cancel button, and add offline breach-check limitation disclosures.
+14. `PV-SEC-009`, `PV-SEC-010`, `PV-SEC-011`, `PV-SEC-012`, `PV-BUG-012`: Keep default folder IDs virtual in memory, add Compromise-Recovery Full Rekey option on password change, apply NFC normalization for non-ASCII passwords, enable R8 minification once tested, and clean up `metadata.json` and version strings.
+
+
+--------------------------------------------------------------------------------
+15. REGRESSION TEST PLAN
+--------------------------------------------------------------------------------
+
+Every fix in Section 14 must be backed by automated unit/Robolectric tests in `ExampleRobolectricTest.kt`:
+1. `test_PV_SEC_006_disableDecoyDoesNotUsePredictableDummyPassword`: Verify that after calling `disableDecoyVault()`, deriving a key from `"xxxxxxxxxxxxxxxx"` fails to unwrap Slot 1.
+2. `test_PV_SEC_007_backgroundAutoLockWipesDekWhileInBackground`: Verify that calling `viewModel.onAppBackgrounded()` when `autoLockTimeoutMs == 0L` (and not in file picker window) immediately transitions `sessionState` to `Locked` and wipes `dekBytes` without calling `onAppForegrounded()`.
+3. `test_PV_SEC_008_decoySessionBiometricCardIndistinguishableFromRealWithDecoy`: Verify that unlocking Slot 1 (Decoy) sets `uiState` such that `SecurityAndDecoySettingsScreen` renders the disabled biometric policy state rather than an active `"Enable Biometrics"` button.
+4. `test_PV_SEC_003_unbiasedGeneratorRejectsAllOffAndPassphraseEntropyRealistic`: Verify `PasswordGeneratorEngine` is used by `VaultViewModel`, all-off toggles surface an error, and a 5-word passphrase from the 202-word list reports realistic entropy (~45 bits) rather than >200 bits.
+5. `test_PV_BUG_003_viewingExistingNoteWithoutEditsDoesNotModifyUpdatedAt`: Open an existing `NoteRecord` in `VaultViewModel.openExistingNoteDraft(note)`, wait >900ms, close without editing, and assert `updatedAtEpochMs` in SQLite is unchanged.
+6. `test_PV_SEC_010_compromiseRecoveryFullRekeyRotatesDekAndReEncryptsRecords`: Execute full rekey password rotation and verify all active-slot records have new nonces/ciphertexts and decrypt cleanly under the new DEK.
+7. `test_PV_SEC_011_unicodeNfcPasswordNormalization`: Verify that a password containing composed `\u00E9` and decomposed `e\u0301` derives the identical 32-byte key in `CryptoEngine.deriveKeyArgon2id`.
+
+
+--------------------------------------------------------------------------------
+16. OPEN QUESTIONS AND REQUIRED EVIDENCE
+--------------------------------------------------------------------------------
+
+Only two environment-specific items require owner verification outside the source code:
+1. Installed Baseline Signer Identity on Phone: Before publishing an OTA update to `tpeditz/Private-vault-updates`, verify whether the APK currently installed on your phone (`PRIVATE VAULT.apk`) was signed with the debug certificate (`12:94:3A:91:69:28:04:92:69:C0:2D:8D:97:1B:59:67:A0:41:FB:6C:7D:B2:5A:12:79:D3:41:4E:45:CF:B5:61`) or a custom release key. Remember: Android and `OtaUpdateManager` require an in-place update to be signed by the same certificate as the installed app. To transition to a fresh uncompromised release key (`PV-SEC-001`), export a `.pvault` encrypted backup first, install the new release-signed APK, and restore the `.pvault` backup.
+2. GitHub Actions Repository Secrets: Confirm in `https://github.com/tpeditz/Private-vault-android-/settings/secrets/actions` that `OTA_REPO_TOKEN`, `RELEASE_KEYSTORE_BASE64`, `RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`, and `RELEASE_KEY_PASSWORD` are populated before triggering `publish-ota.yml`.
+
+
+--------------------------------------------------------------------------------
+17. FINAL RELEASE READINESS OPINION
+--------------------------------------------------------------------------------
+
+Conclusion: **NOT READY FOR PRODUCTION RELEASE UNTIL PHASE 1 & PHASE 2 FIXES ARE APPLIED (READY FOR AUTOMATED REPAIR IN GOOGLE AI STUDIO)**
+
+- The core cryptographic foundation (Argon2id v1.3 + AES-256-GCM 72-byte dual envelopes + composite primary key `(vault_slot, record_id)` + `.pvault` authenticated backups + `apksig` OTA verification) is well-engineered and substantially stronger than earlier iterations.
+- However, the presence of the private signing key in `.aistudio/artifacts/brain/.../debug.keystore.base64` (`PV-SEC-001`), the environment variable mismatch breaking `release_keystore` builds in `publish-ota.yml` (`PV-SEC-002` / `PV-BUG-001`), the hardcoded `'x'` dummy password in `disableDecoyVault` (`PV-SEC-006`), the background auto-lock memory retention (`PV-SEC-007`), the Decoy biometric settings oracle (`PV-SEC-008`), the unedited-note autosave timestamp overwrite (`PV-BUG-003`), and missing keyboard privacy flags (`PV-SEC-004`) must be fixed before publishing a production release.
+- Copy and paste **PART II** below directly into Google AI Studio (alongside your project) to automatically apply all repairs.
+
+
+================================================================================
+PART II — COPY-PASTE PROMPT FOR GOOGLE AI STUDIO (TO EDIT & FIX THE APP)
+================================================================================
+
+--- BEGIN COPY-PASTE PROMPT FOR GOOGLE AI STUDIO ---
+
+ROLE & OBJECTIVE
+You are my Senior Android Security Architect, Cryptography Engineer, Jetpack Compose UI/UX Developer, and QA/Release Engineer. I have performed a full security, cryptography, privacy, and functional bug audit of my native Android application **PRIVATE VAULT** (`applicationId = "com.tpeditz.privatevault"`, currently at `versionName = "1.0.3"`, `versionCode = 4`, package namespace `com.example`).
+
+Your task is to **directly edit and update the source files in my project** to fix every confirmed security vulnerability, cryptographic flaw, CI/CD release-signing bug, plausible-deniability leak, and functional/UX bug listed below, and update the automated test suite (`ExampleRobolectricTest.kt`) so all fixes are verified.
+
+STRICT RULES FOR EDITING MY APPLICATION
+1. **Do NOT replace my app with a demo, mock, or web wrapper.** Keep the existing native Kotlin + Jetpack Compose + Material 3 + Room SQLite (`PrivateVaultDatabase` v3) + BouncyCastle Argon2id (`bcprov-jdk18on:1.80`) + JCA `AES/GCM/NoPadding` + `com.android.apksig.ApkVerifier` architecture intact.
+2. **Do NOT break backward compatibility with existing v1/v2/v3 databases or `.pvault` backups.** Preserve `MIGRATION_1_2` and `MIGRATION_2_3`, keep `applicationId = "com.tpeditz.privatevault"` and `namespace = "com.example"`, and ensure all new JSON fields in `VaultRecordCodec` use safe defaults (`optString`, `optBoolean`) so existing encrypted records decrypt without error.
+3. **Do NOT remove or break AI Studio's required `signingConfigs` structure in `app/build.gradle.kts`**—extend the environment variable fallbacks cleanly as instructed in Task 2 below.
+4. **Preserve developer credits:** `Developed by Tp Editz`, Telegram `@Tp_Editz` (`https://t.me/Tp_Editz`), and Instagram `@tp_ediitz` (`https://www.instagram.com/tp_ediitz/`).
+5. **Bump version cleanly:** Increment `versionCode = 5` and `versionName = "1.0.4"` in `app/build.gradle.kts` (and update version references in `PRIVATE_VAULT_ARCHITECTURE_AND_HANDOVER.md`, `VaultRepository.kt`, and `PortableBackupEngine.kt`).
+
+EXECUTE ALL 14 REPAIR TASKS BELOW IN THE PROJECT SOURCE FILES:
+
+------------------------------------------------------------------------
+TASK 1 (CRITICAL — PV-SEC-001): Remove Exposed Private Keystore Artifact & Hardening `.gitignore` / Workflows
+------------------------------------------------------------------------
+- **Problem:** `.aistudio/artifacts/brain/2a19f8cf-e32e-491f-8c69-a22bba937042/debug.keystore.base64` contains a private PKCS#12 signing key (`alias: androiddebugkey`, password `android`, SHA-256 `12:94:3A:91...`), and `.github/workflows/build-apk.yml` (lines 74-76) and `.github/workflows/publish-ota.yml` (lines 95-96) fall back to `./debug.keystore.base64`.
+- **Exact Edits:**
+  1. Delete `.aistudio/artifacts/brain/2a19f8cf-e32e-491f-8c69-a22bba937042/debug.keystore.base64` and `debug.keystore.base64.metadata.json` if accessible in the workspace.
+  2. In `.gitignore`, add:
+     ```
+     *.keystore
+     *.jks
+     *.p12
+     *.keystore.base64
+     .aistudio/artifacts/brain/**/debug.keystore*
+     ```
+  3. In `.github/workflows/build-apk.yml` (lines 74-76) and `.github/workflows/publish-ota.yml` (lines 95-96), remove the `elif [ -f "./debug.keystore.base64" ]` branch so CI only uses GitHub Actions Secrets (`DEBUG_KEYSTORE_BASE64` or `RELEASE_KEYSTORE_BASE64`) and never reads a committed `.base64` file from the repository.
+
+------------------------------------------------------------------------
+TASK 2 (HIGH — PV-SEC-002 & PV-BUG-001): Fix Release Signing Environment Variable Mismatch Between `app/build.gradle.kts` and `publish-ota.yml`
+------------------------------------------------------------------------
+- **Problem:** `.github/workflows/publish-ota.yml` (lines 114-117) sets `PV_RELEASE_STORE_FILE`, `PV_RELEASE_STORE_PASSWORD`, `PV_RELEASE_KEY_ALIAS`, and `PV_RELEASE_KEY_PASSWORD`, whereas `app/build.gradle.kts` (lines 24-30) only reads `KEYSTORE_PATH`, `STORE_PASSWORD`, `KEY_PASSWORD`, and hardcodes `keyAlias = "upload"`.
+- **Exact Edits:**
+  1. In `app/build.gradle.kts` (inside `signingConfigs { create("release") { ... } }`), keep AI Studio compatibility while adding fallback support for `PV_RELEASE_*` and `KEY_ALIAS`:
+     ```kotlin
+     create("release") {
+       val keystorePath = System.getenv("KEYSTORE_PATH")
+         ?: System.getenv("PV_RELEASE_STORE_FILE")
+         ?: "${rootDir}/my-upload-key.jks"
+       storeFile = file(keystorePath)
+       storePassword = System.getenv("STORE_PASSWORD") ?: System.getenv("PV_RELEASE_STORE_PASSWORD")
+       keyAlias = System.getenv("KEY_ALIAS") ?: System.getenv("PV_RELEASE_KEY_ALIAS") ?: "upload"
+       keyPassword = System.getenv("KEY_PASSWORD") ?: System.getenv("PV_RELEASE_KEY_PASSWORD")
+     }
+     ```
+  2. In `.github/workflows/publish-ota.yml` (step `Build signed candidate APK`), export both `KEYSTORE_PATH`/`STORE_PASSWORD`/`KEY_ALIAS`/`KEY_PASSWORD` and `PV_RELEASE_*` so both conventions work seamlessly.
+  3. Also remove the unused `implementation(libs.androidx.navigation.compose)` line from `app/build.gradle.kts` (`PV-BUG-014`), and set `"majorCapabilities": []` in `metadata.json` (`PV-BUG-012`).
+
+------------------------------------------------------------------------
+TASK 3 (MEDIUM — PV-SEC-006): Eliminate Hardcoded `'x'` Dummy Password in `VaultRepository.disableDecoyVault()`
+------------------------------------------------------------------------
+- **Problem:** In `app/src/main/java/com/example/data/VaultRepository.kt` (line 945), `disableDecoyVault()` creates the replacement dummy Slot 1 envelope using `val dummyChars = CharArray(16) { 'x' }`. Anyone who knows the source code can test `"xxxxxxxxxxxxxxxx"` against Slot 1 to prove forensically that Decoy Mode was previously enabled and then disabled.
+- **Exact Edits:**
+  1. In `VaultRepository.kt` inside `disableDecoyVault()` (around line 945) AND in `initializeNewVault()` (when `!hasDecoy`, around lines 140-143, 180), generate a 32-byte random `kek1 = CryptoEngine.randomBytes(CryptoEngine.DEK_BYTES)` directly from `SecureRandom` (or derive from a 24-char CSPRNG random `CharArray` generated via `CryptoEngine.randomBytes(24)`). Using a CSPRNG random secret ensures NO password exists that can unwrap a dummy envelope, making a never-configured Slot 1 and a disabled Slot 1 100% cryptographically indistinguishable!
+
+------------------------------------------------------------------------
+TASK 4 (MEDIUM — PV-SEC-007): Lock Vault & Wipe DEK Proactively in Background When Auto-Lock Timeout Expires
+------------------------------------------------------------------------
+- **Problem:** `VaultViewModel.onAppBackgrounded()` (`VaultViewModel.kt` line 613) only records `lastBackgroundedAtMonotonicMs` in `VaultSessionManager` and waits until `onAppForegrounded()` to call `lockNow()`. While the app is in the background, `dekBytes` and decrypted `notes`/`credentials` remain in RAM indefinitely!
+- **Exact Edits:**
+  1. In `VaultViewModel.kt`, add `private var backgroundAutoLockJob: Job? = null`.
+  2. In `onAppBackgrounded()`:
+     - Call `vaultRepository.sessionManager.onAppBackgrounded()`.
+     - Cancel any existing `backgroundAutoLockJob`.
+     - If `vaultRepository.sessionManager.sessionState.value is VaultSessionManager.SessionState.Unlocked`:
+       - Check `val inPicker = vaultRepository.sessionManager.isInFilePickerTransitionWindow()`.
+       - Check `val timeoutMs = _preferences.value.autoLockTimeoutMs`.
+       - If `!inPicker && timeoutMs <= 0L`: immediately call `lockVaultNow("Vault automatically locked.")`.
+       - Else: compute `val delayMs = if (inPicker) maxOf(timeoutMs, VaultSessionManager.FILE_PICKER_GRANT_WINDOW_MS) else timeoutMs`, and launch `backgroundAutoLockJob = viewModelScope.launch { delay(delayMs); if (vaultRepository.sessionManager.sessionState.value is VaultSessionManager.SessionState.Unlocked) { deleteStagedBackupFile(_uiState.value.stagedBackupMetadata); lockVaultNow("Vault automatically locked.") } }`.
+  3. In `onAppForegrounded()` and `lockVaultNow()`: cancel `backgroundAutoLockJob` (`backgroundAutoLockJob?.cancel(); backgroundAutoLockJob = null`), and keep the existing monotonic clock check in `sessionManager.onAppForegrounded(timeout)` as a fallback in case OS deep sleep paused the coroutine timer.
+
+------------------------------------------------------------------------
+TASK 5 (MEDIUM — PV-SEC-008): Fix Biometric Card Discrepancy in Decoy Session (`SecurityAndDecoySettingsScreen`)
+------------------------------------------------------------------------
+- **Problem:** In `VaultRepository.kt` (lines 91-95), `isDecoyModeEnabledForRealSession` returns `false` when unlocked into the Decoy Vault (`slotId = 1`). Consequently, `SecurityAndDecoySettingsScreen` (`SecondaryScreens.kt` line 798) hides the `"Enable Biometrics"` button in the Real Vault (when Decoy Mode is active) but SHOWS the `"Enable Biometrics"` button in the Decoy Vault—and tapping it fails with `"Biometric settings are not available in this session."`, immediately proving the user is in the Decoy Vault!
+- **Exact Edits:**
+  1. Add a helper or update `VaultUiState` so `isBiometricBlockedByPolicy: Boolean` is `true` whenever EITHER (a) the session is Slot 0 (`REAL_SLOT`) and `isDecoyConfiguredInRealVault == true`, OR (b) the session is Slot 1 (`DECOY_SLOT`, which can only ever be unlocked when Decoy Mode is active!).
+  2. In `SecurityAndDecoySettingsScreen` (`SecondaryScreens.kt` line 798), check `if (uiState.isBiometricBlockedByPolicy)` (or set `isDecoyModeEnabled = true` for the Biometric card check in both cases while keeping the Advanced Multi-Envelope Policy sheet gated behind `verifyRealMasterPasswordForSecurityGate`). That way, the Biometric Quick-Unlock card displays the exact same neutral message (`"Biometric quick-unlock is disabled while multi-envelope policy is active so an observer cannot infer additional password-only vaults."`) in both the Real Vault (with Decoy enabled) and the Decoy Vault!
+
+------------------------------------------------------------------------
+TASK 6 (MEDIUM — PV-SEC-003, PV-BUG-002, PV-BUG-005): Wire Unbiased `PasswordGeneratorEngine`, Fix Passphrase Entropy, and Complete Generator UI Controls
+------------------------------------------------------------------------
+- **Problem:**
+  1. `PasswordGeneratorEngine.kt` (which implements unbiased rejection sampling `nextUnbiasedInt` and `InvalidConfig` validation) is unused dead code, while `OfflinePasswordStrengthEstimator.generatePassword()` uses biased `% pool.length` modulo arithmetic and silently re-enables lowercase+digits when all 4 toggles are turned off.
+  2. `OfflinePasswordStrengthEstimator.evaluate()` scores a 5-word passphrase from the 202-word list (~44.7 bits actual entropy) as >200 bits of character-pool entropy.
+  3. `GeneratorAndStrengthScreen` (`GeneratorAndStrengthScreens.kt`) lacks a Show/Hide toggle for the generated candidate, lacks pool/entropy explanation text, lacks a passphrase word-count selector (4–8 words), and lacks a `"Use in New Saved Password"` button.
+- **Exact Edits:**
+  1. In `OfflinePasswordStrengthEstimator.kt`:
+     - Replace the biased modulo arithmetic in `generatePassword` and `generatePassphrase` with unbiased rejection sampling delegating to `PasswordGeneratorEngine`.
+     - In `evaluate()`, detect if the password is a hyphen/space/underscore-separated passphrase whose words belong to `EFF_PASSPHRASE_WORDS` (case-insensitive) and compute realistic word-list entropy (`wordCount * log2(EFF_PASSPHRASE_WORDS.size) + numberEntropyBits`) instead of `length * log2(poolSize)`.
+  2. In `VaultUiState` (`VaultViewModel.kt`):
+     - Add `val generatorError: String? = null` and `val generatorExplanation: String = ""`.
+     - In `updateGeneratorConfig` and `regeneratePasswordCandidate`, call `PasswordGeneratorEngine.generate(...)`. If it returns `GenerationResult.InvalidConfig(reason)`, set `generatorError = reason` (do not silently override toggles!). If `GenerationResult.Success`, update `generatedCandidate`, `generatorExplanation = result.configExplanation`, and `generatorError = null`.
+     - Add `fun useGeneratedPasswordInNewCredential()` in `VaultViewModel` that opens `PrimaryTab.PASSWORDS` and initializes `activeCredentialDraft = CredentialEditorDraftState(password = _uiState.value.generatedCandidate)`.
+  3. In `GeneratorAndStrengthScreens.kt` (`GeneratorAndStrengthScreen`):
+     - Add a Show/Hide eye `IconButton` on the generated candidate card so the user can mask/unmask the generated password.
+     - Display `uiState.generatorExplanation` below the candidate, and display `uiState.generatorError` in an error surface if all character classes are turned off.
+     - Add word-count `FilterChip`s (`4`, `5`, `6`, `7`, `8` words) for Passphrase generation.
+     - Add a `"Save to Passwords / Use in Credential"` button (`testTag("generator_use_in_credential_button")`) calling `viewModel::useGeneratedPasswordInNewCredential`.
+
+------------------------------------------------------------------------
+TASK 7 (MEDIUM — PV-SEC-004 & PV-BUG-011): Enforce Keyboard Privacy (`autoCorrectEnabled = false`, `KeyboardType.Password`), Mask Strength Checker Input, and Add Offline Breach Disclosure
+------------------------------------------------------------------------
+- **Problem:** `OutlinedTextField`s in `GeneratorAndStrengthScreens.kt`, `NotesScreen.kt`, `PasswordsScreen.kt`, and `SecondaryScreens.kt` omit `KeyboardOptions(autoCorrectEnabled = false, keyboardType = KeyboardType.Password)`, and `strengthCheckerInput` is completely unmasked.
+- **Exact Edits:**
+  1. In `GeneratorAndStrengthScreens.kt` (`StrengthAuditTabScreen`):
+     - Add `var showCheckerPassword by remember { mutableStateOf(false) }`.
+     - Configure `strength_checker_input` with `visualTransformation = if (showCheckerPassword) VisualTransformation.None else PasswordVisualTransformation()`, a Show/Hide trailing `IconButton`, and `keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false)`.
+     - Add an explicit informational text block stating: `"Note: This rating is a conservative local estimate. Because PRIVATE VAULT operates 100% offline, it never sends passwords to online breach databases (such as Have I Been Pwned) and cannot verify if a password was leaked in an external breach."`
+  2. Across `PasswordsScreen.kt` and `SecondaryScreens.kt`:
+     - Add `keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false)` to every password and secret custom field `OutlinedTextField`.
+     - Add a brief helper note in `CredentialEditorView` next to the inline password generator button reminding the user: `"Generating a new password updates this vault record—remember to also update your password on the external service or website."`
+  3. Across `NotesScreen.kt` and `PasswordsScreen.kt`:
+     - Add `keyboardOptions = KeyboardOptions(autoCorrectEnabled = false)` to note title, note body, checklist item input, credential service name, username, and credential notes `OutlinedTextField`s so third-party keyboards do not cache private vault text in unencrypted user dictionaries.
+
+------------------------------------------------------------------------
+TASK 8 (MEDIUM — PV-SEC-005): Harden Android Keystore Biometric Key Specification (`BiometricKeystoreManager.kt`)
+------------------------------------------------------------------------
+- **Problem:** `BiometricKeyEnvelopeHelper.getEncryptCipherForEnrollment()` (`BiometricKeystoreManager.kt` lines 48-61) calls `.setUserAuthenticationRequired(true)` without explicit `setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)` on API 30+ or `setUserAuthenticationValidityDurationSeconds(-1)` on API 24–29.
+- **Exact Edits:**
+  1. In `BiometricKeystoreManager.kt` inside `getEncryptCipherForEnrollment()`, add:
+     ```kotlin
+     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+         builder.setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+     } else {
+         @Suppress("DEPRECATION")
+         builder.setUserAuthenticationValidityDurationSeconds(-1)
+     }
+     ```
+
+------------------------------------------------------------------------
+TASK 9 (MEDIUM — PV-BUG-003 & PV-BUG-004): Fix Note Editor Unedited-Note Autosave Timestamp Bug & Add Explicit Autosave Status Indicator
+------------------------------------------------------------------------
+- **Problem:** In `NotesScreen.kt` (lines 581-597), `LaunchedEffect(draft.title, draft.body, ...)` triggers 850ms after opening ANY existing note—even when the user made zero edits—overwriting `updatedAtEpochMs` and jumping the note to the top of the list! Also, `onCloseWithoutDiscard` (line 125) saves unconditionally even when nothing changed, and the editor lacks a visible `Saving…` / `Saved` status indicator.
+- **Exact Edits:**
+  1. In `VaultViewModel.kt`, add `enum class AutosaveIndicator { IDLE, UNSAVED, SAVING, SAVED, ERROR }` and add `val isDirty: Boolean = false` and `val autosaveIndicator: AutosaveIndicator = AutosaveIndicator.IDLE` to `NoteEditorDraftState`.
+  2. When `openNewNoteDraft()` or `openExistingNoteDraft(note)` is called, initialize `isDirty = false` and `autosaveIndicator = if (isEditingExisting) AutosaveIndicator.SAVED else AutosaveIndicator.IDLE`.
+  3. Whenever `updateActiveNoteDraft` modifies user content (`title`, `body`, `format`, `category`, `folderId`, `tagsText`, `colorAccentIndex`, `isPinned`, `isFavorite`, `checklistItems`, `pendingNewChecklistText`), set `isDirty = true` and `autosaveIndicator = AutosaveIndicator.UNSAVED` (do not mark dirty when only `showMarkdownPreview` is toggled!).
+  4. In `NoteEditorView` (`NotesScreen.kt` lines 581-597), only run the 850ms debounced `onSilentAutosave()` when `draft.isDirty` is `true`! And in `onCloseWithoutDiscard` (lines 124-131), only call `commitActiveNoteDraft` when `activeDraft.isDirty` is `true`; otherwise call `viewModel.closeNoteDraft()` directly without touching `updatedAtEpochMs`!
+  5. In `commitActiveNoteDraft`, set `autosaveIndicator = AutosaveIndicator.SAVING` before calling `vaultRepository.saveVaultItem`, and set `isDirty = false, autosaveIndicator = AutosaveIndicator.SAVED` ONLY after `saveVaultItem` succeeds (or `AutosaveIndicator.ERROR` on exception). Render a subtle status badge (`"Saving…"`, `"Saved"`, `"Unsaved changes"`, or `"Save error"`) in `NoteEditorView`'s top bar.
+
+------------------------------------------------------------------------
+TASK 10 (MEDIUM — PV-BUG-006): Add Confirmation Dialogs Before Permanent Deletion of Notes, Credentials, and Folders
+------------------------------------------------------------------------
+- **Problem:** Tapping permanent delete in Trash or inside the Note/Credential Editor or Folder Management Dialog immediately deletes records without confirmation.
+- **Exact Edits:**
+  1. In `NotesScreen.kt` and `PasswordsScreen.kt`, add a `pendingPermanentDeleteId by remember { mutableStateOf<String?>(null) }` state and show an `AlertDialog` (`"Delete Permanently?"`, `"This encrypted record will be permanently removed from this vault. This action cannot be undone."`, Confirm: `"Delete Permanently"`, Dismiss: `"Cancel"`) before calling `viewModel.deleteNote(id)` or `viewModel.deleteCredential(id)`.
+  2. In `NoteEditorView` and `CredentialEditorView`, if the note/credential is not yet in Trash (`!isTrashed`), tapping the trash icon in the editor top bar should either move it to Trash or show the confirmation dialog before permanent deletion.
+  3. In `FolderManagementDialog` (`NotesScreen.kt`), add a confirmation prompt before deleting a custom folder (`"Delete folder '${folder.name}'? All items inside it will be safely moved to General."`).
+
+------------------------------------------------------------------------
+TASK 11 (LOW — PV-BUG-007 & PV-BUG-008): Add `accountLabel`, `isArchived`, Duplicate/Archive Actions, and Numbered List Markdown Rendering
+------------------------------------------------------------------------
+- **Exact Edits:**
+  1. In `VaultDomainModels.kt`:
+     - Add `val isArchived: Boolean = false` to `NoteRecord` and `CredentialRecord`.
+     - Add `val accountLabel: String = ""` (e.g., `"Personal"`, `"Work"`) to `CredentialRecord`.
+     - Update `VaultRecordCodec.encode` and `decodeFromJsonObject` using `root.optBoolean("isArchived", false)` and `root.optString("accountLabel", "")` so all existing encrypted records remain 100% compatible.
+  2. In `VaultViewModel.kt`, `NotesScreen.kt`, and `PasswordsScreen.kt`:
+     - Add `notesArchiveOnly: Boolean = false` and `credentialsArchiveOnly: Boolean = false` filters alongside Favorites and Trash.
+     - Add `duplicateNote(note: NoteRecord)` and `duplicateCredential(credential: CredentialRecord)` actions (creating a copy with a fresh `UUID.randomUUID().toString()`, `title = "${note.title} (Copy)"`, and current timestamps).
+     - Add an `OutlinedTextField` for `accountLabel` (`"Account Label (e.g., Personal, Work)"`) in `CredentialEditorView`, display it on `CredentialItemCard` if non-blank, and include `accountLabel` and `notes` in `PasswordsTabScreen` search filtering.
+  3. In `NotesScreen.kt` (`MarkdownPreviewBlock`, lines 1063-1103):
+     - Add rendering support for numbered lists (`Regex("^(\\d+\\.)\\s+(.+)")`) alongside bullet lists.
+
+------------------------------------------------------------------------
+TASK 12 (LOW — PV-BUG-009 & PV-BUG-010): Add Backup Export Scope Selection (`All` / `Notes Only` / `Passwords Only`), Startup OTA Check Toggle, and OTA Download Cancel Button
+------------------------------------------------------------------------
+- **Exact Edits:**
+  1. In `PortableBackupEngine.kt`, `VaultRepository.kt`, `VaultViewModel.kt`, and `BackupAndRestoreScreen` (`SecondaryScreens.kt`):
+     - Add `enum class BackupExportScope { ALL, NOTES_ONLY, PASSWORDS_ONLY }`.
+     - Add `FilterChip`s in `BackupAndRestoreScreen` allowing the user to export `All Vault Data`, `Notes Only`, or `Passwords Only`.
+  2. In `AppPreferencesRepository.kt`, `VaultViewModel.kt`, `OtaUpdateManager.kt`, `MainActivity.kt`, and `OtaUpdatesScreen` (`SecondaryScreens.kt`):
+     - Add `val autoCheckOtaOnStartup: Boolean = true` to `VaultAppPreferences` (persisted in DataStore under `booleanPreferencesKey("auto_check_ota_startup")`) and add a `Switch` (`"Automatically check for updates on app launch"`) in `OtaUpdatesScreen`. Check `currentPrefs.autoCheckOtaOnStartup` in `VaultViewModel.initializeStartupChecks()`.
+     - Track the active download job/call in `OtaUpdateManager` / `VaultViewModel` (`fun cancelActiveDownload()`), and add a `"Cancel Download"` `TextButton` in `OtaState.Downloading` in both `MainActivity.kt` (`LockedOtaStatusDialogIfActive`) and `SecondaryScreens.kt` (`OtaUpdatesScreen`) that cancels the download, deletes any partial APK file in `cacheDir/ota_updates/`, and resets `otaState` to `UpdateAvailable(manifest, showPromptDialog = false)`.
+
+------------------------------------------------------------------------
+TASK 13 (LOW — PV-SEC-009, PV-SEC-010, PV-SEC-011): Virtual Default Folders, Compromise-Recovery Full Rekey Option, and Unicode NFC Password Normalization
+------------------------------------------------------------------------
+- **Exact Edits:**
+  1. **Unicode NFC Normalization (`PV-SEC-011`):** In `CryptoEngine.charArrayToUtf8Bytes(chars: CharArray)`, if `chars.any { it.code > 0x7F }`, normalize the `CharBuffer` using `java.text.Normalizer.normalize(CharBuffer.wrap(chars), java.text.Normalizer.Form.NFC)` before UTF-8 encoding (leaving pure ASCII passwords untouched for 100% speed and backward compatibility).
+  2. **Virtual Default Folders (`PV-SEC-009`):** In `VaultRepository.initializeNewVault()` and `configureDecoyVault()`, do not write plaintext `"builtin-folder-notes-general"` or `"builtin-folder-credentials-general"` as `record_id` rows into SQLite; `normalizeFoldersAndLinks()` already synthesizes the built-in `"General"` folders in memory whenever they are not in SQLite!
+  3. **Compromise-Recovery Full Rekey Option (`PV-SEC-010`):** In `VaultRepository.changeActiveVaultPassword()`, add an optional parameter `rekeyAllRecordsWithNewDek: Boolean = false`. When `true`, generate a fresh 32-byte `newDek = CryptoEngine.generateDek()`, verify zero corrupted records exist in the active slot, re-encrypt all records in the active slot under `newDek` with fresh nonces, update the envelope and records atomically inside a `@Transaction`, clear Slot 0 biometric wrappers if in Slot 0, and update the active session's in-memory DEK. Expose a checkbox `"Full Compromise-Recovery Rekey (generate a new 256-bit DEK and re-encrypt all records)"` in the Change Vault Password card in `SecurityAndDecoySettingsScreen`.
+
+------------------------------------------------------------------------
+TASK 14: Expand Automated Verification Suite (`ExampleRobolectricTest.kt`)
+------------------------------------------------------------------------
+Add unit/Robolectric tests in `app/src/test/java/com/example/ExampleRobolectricTest.kt` verifying:
+1. `disableDecoyVault()` uses CSPRNG random key material and cannot be unwrapped with `"xxxxxxxxxxxxxxxx"` (`PV-SEC-006`).
+2. `viewModel.onAppBackgrounded()` immediately locks the vault when `autoLockTimeoutMs == 0L` (outside the SAF picker window) without waiting for `onAppForegrounded()` (`PV-SEC-007`).
+3. Decoy session (`slotId = 1`) sets `isBiometricBlockedByPolicy = true` so the Biometric settings card is indistinguishable from a Real session with Decoy Mode enabled (`PV-SEC-008`).
+4. `PasswordGeneratorEngine` is used by `VaultViewModel`, rejects all-categories-disabled configs with `generatorError`, and `OfflinePasswordStrengthEstimator` calculates realistic word-list entropy for passphrases (`PV-SEC-003`).
+5. Opening an existing note in `VaultViewModel` without editing it does not set `isDirty = true` or overwrite `updatedAtEpochMs` (`PV-BUG-003`).
+6. `changeActiveVaultPassword(..., rekeyAllRecordsWithNewDek = true)` rotates the 256-bit DEK and re-encrypts all active-slot records atomically (`PV-SEC-010`).
+7. Non-ASCII passwords in `CryptoEngine.deriveKeyArgon2id` normalize composed (`\u00E9`) and decomposed (`e\u0301`) characters to the exact same key (`PV-SEC-011`).
+
+Run all available checks and provide a concise summary of every modified file and test result.
+
+--- END COPY-PASTE PROMPT FOR GOOGLE AI STUDIO ---

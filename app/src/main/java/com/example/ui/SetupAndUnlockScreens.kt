@@ -170,6 +170,7 @@ fun SetupVaultScreen(
                         },
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Password,
+                            autoCorrectEnabled = false,
                             imeAction = ImeAction.Next
                         ),
                         trailingIcon = {
@@ -201,6 +202,7 @@ fun SetupVaultScreen(
                         },
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Password,
+                            autoCorrectEnabled = false,
                             imeAction = ImeAction.Done
                         ),
                         modifier = Modifier
@@ -267,6 +269,7 @@ fun SetupVaultScreen(
                                 },
                                 keyboardOptions = KeyboardOptions(
                                     keyboardType = KeyboardType.Password,
+                                    autoCorrectEnabled = false,
                                     imeAction = ImeAction.Next
                                 ),
                                 trailingIcon = {
@@ -294,6 +297,7 @@ fun SetupVaultScreen(
                                 },
                                 keyboardOptions = KeyboardOptions(
                                     keyboardType = KeyboardType.Password,
+                                    autoCorrectEnabled = false,
                                     imeAction = ImeAction.Done
                                 ),
                                 modifier = Modifier
@@ -443,6 +447,7 @@ fun UnlockVaultScreen(
                         },
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Password,
+                            autoCorrectEnabled = false,
                             imeAction = ImeAction.Done
                         ),
                         keyboardActions = KeyboardActions(

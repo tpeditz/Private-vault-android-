@@ -44,10 +44,34 @@ object PasswordGeneratorEngine {
             val poolSize: Int,
             val estimatedEntropyBits: Double,
             val configExplanation: String
-        ) : GenerationResult
+        ) : GenerationResult {
+            val explanation: String
+                get() = configExplanation
+        }
 
-        data class InvalidConfig(val reason: String) : GenerationResult
+        data class InvalidConfig(val reason: String) : GenerationResult {
+            val message: String
+                get() = reason
+        }
     }
+
+    fun generate(
+        length: Int = DEFAULT_LENGTH,
+        includeUppercase: Boolean = true,
+        includeLowercase: Boolean = true,
+        includeDigits: Boolean = true,
+        includeSymbols: Boolean = true,
+        excludeAmbiguous: Boolean = true
+    ): GenerationResult = generate(
+        GeneratorConfig(
+            length = length,
+            includeUppercase = includeUppercase,
+            includeLowercase = includeLowercase,
+            includeDigits = includeDigits,
+            includeSymbols = includeSymbols,
+            excludeAmbiguous = excludeAmbiguous
+        )
+    )
 
     fun generate(config: GeneratorConfig): GenerationResult {
         if (config.length !in MIN_LENGTH..MAX_LENGTH) {
@@ -119,9 +143,13 @@ object PasswordGeneratorEngine {
         }
 
         val password = String(chars)
-        val entropyBits = config.length * (ln(combinedPool.length.toDouble()) / ln(2.0))
-        val ambiguousNote = if (config.excludeAmbiguous) "excluding look-alike characters (0, O, 1, l, I)" else "including all characters"
-        val explanation = "${config.length} characters using ${categoryNames.joinToString(", ")} ($ambiguousNote) • Pool: ${combinedPool.length} symbols."
+        // Conservative approximate entropy accounting for required-class constraints + uniform pool fill
+        val requiredBits = activePools.sumOf { ln(it.length.toDouble()) / ln(2.0) }
+        val remainingCount = (config.length - activePools.size).coerceAtLeast(0)
+        val remainingBits = remainingCount * (ln(combinedPool.length.toDouble()) / ln(2.0))
+        val entropyBits = requiredBits + remainingBits
+        val ambiguousNote = if (config.excludeAmbiguous) "excluding look-alike characters (0/O, 1/l/I)" else "all characters"
+        val explanation = "${config.length} characters • ${categoryNames.joinToString(", ")} ($ambiguousNote)"
 
         return GenerationResult.Success(
             password = password,
@@ -139,7 +167,7 @@ object PasswordGeneratorEngine {
     /**
      * Unbiased random integer in [0, bound) using rejection sampling over 31-bit values.
      */
-    private fun nextUnbiasedInt(bound: Int): Int {
+    fun nextUnbiasedInt(bound: Int): Int {
         require(bound > 0) { "Bound must be positive" }
         if ((bound and -bound) == bound) {
             // Power of 2

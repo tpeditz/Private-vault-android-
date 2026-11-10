@@ -125,7 +125,22 @@ object OfflinePasswordStrengthEstimator {
         if (hasSymbol) poolSize += 32
         if (poolSize == 0) poolSize = 26
 
-        val rawEntropy = (length * log2(poolSize.toDouble())).roundToInt()
+        // PV-SEC-003 / PV-QUALITY-001: Detect multi-word passphrases from the curated word list
+        // so word-based passphrases report realistic word-list entropy (~7.66 bits/word) rather
+        // than inflated character-pool entropy (length * log2(94)).
+        val tokens = password.split('-', '_', ' ', '.').filter { it.isNotEmpty() }
+        val wordTokens = tokens.filter { it.all { ch -> ch.isLetter() } }
+        val knownWordMatches = wordTokens.count { it.lowercase() in EFF_PASSPHRASE_WORDS }
+        val isWordlistPassphrase = wordTokens.size >= 3 && knownWordMatches >= (wordTokens.size + 1) / 2
+
+        val rawEntropy = if (isWordlistPassphrase) {
+            val bitsPerWord = log2(EFF_PASSPHRASE_WORDS.size.toDouble())
+            val numericTokens = tokens.filter { it.all { ch -> ch.isDigit() } }
+            val numberBits = numericTokens.sumOf { it.length * log2(10.0) }
+            (wordTokens.size * bitsPerWord + numberBits).roundToInt()
+        } else {
+            (length * log2(poolSize.toDouble())).roundToInt()
+        }
 
         val warnings = mutableListOf<String>()
         val suggestions = mutableListOf<String>()
@@ -182,11 +197,12 @@ object OfflinePasswordStrengthEstimator {
             warnings.add("Contains a recognizable calendar year pattern.")
         }
 
-        // 6. Check low unique character ratio
-        val uniqueRatio = password.toSet().size.toDouble() / length.toDouble()
-        if (length >= 8 && uniqueRatio < 0.45) {
+        // 6. Check low unique character ratio (excluding multi-word passphrases which naturally repeat vowels/hyphens)
+        val uniqueCount = password.toSet().size
+        val uniqueRatio = uniqueCount.toDouble() / length.toDouble()
+        if (!isWordlistPassphrase && length >= 8 && uniqueCount < 10 && uniqueRatio < 0.45) {
             penaltyBits += 15
-            warnings.add("Low character variety (${password.toSet().size} unique characters).")
+            warnings.add("Low character variety ($uniqueCount unique characters).")
         }
 
         // 7. Check reuse inside active vault
@@ -208,7 +224,8 @@ object OfflinePasswordStrengthEstimator {
         }
 
         val effectiveEntropy = (rawEntropy - penaltyBits).coerceAtLeast(0)
-        val rawScore = ((effectiveEntropy.toDouble() / 95.0) * 100.0).roundToInt()
+        val divisor = if (isWordlistPassphrase) 52.0 else 95.0
+        val rawScore = ((effectiveEntropy.toDouble() / divisor) * 100.0).roundToInt()
         val cappedScore = when {
             length < 8 -> rawScore.coerceAtMost(24)
             normalized in COMMON_PASSWORDS_AND_STEMS -> rawScore.coerceAtMost(15)
@@ -225,7 +242,7 @@ object OfflinePasswordStrengthEstimator {
         }
 
         if (suggestions.isEmpty() && band != StrengthBand.FORTRESS) {
-            suggestions.add("Add 4–6 more random characters to reach Fortress grade.")
+            suggestions.add("Add 4–6 more random characters or an extra passphrase word to increase strength.")
         }
 
         return StrengthReport(
@@ -244,62 +261,27 @@ object OfflinePasswordStrengthEstimator {
     }
 
     /**
-     * Generates a cryptographically random password using `SecureRandom`, guaranteeing at least
-     * one character from each enabled character class.
+     * Generates a cryptographically random password using unbiased rejection sampling via
+     * `PasswordGeneratorEngine` (`PV-SEC-003`).
      */
     fun generatePassword(config: GeneratorConfig): String {
-        val safeLength = config.length.coerceIn(8, 64)
-        val pools = mutableListOf<String>()
-
-        fun filterAmbiguous(input: String): String {
-            return if (config.excludeAmbiguous) {
-                input.filterNot { it in AMBIGUOUS }
-            } else {
-                input
-            }
+        val engineConfig = PasswordGeneratorEngine.GeneratorConfig(
+            length = config.length.coerceIn(PasswordGeneratorEngine.MIN_LENGTH, PasswordGeneratorEngine.MAX_LENGTH),
+            includeUppercase = config.includeUppercase,
+            includeLowercase = config.includeLowercase,
+            includeDigits = config.includeDigits,
+            includeSymbols = config.includeSymbols,
+            excludeAmbiguous = config.excludeAmbiguous
+        )
+        return when (val res = PasswordGeneratorEngine.generate(engineConfig)) {
+            is PasswordGeneratorEngine.GenerationResult.Success -> res.password
+            is PasswordGeneratorEngine.GenerationResult.InvalidConfig -> ""
         }
-
-        if (config.includeUppercase) pools.add(filterAmbiguous(UPPER))
-        if (config.includeLowercase) pools.add(filterAmbiguous(LOWER))
-        if (config.includeDigits) pools.add(filterAmbiguous(DIGITS))
-        if (config.includeSymbols) pools.add(filterAmbiguous(SYMBOLS))
-
-        if (pools.isEmpty()) {
-            pools.add(filterAmbiguous(LOWER))
-            pools.add(filterAmbiguous(DIGITS))
-        }
-
-        val combinedPool = pools.joinToString("")
-        val resultChars = CharArray(safeLength)
-        val randomBytes = CryptoEngine.randomBytes(safeLength * 2)
-
-        // Ensure at least one character from each selected character class
-        for (i in pools.indices) {
-            if (i < safeLength) {
-                val pool = pools[i]
-                val idx = (randomBytes[i].toInt() and 0xFF) % pool.length
-                resultChars[i] = pool[idx]
-            }
-        }
-
-        for (i in pools.size until safeLength) {
-            val idx = (randomBytes[i].toInt() and 0xFF) % combinedPool.length
-            resultChars[i] = combinedPool[idx]
-        }
-
-        // Fisher-Yates shuffle using remaining random bytes
-        for (i in safeLength - 1 downTo 1) {
-            val swapIdx = (randomBytes[safeLength + i].toInt() and 0xFF) % (i + 1)
-            val tmp = resultChars[i]
-            resultChars[i] = resultChars[swapIdx]
-            resultChars[swapIdx] = tmp
-        }
-
-        return String(resultChars)
     }
 
     /**
-     * Generates a high-entropy multi-word passphrase from the curated offline wordlist.
+     * Generates a multi-word passphrase from the curated offline wordlist using unbiased rejection
+     * sampling (`PasswordGeneratorEngine.nextUnbiasedInt`, `PV-SEC-003`).
      */
     fun generatePassphrase(
         wordCount: Int = 5,
@@ -308,11 +290,8 @@ object OfflinePasswordStrengthEstimator {
         appendNumber: Boolean = true
     ): String {
         val count = wordCount.coerceIn(4, 8)
-        val randomBytes = CryptoEngine.randomBytes(count * 2 + 2)
-        val chosenWords = (0 until count).map { idx ->
-            val wordIndex =
-                (((randomBytes[idx * 2].toInt() and 0xFF) shl 8) or (randomBytes[idx * 2 + 1].toInt() and 0xFF)) %
-                    EFF_PASSPHRASE_WORDS.size
+        val chosenWords = (0 until count).map {
+            val wordIndex = PasswordGeneratorEngine.nextUnbiasedInt(EFF_PASSPHRASE_WORDS.size)
             val rawWord = EFF_PASSPHRASE_WORDS[wordIndex]
             if (capitalizeWords) {
                 rawWord.replaceFirstChar { it.uppercaseChar() }
@@ -322,7 +301,7 @@ object OfflinePasswordStrengthEstimator {
         }
         val base = chosenWords.joinToString(separator)
         return if (appendNumber) {
-            val number = ((randomBytes[randomBytes.size - 2].toInt() and 0xFF) % 90) + 10
+            val number = PasswordGeneratorEngine.nextUnbiasedInt(90) + 10
             "$base$separator$number"
         } else {
             base

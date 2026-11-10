@@ -177,6 +177,28 @@ class VaultSessionManager(
     }
 
     /**
+     * PV-SEC-010 Fix: Updates the active unlocked session's in-memory 256-bit DEK after an atomic
+     * full-vault DEK rotation, wiping the previous DEK bytes in memory.
+     */
+    @Synchronized
+    fun updateActiveSessionDek(sessionId: Long, newDekBytes: ByteArray): SessionState.Unlocked? {
+        val current = _sessionState.value
+        if (current is SessionState.Unlocked && !current.isWiped && current.sessionId == sessionId) {
+            current.wipeKeyMaterial()
+            val updated = SessionState.Unlocked(
+                sessionId = current.sessionId,
+                slotId = current.slotId,
+                internalDekBytes = newDekBytes.copyOf(),
+                isDecoyConfiguredInRealVault = current.isDecoyConfiguredInRealVault,
+                unlockedAtEpochMs = current.unlockedAtEpochMs
+            )
+            _sessionState.value = updated
+            return updated
+        }
+        return null
+    }
+
+    /**
      * Immediately locks the active vault, zeroes key material in memory, and advances both
      * the session generation counter and the auth request generation counter so any in-flight
      * KDF or coroutine work from before the lock fails validation (N03).

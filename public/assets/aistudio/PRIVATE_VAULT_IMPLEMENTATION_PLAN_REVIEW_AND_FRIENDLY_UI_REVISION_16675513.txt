@@ -1,0 +1,263 @@
+PRIVATE VAULT — IMPLEMENTATION PLAN REVIEW & FRIENDLY UI REDESIGN REQUIREMENTS
+Prepared for Google AI Studio
+Project: PRIVATE VAULT Android application
+Target plan: Version 1.0.4 / versionCode 5
+Status: PLAN REVISION ONLY — DO NOT MODIFY SOURCE CODE UNTIL THE REVISED PLAN IS APPROVED
+
+======================================================================
+1. PURPOSE
+======================================================================
+
+Re-review the supplied Version 1.0.4 implementation_plan.md against the actual existing PRIVATE VAULT source project and the previous source audit report. Revise the plan so that it addresses both:
+
+A. The security, data-integrity, release, compatibility, and functional work already identified.
+B. A substantial but controlled redesign of the app's user interface and user experience to make the application cleaner, easier to understand, more welcoming, and more convenient for everyday use.
+
+The owner wants the app's design changed. Do not interpret this as permission to replace the application, remove features, discard existing architecture, or rewrite the encryption/storage system. This is an existing Kotlin + Jetpack Compose + Material 3 application. Improve the existing product while preserving its identity, features, data, and security boundaries.
+
+IMPORTANT: This is a request to revise the IMPLEMENTATION PLAN first. Do not edit Kotlin files, Gradle files, databases, resources, or workflows yet. Return the revised plan and wait for explicit approval before implementation.
+
+======================================================================
+2. RE-ASSESSMENT OF THE CURRENT PLAN
+======================================================================
+
+The current plan has useful technical direction, particularly around strict backup parsing, release signing, DEK rekeying, background locking, cryptographic envelope validation, and regression tests. However, it is not yet complete enough to approve.
+
+The current plan's design section is too brief. It says "high-craft dark-first" with Obsidian/Emerald/Crimson colors and Material 3 light/dark surfaces, but it does not define the actual screens, navigation, user journeys, information hierarchy, form behavior, accessibility requirements, empty/loading/error states, or acceptance criteria for the redesign.
+
+The current source project also needs to be considered during redesign:
+- The existing app uses Kotlin, Jetpack Compose, and Material 3.
+- The app already supports three theme preferences: DARK_OBSIDIAN, LIGHT_CLEAN, and SYSTEM. Existing preferences default to DARK_OBSIDIAN, and PrivateVaultTheme itself also has a dark fallback. Preserve the existing theme-selection capability; redesign its presentation and decide whether a first-install default should become LIGHT_CLEAN. Do not overwrite a saved theme preference for existing users.
+- The unlocked app currently has four bottom navigation destinations: Notes, Passwords, Generator, and Strength.
+- Backup & Restore, Security & Vault Settings, OTA Updates, and About are currently reached through the top-bar overflow menu.
+- A lock-vault action is already available in the top bar.
+- The existing source includes dedicated screens for notes, saved passwords, generator/strength, setup/unlock, secondary settings, and backup/restore.
+
+Use the existing source as the authority. Re-check the current class names, navigation state, ViewModel routes, theme preferences, and screen responsibilities before finalizing file-level implementation steps. Do not assume this description is a substitute for source inspection.
+
+The plan also needs to resolve these technical ambiguities:
+
+1. OFFLINE CLAIM VS OTA: The vault's normal notes/passwords/crypto operations can be local and offline-first, but GitHub OTA update checks/downloads require network access. Describe the product accurately as a local/offline vault with optional network-dependent update functionality. Do not claim that every app feature is permanently offline if OTA is enabled.
+
+2. UNICODE PASSWORD COMPATIBILITY: Adding NFC normalization to Argon2id derivation can make an existing non-ASCII password derive a different key than it did before. Do not silently change derivation for existing vaults. Define a versioned, backward-compatible KDF/password-normalization format. Existing vaults must first unlock using their original derivation rules. Only migrate or rewrap keys through a safe, explicit, tested process after successful unlock. Preserve ASCII behavior only where the actual old/new derivation proves it identical.
+
+3. FULL DEK REKEY: Define exactly which encrypted objects are included: notes, saved credentials, folders or encrypted metadata, attachments if present, and every record in the active vault slot. Explain staging, transaction boundaries, verification, rollback, crash recovery, and behavior when any single record fails. Never commit a partly re-encrypted vault.
+
+4. AUTO-LOCK: Define behavior for ON_STOP, timeout zero, non-zero timeout, app process death, device lock, app switch, screen rotation, SAF picker, and return from an external activity. Do not leave a vault unlocked indefinitely because a file picker was open. Do not delete a staged backup before a successful export has completed. Use lifecycle-safe timing and explicit state transitions.
+
+5. BACKUP SCOPE: For Notes Only and Passwords Only exports, define how folders, references, shared metadata, and record relationships are filtered so the backup never contains dangling references. Validate the entire payload before writing anything. Distinguish an invalid/malformed backup from a valid backup that intentionally contains zero records.
+
+6. RELEASE SIGNING: Verify the original production signing identity before making release changes. Do not replace or regenerate the production key. Keep signing secrets out of the repository. Make environment-variable aliases explicit and fail the release build when production signing is unavailable; never silently fall back to a debug key.
+
+7. R8: Confirm which libraries/classes actually require keep rules from the code and runtime reflection paths. Do not add broad keep rules without evidence. Test minified release builds, Room database operations, Argon2id, biometric unlock, backup/restore, OTA signature verification, and all main screens.
+
+8. VERSION AND MIGRATION: Confirm the real currently shipped version and database schema from source/build metadata and owner-provided release information. Keep applicationId unchanged. Do not assume a source archive version is the same as the version installed by users. Provide forward migration and rollback/recovery behavior.
+
+9. REAL/DECOY PRIVACY: Ensure no visible text, settings status, navigation item, error message, biometric state, backup metadata, or confirmation flow gives away whether the active vault is Real or Decoy. Explain the indistinguishability requirements and how they will be tested.
+
+10. TEST CLAIMS: Separate tests that already exist, tests to be added, tests actually executed, and tests that require a physical device or release environment. Never report a planned test as passed.
+
+======================================================================
+3. NEW DESIGN DIRECTION — FRIENDLY, CLEAN, AND EASY TO USE
+======================================================================
+
+Design objective:
+Create a polished, trustworthy, calm, modern Android experience. The application should feel like a practical private productivity tool, not a technical security dashboard. Normal users should be able to create a note, save a password, find an item, generate a password, and back up their vault without understanding cryptography.
+
+The design should be professional and distinctive, but restrained. Avoid excessive decoration, neon colors, heavy gradients, glassmorphism, oversized empty hero sections, tiny labels, excessive cards, unnecessary animations, and technical jargon on everyday screens.
+
+Recommended visual direction:
+- Make a warm, clean LIGHT theme the default first impression for new installations, while retaining complete DARK and System Default options. The source already implements DARK_OBSIDIAN, LIGHT_CLEAN, and SYSTEM; improve the selector and visual consistency rather than rebuilding this feature. Do not change the saved theme preference of existing users during update.
+- Use a soft neutral background, clear white/surface containers, dark readable text, and one restrained forest/emerald green primary accent.
+- Use red/crimson only for destructive or error states, not as a constant decorative accent.
+- Use consistent spacing, a small and coherent shape system, clear typography, and simple familiar icons.
+- Use the existing Plus Jakarta Sans or another already-bundled suitable sans-serif for normal UI text. Reserve JetBrains Mono for passwords, keys, fingerprints, and other machine-like values only.
+- Keep contrast readable in both themes. Do not sacrifice usability for a fashionable aesthetic.
+- Prefer simple Material 3 components with consistent styling over custom controls that behave differently from standard Android controls.
+- Avoid unnecessary dependency additions. Use existing dependencies and components where practical.
+
+Suggested navigation model:
+Use four clear primary destinations:
+1. Notes
+2. Passwords
+3. Tools
+4. Settings
+
+Move Password Generator and Password Strength Checker under a single Tools destination. Inside Tools, provide two clearly named sections or a simple segmented control: "Generator" and "Strength Checker". Do not make the user navigate between two separate bottom tabs for closely related password tools.
+
+Make Settings a visible primary destination instead of hiding the main settings entry point in the overflow menu. The current source already stores and applies theme preferences, so reuse that implementation. Settings should be a well-organized hub containing clear rows/cards for:
+- Security & Vault Settings
+- Backup & Restore
+- App Appearance (System / Light / Dark)
+- Auto-lock preferences, if not already under Security
+- OTA Updates
+- About & Credits
+
+Keep the immediate Lock Vault action prominent and reachable from the main app shell. It must have an accessible content description and a clear tooltip/label where appropriate. Do not hide or weaken this security action as part of the redesign.
+
+Do not add an extra Home/dashboard tab unless the source review demonstrates a real user benefit and the revised plan explains what meaningful content it provides. Avoid adding navigation complexity just to make the app look bigger.
+
+======================================================================
+4. SCREEN-BY-SCREEN UX REQUIREMENTS
+======================================================================
+
+A. NOTES SCREEN
+- Give the screen a clear title and a visible, easy-to-find search field.
+- Provide familiar filters such as All, Favorites, Archive, and Trash only where supported by the existing data model and planned implementation.
+- Show note titles clearly and use a restrained secondary preview/metadata line. Never expose note content in notification previews or external surfaces unless a deliberate existing feature explicitly requires it and is safe.
+- Provide a clear New Note action, preferably a floating action button or another obvious primary action.
+- Make pin/favorite, archive, duplicate, and delete actions discoverable without crowding every note card with icons.
+- Use a readable empty state with one direct action, such as "Create your first note".
+- Ensure search, sorting, and filters work with existing encrypted/decrypted repository behavior and do not create plaintext search indexes on disk unless the security design explicitly supports and protects them.
+
+B. NOTE EDITOR
+- Use a distraction-free editor with a clear note title field and a large comfortable writing area.
+- Keep Save/Autosave state visible but quiet: Unsaved changes, Saving, Saved, or Save failed. Show "Saved" only after persistence actually succeeds.
+- Make formatting controls easy to understand. Do not expose Markdown syntax as the only way to format text if the current editor supports visual controls.
+- Make the back action predictable. Preserve valid unsaved content and clearly handle any save failure; never silently discard text.
+- Keep the editor screen focused. Hide bottom navigation while editing if that is necessary for keyboard space, but preserve a clear back and save-state experience.
+
+C. PASSWORDS SCREEN
+- Use a visible search field and an obvious Add Password action.
+- Make each item easy to scan: service/site or entry title, account label if available, and username where safe and useful.
+- Keep password values masked by default. Provide deliberate reveal, copy, and edit actions with clear labels and feedback.
+- Avoid displaying secrets in card previews, accessibility announcements, logs, clipboard longer than the configured timeout, or recent-app snapshots.
+- Keep duplicate, archive, trash, and permanent-delete actions consistent with Notes.
+- Use a clear empty state and explain that saved passwords remain in the local vault.
+
+D. PASSWORD EDITOR
+- Group fields logically: entry/service name, account label, username, password, website, notes/custom fields if supported.
+- Use correct keyboard types and disable personalized keyboard learning/autocorrect for sensitive secret inputs as specified in the security plan.
+- Include Show/Hide for secret fields and clear validation messages.
+- Keep password generation as a convenient action beside the password field without forcing the user to leave the editor.
+- Clearly show whether the item is saved or has unsaved changes.
+
+E. TOOLS SCREEN
+- Provide two simple, clearly separated tools: Password Generator and Strength Checker.
+- Generator controls should be understandable in plain language. Explain length, character groups, and passphrase word count without jargon.
+- Make generated output masked or revealed according to a deliberate safe default. Copy and "Use in Saved Password" actions should be easy to find.
+- Show password strength results with both a plain-language label and an explanation. Do not present an offline heuristic as a breach-database check or guarantee that a password is safe.
+- For the Strength Checker, mask typed password input by default and provide Show/Hide.
+- Avoid overwhelming users with raw entropy calculations. Put technical details in an optional expandable explanation.
+
+F. SETTINGS SCREEN
+- Organize controls into a small number of understandable groups with plain labels and short explanatory subtitles.
+- Place Backup & Restore where users can find it immediately.
+- Explain that forgetting the vault password may make data unrecoverable if that is true for the existing encryption architecture.
+- Separate normal preferences from high-impact security actions.
+- Use confirmation and re-authentication where required for permanent deletion, security changes, recovery changes, or DEK rekey.
+- Do not reveal whether the user is in the Real or Decoy vault.
+- Provide theme selection: System Default, Light, Dark.
+
+G. BACKUP & RESTORE
+- Explain Export and Restore in simple terms.
+- Provide clear scope choices: All Vault Data, Notes Only, Passwords Only.
+- Explain Replace versus Merge in plain language before the user commits.
+- Show file name, backup version, validation status, and record counts only after safe parsing/authentication. Do not reveal hidden Real/Decoy slot information.
+- Make invalid backup, wrong password, corrupted backup, empty valid backup, permission failure, and export failure visually and verbally distinct.
+- Require a clear second confirmation before Replace with a valid empty backup.
+- Never claim a backup was created until the file has been successfully written and verified.
+
+H. SECURITY / BIOMETRIC / AUTO-LOCK SCREENS
+- Use plain language for biometric availability and fallback behavior.
+- Clearly distinguish device biometric convenience from the vault's underlying encryption.
+- Show only accurate capabilities. Do not claim StrongBox or hardware-backed storage unless confirmed by the API and device.
+- Auto-lock options must be easy to understand, with clear descriptions of what happens when leaving the app.
+- Ensure the settings appearance is indistinguishable between Real/Decoy contexts as required by the threat model.
+
+I. SETUP AND UNLOCK SCREENS
+- Make first-time setup calm, short, and clear.
+- Explain the vault password's importance and recovery limitations before the user finishes setup.
+- Provide password visibility control and accessible validation.
+- Make unlock failure messages helpful but do not leak whether a Real or Decoy vault exists.
+- Do not add marketing claims such as "military-grade" or "unhackable".
+
+J. OTA UPDATES
+- Explain that update checking/downloading needs an internet connection, while local vault access and core data operations remain local/offline.
+- Show current version, available version, download progress, verification status, install readiness, and actionable errors.
+- Keep signature verification mandatory. A SHA-256 hash alone is not proof of publisher authenticity unless anchored to a trusted expected value/signature process.
+- Make cancellation behavior clear and safe. Do not install a partial or unverified APK.
+
+======================================================================
+5. INTERACTION, ACCESSIBILITY, AND QUALITY REQUIREMENTS
+======================================================================
+
+- Use a consistent 8 dp spacing scale or a clearly documented equivalent.
+- Prefer touch targets at least 48 dp where practical.
+- Support Android font scaling without clipped controls or unusable layouts.
+- Ensure TalkBack labels describe actions, not just visual icons.
+- Provide adequate color contrast in Light and Dark themes, with status conveyed by icon/text as well as color.
+- Keep focus order logical and keyboard navigation usable where applicable.
+- Support long titles, long notes, Unicode, emoji, and right-to-left text without layout breakage.
+- Keep dialogs short and specific. Destructive actions must clearly name what will be deleted or replaced.
+- Use snackbars/status messages for non-blocking feedback and dialogs only for decisions that need explicit confirmation.
+- Include loading, empty, error, success, disabled, saving, and offline states for every important flow.
+- Avoid unnecessary animations. Any animation must be short, non-blocking, and respect system animation preferences where practical.
+- Prevent double taps and concurrent requests from creating duplicate records or inconsistent screens.
+- Preserve scroll position and screen state when switching tabs where the existing architecture permits it safely.
+- Ensure returning from the keyboard, SAF picker, biometric prompt, or system settings does not leave stale or insecure UI state.
+
+======================================================================
+6. SECURITY AND DATA PRESERVATION OVERRIDE
+======================================================================
+
+Security and data integrity take priority over visual design. No redesign may:
+- Change the applicationId/package name.
+- Replace Room with another database without a separately approved migration plan.
+- Remove, weaken, or bypass Argon2id, AES-GCM authentication, associated data, or existing key protections.
+- Change vault file formats or key derivation rules without explicit versioning and backward-compatibility testing.
+- Expose decrypted secrets in previews, logs, clipboard beyond intended timeout, notifications, analytics, accessibility labels, or app switcher snapshots.
+- Change Real/Decoy behavior in a way that makes the two modes distinguishable.
+- Remove existing supported features or existing user data.
+- Silently overwrite, reset, or discard an existing vault during update, restore, rekey, or migration.
+
+Preserve existing user data and support update installation over the authentic prior production build. Design changes should primarily affect Compose UI, navigation presentation, theme resources, and UI state handling. Keep crypto, storage, backup format, and OTA trust boundaries isolated unless the approved technical plan specifically requires changes.
+
+======================================================================
+7. REQUIRED REVISED IMPLEMENTATION PLAN FORMAT
+======================================================================
+
+Return a new complete implementation_plan.md with these sections:
+
+1. Executive summary of the revised work.
+2. Verified current architecture and source-file inventory.
+3. Findings from re-checking the existing plan against source and prior audit.
+4. Final product navigation map and user journeys.
+5. Complete design system: light/dark/system themes, color tokens, typography, spacing, shapes, icon style, controls, and states.
+6. Screen-by-screen UI redesign specification for all screens listed above.
+7. Accessibility and responsive-layout requirements.
+8. Security/data-preservation constraints that the UI redesign must not violate.
+9. Technical remediation plan for backup validation, release signing, Gradle wrapper, key handling, Unicode compatibility, auto-lock, Real/Decoy privacy, R8, and OTA behavior.
+10. Version/database/backup migration and rollback plan.
+11. Exact files/classes/functions expected to change, grouped into UI-only, security/data, build/release, and tests.
+12. Risk analysis and dependencies between changes.
+13. Regression and acceptance test matrix.
+14. Build/test commands and the exact evidence required to call each test passed.
+15. Explicit out-of-scope items and assumptions requiring owner approval.
+16. Implementation sequence with small reviewable phases.
+
+For the screen redesign, include a navigation diagram and concise text wireframes for the main Notes, Passwords, Tools, Settings, Editor, and Backup/Restore screens. State what is visible above the fold and where primary actions are placed. Do not provide only color names or vague phrases like "make it modern".
+
+For every proposed change, classify it as:
+- REQUIRED SECURITY FIX
+- REQUIRED DATA-INTEGRITY FIX
+- USER-REQUESTED UI/UX REDESIGN
+- OPTIONAL IMPROVEMENT
+
+Do not mix optional polish with mandatory security repairs. Explain any trade-off.
+
+======================================================================
+8. APPROVAL GATE — DO NOT IMPLEMENT YET
+======================================================================
+
+After producing the revised implementation plan:
+- Summarize the most significant changes from the previous plan.
+- List every source file expected to change and why.
+- List all database, encryption, backup, and password-format compatibility risks.
+- Explain how existing users will update without losing access to their vaults.
+- Provide proposed screen wireframes in text.
+- Identify any requirement that cannot be implemented safely without more information.
+
+STOP after delivering the revised plan. Do not edit code, regenerate the APK, alter signing, commit changes, delete files, or run destructive migrations until the owner explicitly approves the revised plan.
+
+The goal is a safer PRIVATE VAULT that is also noticeably easier and more pleasant to use. A visually attractive app that is confusing, hides important settings, loses data, or weakens privacy is not acceptable.

@@ -122,6 +122,33 @@ class OtaUpdateManager(
     private val _otaState = MutableStateFlow<OtaState>(OtaState.Idle)
     val otaState: StateFlow<OtaState> = _otaState.asStateFlow()
 
+    @Volatile
+    private var activeDownloadCall: okhttp3.Call? = null
+
+    @Volatile
+    private var isDownloadCancelled: Boolean = false
+
+    /**
+     * PV-BUG-010 Fix: Cancels an in-flight OTA APK download, deletes any partial candidate file
+     * in cache, and restores `UpdateAvailable(showPromptDialog = false)` or `Idle`.
+     */
+    fun cancelActiveDownload(fallbackManifest: UpdateManifest? = null) {
+        isDownloadCancelled = true
+        activeDownloadCall?.cancel()
+        activeDownloadCall = null
+        val current = _otaState.value
+        val manifest = fallbackManifest ?: (current as? OtaState.Downloading)?.manifest
+        val otaDir = File(context.cacheDir, "ota_updates")
+        if (otaDir.exists()) {
+            otaDir.listFiles()?.forEach { runCatching { it.delete() } }
+        }
+        _otaState.value = if (manifest != null) {
+            OtaState.UpdateAvailable(manifest = manifest, showPromptDialog = false)
+        } else {
+            OtaState.Idle
+        }
+    }
+
     /**
      * Checks the HTTPS `update.json` manifest endpoint (or debug simulator override).
      */
@@ -230,6 +257,7 @@ class OtaUpdateManager(
      */
     suspend fun downloadAndVerifyUpdate(manifest: UpdateManifest): OtaState =
         withContext(Dispatchers.IO) {
+            isDownloadCancelled = false
             val otaDir = File(context.cacheDir, "ota_updates").apply { mkdirs() }
             // Clean up any older candidate files before downloading
             otaDir.listFiles()?.forEach { file ->
@@ -270,6 +298,9 @@ class OtaUpdateManager(
                             var downloaded = 0L
                             var read: Int
                             while (input.read(buffer).also { read = it } != -1) {
+                                if (isDownloadCancelled) {
+                                    throw java.io.InterruptedIOException("Download cancelled by user.")
+                                }
                                 downloaded += read
                                 if (downloaded > MAX_APK_BYTES) {
                                     throw IllegalStateException("Downloaded APK exceeds 150 MiB safety limit.")
@@ -318,6 +349,14 @@ class OtaUpdateManager(
                 if (candidateFile.exists()) {
                     candidateFile.delete()
                 }
+                if (isDownloadCancelled) {
+                    val cancelledState = OtaState.UpdateAvailable(
+                        manifest = manifest,
+                        showPromptDialog = false
+                    )
+                    _otaState.value = cancelledState
+                    return@withContext cancelledState
+                }
                 val err = OtaState.Error(
                     title = "Update Verification Failed",
                     detail = e.message ?: "Candidate APK failed security verification.",
@@ -325,6 +364,8 @@ class OtaUpdateManager(
                 )
                 _otaState.value = err
                 return@withContext err
+            } finally {
+                activeDownloadCall = null
             }
         }
 
@@ -349,7 +390,11 @@ class OtaUpdateManager(
 
             val requestBuilder = Request.Builder().url(currentUrl)
             headers.forEach { (k, v) -> requestBuilder.header(k, v) }
-            val response = httpClient.newCall(requestBuilder.build()).execute()
+            val call = httpClient.newCall(requestBuilder.build())
+            if (!isManifestEndpoint) {
+                activeDownloadCall = call
+            }
+            val response = call.execute()
 
             if (response.code in REDIRECT_STATUS_CODES) {
                 val locationHeader = response.header("Location")

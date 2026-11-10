@@ -22,11 +22,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -34,6 +37,7 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.AlertDialog
@@ -83,6 +87,7 @@ import java.util.Date
 import java.util.Locale
 
 private val NOTE_CATEGORIES = listOf("All", "Personal", "Work", "Finance", "Security", "Ideas")
+private val NUMBERED_LIST_REGEX = Regex("""^\d+\.\s+.*""")
 
 @Composable
 fun NotesTabScreen(
@@ -90,6 +95,7 @@ fun NotesTabScreen(
     viewModel: VaultViewModel
 ) {
     var showManageFoldersDialog by remember { mutableStateOf(false) }
+    var pendingPermanentDeleteNoteId by remember { mutableStateOf<String?>(null) }
 
     val activeDraft = uiState.activeNoteDraft
     if (activeDraft != null) {
@@ -121,9 +127,12 @@ fun NotesTabScreen(
                 null
             },
             onCloseWithoutDiscard = {
-                // Flush non-empty draft before closing so Back/Close never drops typed edits (R11)
-                if (activeDraft.title.isNotBlank() || activeDraft.body.isNotBlank() ||
-                    activeDraft.checklistItems.isNotEmpty() || activeDraft.pendingNewChecklistText.isNotBlank()
+                // PV-BUG-003 Fix: Only commit on close if the user actually modified the draft (`isDirty`),
+                // so merely viewing an existing note never overwrites `updatedAtEpochMs`!
+                if (activeDraft.isDirty && (
+                        activeDraft.title.isNotBlank() || activeDraft.body.isNotBlank() ||
+                            activeDraft.checklistItems.isNotEmpty() || activeDraft.pendingNewChecklistText.isNotBlank()
+                        )
                 ) {
                     viewModel.commitActiveNoteDraft(closeOnSuccess = true, isSilentAutosave = true)
                 } else {
@@ -132,6 +141,37 @@ fun NotesTabScreen(
             }
         )
         return
+    }
+
+    if (pendingPermanentDeleteNoteId != null) {
+        AlertDialog(
+            onDismissRequest = { pendingPermanentDeleteNoteId = null },
+            title = { Text("Delete Note Permanently?") },
+            text = {
+                Text(
+                    "This encrypted note will be permanently removed from this vault and cannot be recovered unless you have an external .pvault backup."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val id = pendingPermanentDeleteNoteId
+                        pendingPermanentDeleteNoteId = null
+                        if (id != null) {
+                            viewModel.deleteNote(id)
+                        }
+                    },
+                    modifier = Modifier.testTag("confirm_perm_delete_note_button")
+                ) {
+                    Text("Delete Permanently")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingPermanentDeleteNoteId = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     val noteFolders = remember(uiState.folders) {
@@ -146,11 +186,16 @@ fun NotesTabScreen(
         uiState.selectedNoteFolderId,
         uiState.notesSortOrder,
         uiState.notesFavoritesOnly,
+        uiState.notesArchiveOnly,
         uiState.notesTrashOnly
     ) {
         val q = uiState.notesSearchQuery.trim().lowercase(Locale.US)
         val filtered = uiState.notes.filter { note ->
-            val matchesTrash = if (uiState.notesTrashOnly) note.isTrashed else !note.isTrashed
+            val matchesLifecycle = when {
+                uiState.notesTrashOnly -> note.isTrashed
+                uiState.notesArchiveOnly -> !note.isTrashed && note.isArchived
+                else -> !note.isTrashed && !note.isArchived
+            }
             val matchesQuery = if (q.isEmpty()) {
                 true
             } else {
@@ -166,7 +211,7 @@ fun NotesTabScreen(
             val matchesFolder = uiState.selectedNoteFolderId == null ||
                 note.folderId == uiState.selectedNoteFolderId
             val matchesFav = !uiState.notesFavoritesOnly || note.isFavorite
-            matchesTrash && matchesQuery && matchesCat && matchesFolder && matchesFav
+            matchesLifecycle && matchesQuery && matchesCat && matchesFolder && matchesFav
         }
 
         val comparator = when (uiState.notesSortOrder) {
@@ -222,6 +267,7 @@ fun NotesTabScreen(
                 onValueChange = viewModel::setNotesSearchQuery,
                 placeholder = { Text("Search encrypted notes, tags, checklists…") },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 trailingIcon = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -266,7 +312,7 @@ fun NotesTabScreen(
                 }
             }
 
-            // Folder & Sort Bar (R12: "All Folders" is represented by null selectedNoteFolderId)
+            // Folder, Sort, Archive & Trash Bar (R12 & PV-BUG-007)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -306,6 +352,21 @@ fun NotesTabScreen(
                     label = { Text("Sort: ${uiState.notesSortOrder.label}") }
                 )
 
+                val archivedCount = uiState.notes.count { !it.isTrashed && it.isArchived }
+                FilterChip(
+                    selected = uiState.notesArchiveOnly,
+                    onClick = { viewModel.setNotesArchiveOnly(!uiState.notesArchiveOnly) },
+                    label = { Text(if (archivedCount > 0) "Archive ($archivedCount)" else "Archive") },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Filled.Archive,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    modifier = Modifier.testTag("notes_archive_chip")
+                )
+
                 val trashedCount = uiState.notes.count { it.isTrashed }
                 FilterChip(
                     selected = uiState.notesTrashOnly,
@@ -338,7 +399,7 @@ fun NotesTabScreen(
                             style = MaterialTheme.typography.titleMedium
                         )
                         Text(
-                            text = "Tap the + button to create a rich Markdown, checklist, or plain-text note encrypted with AES-256-GCM.",
+                            text = "Tap the + button to create a rich Markdown, checklist, or plain-text note encrypted on this device.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -357,8 +418,10 @@ fun NotesTabScreen(
                             onClick = { viewModel.openExistingNoteDraft(note) },
                             onTogglePin = { viewModel.toggleNotePin(note) },
                             onToggleFavorite = { viewModel.toggleNoteFavorite(note) },
+                            onDuplicate = { viewModel.duplicateNote(note) },
+                            onToggleArchive = { viewModel.toggleNoteArchive(note) },
                             onToggleTrash = { viewModel.toggleNoteTrash(note) },
-                            onPermanentDelete = { viewModel.deleteNote(note.id) }
+                            onPermanentDelete = { pendingPermanentDeleteNoteId = note.id }
                         )
                     }
                 }
@@ -373,6 +436,8 @@ private fun NoteItemCard(
     onClick: () -> Unit,
     onTogglePin: () -> Unit,
     onToggleFavorite: () -> Unit,
+    onDuplicate: () -> Unit,
+    onToggleArchive: () -> Unit,
     onToggleTrash: () -> Unit,
     onPermanentDelete: () -> Unit
 ) {
@@ -437,6 +502,32 @@ private fun NoteItemCard(
                                 imageVector = if (note.isFavorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
                                 contentDescription = if (note.isFavorite) "Remove Favorite" else "Mark Favorite",
                                 tint = if (note.isFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onDuplicate,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("duplicate_note_${note.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.ContentCopy,
+                                contentDescription = "Duplicate Note",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = onToggleArchive,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("archive_note_${note.id}")
+                        ) {
+                            Icon(
+                                imageVector = if (note.isArchived) Icons.Filled.Unarchive else Icons.Filled.Archive,
+                                contentDescription = if (note.isArchived) "Unarchive Note" else "Archive Note",
+                                tint = if (note.isArchived) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(18.dp)
                             )
                         }
@@ -573,12 +664,41 @@ private fun NoteEditorView(
     onDelete: (() -> Unit)?,
     onCloseWithoutDiscard: () -> Unit
 ) {
+    var showConfirmDeleteDialog by remember { mutableStateOf(false) }
+
     BackHandler {
         onCloseWithoutDiscard()
     }
 
-    // Debounced encrypted autosave when editing an existing or non-empty note
+    if (showConfirmDeleteDialog && onDelete != null) {
+        AlertDialog(
+            onDismissRequest = { showConfirmDeleteDialog = false },
+            title = { Text("Delete Note Permanently?") },
+            text = {
+                Text("This encrypted note will be permanently deleted from your vault.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showConfirmDeleteDialog = false
+                        onDelete()
+                    },
+                    modifier = Modifier.testTag("confirm_editor_delete_note_button")
+                ) {
+                    Text("Delete Permanently")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConfirmDeleteDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // PV-BUG-003 Fix: Only run debounced encrypted autosave when `draft.isDirty` is true!
     LaunchedEffect(
+        draft.isDirty,
         draft.title,
         draft.body,
         draft.format,
@@ -588,15 +708,16 @@ private fun NoteEditorView(
         draft.colorAccentIndex,
         draft.isPinned,
         draft.isFavorite,
+        draft.isArchived,
         draft.checklistItems
     ) {
-        if (draft.title.isNotBlank() || draft.body.isNotBlank() || draft.checklistItems.isNotEmpty()) {
+        if (draft.isDirty && (draft.title.isNotBlank() || draft.body.isNotBlank() || draft.checklistItems.isNotEmpty())) {
             delay(850L)
             onSilentAutosave()
         }
     }
 
-    // U03 Fix: Single scrollable Column with a single imePadding() and dark background
+    // U03 Fix: Single scrollable Column with a single imePadding()
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -611,11 +732,48 @@ private fun NoteEditorView(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            IconButton(
-                onClick = onCloseWithoutDiscard,
-                modifier = Modifier.testTag("note_editor_back_button")
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to Notes")
+                IconButton(
+                    onClick = onCloseWithoutDiscard,
+                    modifier = Modifier.testTag("note_editor_back_button")
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to Notes")
+                }
+
+                // PV-BUG-004 Fix: Live Autosave Status Badge
+                val statusLabel = when (draft.autosaveIndicator) {
+                    AutosaveIndicator.IDLE, AutosaveIndicator.SAVED -> "Saved"
+                    AutosaveIndicator.SAVING -> "Saving…"
+                    AutosaveIndicator.UNSAVED -> "Unsaved changes"
+                    AutosaveIndicator.ERROR -> "Save failed"
+                }
+                val statusBg = when (draft.autosaveIndicator) {
+                    AutosaveIndicator.IDLE, AutosaveIndicator.SAVED -> MaterialTheme.colorScheme.secondaryContainer
+                    AutosaveIndicator.SAVING -> MaterialTheme.colorScheme.primaryContainer
+                    AutosaveIndicator.UNSAVED -> MaterialTheme.colorScheme.surfaceVariant
+                    AutosaveIndicator.ERROR -> MaterialTheme.colorScheme.errorContainer
+                }
+                val statusFg = when (draft.autosaveIndicator) {
+                    AutosaveIndicator.IDLE, AutosaveIndicator.SAVED -> MaterialTheme.colorScheme.onSecondaryContainer
+                    AutosaveIndicator.SAVING -> MaterialTheme.colorScheme.onPrimaryContainer
+                    AutosaveIndicator.UNSAVED -> MaterialTheme.colorScheme.onSurfaceVariant
+                    AutosaveIndicator.ERROR -> MaterialTheme.colorScheme.onErrorContainer
+                }
+                Surface(
+                    color = statusBg,
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.testTag("note_autosave_status")
+                ) {
+                    Text(
+                        text = statusLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = statusFg,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
             }
 
             Row(
@@ -638,7 +796,7 @@ private fun NoteEditorView(
                 }
                 if (onDelete != null) {
                     IconButton(
-                        onClick = onDelete,
+                        onClick = { showConfirmDeleteDialog = true },
                         modifier = Modifier.testTag("note_editor_delete_button")
                     ) {
                         Icon(
@@ -679,6 +837,7 @@ private fun NoteEditorView(
             onValueChange = { text -> onUpdateDraft { it.copy(title = text, editorError = null) } },
             label = { Text("Note Title") },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("note_editor_title_input")
@@ -703,6 +862,65 @@ private fun NoteEditorView(
                     selected = draft.showMarkdownPreview,
                     onClick = { onUpdateDraft { it.copy(showMarkdownPreview = !it.showMarkdownPreview) } },
                     label = { Text(if (draft.showMarkdownPreview) "Edit Markdown" else "Preview Markdown") }
+                )
+            }
+        }
+
+        // PV-BUG-008 Fix: Markdown Quick-Formatting Toolbar
+        if (draft.format == NoteBodyFormat.MARKDOWN && !draft.showMarkdownPreview) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                AssistChip(
+                    onClick = {
+                        onUpdateDraft { state ->
+                            val prefix = if (state.body.isEmpty() || state.body.endsWith("\n")) "# " else "\n# "
+                            state.copy(body = state.body + prefix)
+                        }
+                    },
+                    label = { Text("# Heading") },
+                    modifier = Modifier.testTag("md_btn_heading")
+                )
+                AssistChip(
+                    onClick = {
+                        onUpdateDraft { state ->
+                            state.copy(body = state.body + "**bold**")
+                        }
+                    },
+                    label = { Text("**Bold**") },
+                    modifier = Modifier.testTag("md_btn_bold")
+                )
+                AssistChip(
+                    onClick = {
+                        onUpdateDraft { state ->
+                            val prefix = if (state.body.isEmpty() || state.body.endsWith("\n")) "- " else "\n- "
+                            state.copy(body = state.body + prefix)
+                        }
+                    },
+                    label = { Text("• Bullet") },
+                    modifier = Modifier.testTag("md_btn_bullet")
+                )
+                AssistChip(
+                    onClick = {
+                        onUpdateDraft { state ->
+                            val prefix = if (state.body.isEmpty() || state.body.endsWith("\n")) "1. " else "\n1. "
+                            state.copy(body = state.body + prefix)
+                        }
+                    },
+                    label = { Text("1. Numbered") },
+                    modifier = Modifier.testTag("md_btn_numbered")
+                )
+                AssistChip(
+                    onClick = {
+                        onUpdateDraft { state ->
+                            state.copy(body = state.body + "`code`")
+                        }
+                    },
+                    label = { Text("`Code`") },
+                    modifier = Modifier.testTag("md_btn_code")
                 )
             }
         }
@@ -781,6 +999,7 @@ private fun NoteEditorView(
             onValueChange = { text -> onUpdateDraft { it.copy(tagsText = text) } },
             label = { Text("Tags (comma separated)") },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
             modifier = Modifier.fillMaxWidth()
         )
 
@@ -847,6 +1066,7 @@ private fun NoteEditorView(
                             },
                             placeholder = { Text("Add checklist item…") },
                             singleLine = true,
+                            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("note_checklist_new_input")
@@ -897,6 +1117,7 @@ private fun NoteEditorView(
                 onValueChange = { text -> onUpdateDraft { it.copy(body = text, editorError = null) } },
                 label = { Text("Encrypted Note Content") },
                 minLines = 8,
+                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("note_editor_body_input")
@@ -917,6 +1138,36 @@ fun FolderManagementDialog(
     var newFolderName by remember { mutableStateOf("") }
     var editingFolderId by remember { mutableStateOf<String?>(null) }
     var editingFolderName by remember { mutableStateOf("") }
+    var pendingDeleteFolder by remember { mutableStateOf<VaultFolder?>(null) }
+
+    if (pendingDeleteFolder != null) {
+        val folderToDelete = pendingDeleteFolder!!
+        AlertDialog(
+            onDismissRequest = { pendingDeleteFolder = null },
+            title = { Text("Delete Folder '${folderToDelete.name}'?") },
+            text = {
+                Text(
+                    "Any items currently inside '${folderToDelete.name}' will be safely moved to the default General folder."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingDeleteFolder = null
+                        onDeleteFolder(folderToDelete.id)
+                    },
+                    modifier = Modifier.testTag("confirm_delete_folder_button")
+                ) {
+                    Text("Delete Folder")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteFolder = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -944,6 +1195,7 @@ fun FolderManagementDialog(
                         onValueChange = { newFolderName = it },
                         label = { Text("New folder name") },
                         singleLine = true,
+                        keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
                         modifier = Modifier
                             .weight(1f)
                             .testTag("new_folder_name_input")
@@ -979,6 +1231,7 @@ fun FolderManagementDialog(
                                 value = editingFolderName,
                                 onValueChange = { editingFolderName = it },
                                 singleLine = true,
+                                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
                                 modifier = Modifier.weight(1f)
                             )
                             TextButton(
@@ -1034,7 +1287,7 @@ fun FolderManagementDialog(
                                         )
                                     }
                                     IconButton(
-                                        onClick = { onDeleteFolder(folder.id) },
+                                        onClick = { pendingDeleteFolder = folder },
                                         modifier = Modifier.size(32.dp)
                                     ) {
                                         Icon(
@@ -1084,6 +1337,11 @@ private fun MarkdownPreviewBlock(markdown: String) {
                 trimmed.startsWith("- ") || trimmed.startsWith("* ") -> Text(
                     text = "• " + trimmed.drop(2),
                     style = MaterialTheme.typography.bodyMedium
+                )
+                NUMBERED_LIST_REGEX.matches(trimmed) -> Text(
+                    text = trimmed,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium
                 )
                 trimmed.startsWith("> ") -> Text(
                     text = trimmed.removePrefix("> "),

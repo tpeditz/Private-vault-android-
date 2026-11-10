@@ -38,6 +38,12 @@ object PortableBackupEngine {
         REPLACE_ACTIVE_VAULT
     }
 
+    enum class BackupExportScope(val label: String) {
+        ALL_DATA("All Vault Data"),
+        NOTES_ONLY("Notes Only"),
+        PASSWORDS_ONLY("Passwords Only")
+    }
+
     data class BackupPayload(
         val exportedAtEpochMs: Long,
         val appVersionName: String,
@@ -46,6 +52,7 @@ object PortableBackupEngine {
         val notesCount: Int get() = items.count { it is NoteRecord }
         val credentialsCount: Int get() = items.count { it is CredentialRecord }
         val foldersCount: Int get() = items.count { it is VaultFolder }
+        val isEmptyBackup: Boolean get() = items.none { it is NoteRecord || it is CredentialRecord }
     }
 
     /**
@@ -54,7 +61,7 @@ object PortableBackupEngine {
     fun createEncryptedBackupBytes(
         items: List<VaultItem>,
         backupPasswordChars: CharArray,
-        appVersionName: String = "1.0.1",
+        appVersionName: String = "1.0.4",
         kdfParams: CryptoEngine.KdfParams = CryptoEngine.KdfParams(),
         exportedAtEpochMs: Long = System.currentTimeMillis()
     ): ByteArray {
@@ -66,7 +73,12 @@ object PortableBackupEngine {
 
         val salt = CryptoEngine.generateSalt()
         val nonce = CryptoEngine.generateNonce()
-        val backupKek = CryptoEngine.deriveKeyArgon2id(backupPasswordChars, salt, kdfParams)
+        val backupKek = CryptoEngine.deriveKeyArgon2id(
+            passwordChars = backupPasswordChars,
+            salt = salt,
+            params = kdfParams,
+            normalizeUnicodeNfc = true
+        )
 
         var plaintextBytes = ByteArray(0)
         try {
@@ -123,7 +135,8 @@ object PortableBackupEngine {
 
     /**
      * Validates the `.pvault` header, enforces KDF bounds, derives the backup key, verifies the
-     * AES-256-GCM authentication tag in memory, and parses all records BEFORE any database write.
+     * AES-256-GCM authentication tag in memory, and strictly validates the `records` array and all
+     * record fields BEFORE any database write (`PV-DATA-001`, `PV-SEC-011`).
      */
     @Throws(
         IllegalArgumentException::class,
@@ -176,38 +189,110 @@ object PortableBackupEngine {
         val ciphertext = ByteArray(ciphertextLength)
         buffer.get(ciphertext)
 
-        val backupKek = CryptoEngine.deriveKeyArgon2id(backupPasswordChars, salt, kdfParams)
+        val aad = CryptoEngine.buildBackupAad(schemaVersion, kdfParams)
+        var backupKek = CryptoEngine.deriveKeyArgon2id(
+            passwordChars = backupPasswordChars,
+            salt = salt,
+            params = kdfParams,
+            normalizeUnicodeNfc = true
+        )
         var decryptedBytes = ByteArray(0)
         try {
-            val aad = CryptoEngine.buildBackupAad(schemaVersion, kdfParams)
-            decryptedBytes = CryptoEngine.decryptAesGcm(
-                keyBytes = backupKek,
-                nonce = nonce,
-                ciphertext = ciphertext,
-                aad = aad
-            )
+            decryptedBytes = try {
+                CryptoEngine.decryptAesGcm(
+                    keyBytes = backupKek,
+                    nonce = nonce,
+                    ciphertext = ciphertext,
+                    aad = aad
+                )
+            } catch (tagEx: AEADBadTagException) {
+                // PV-SEC-011: If the backup password contains unnormalized non-ASCII characters,
+                // retry once with the raw unnormalized UTF-8 representation for backward compatibility.
+                if (CryptoEngine.hasDistinctLegacyNonNfcForm(backupPasswordChars)) {
+                    Arrays.fill(backupKek, 0.toByte())
+                    backupKek = CryptoEngine.deriveKeyArgon2id(
+                        passwordChars = backupPasswordChars,
+                        salt = salt,
+                        params = kdfParams,
+                        normalizeUnicodeNfc = false
+                    )
+                    CryptoEngine.decryptAesGcm(
+                        keyBytes = backupKek,
+                        nonce = nonce,
+                        ciphertext = ciphertext,
+                        aad = aad
+                    )
+                } else {
+                    throw tagEx
+                }
+            }
 
-            val root = JSONObject(String(decryptedBytes, StandardCharsets.UTF_8))
-            val exportedAt = root.optLong("exportedAtEpochMs", 0L)
-            val appVersion = root.optString("appVersionName", "unknown")
-            val recordsArray = root.optJSONArray("records") ?: JSONArray()
+            val root = try {
+                JSONObject(String(decryptedBytes, StandardCharsets.UTF_8))
+            } catch (_: Exception) {
+                throw IllegalArgumentException("Malformed backup payload: invalid JSON structure.")
+            }
+
+            if (root.has("backupSchemaVersion")) {
+                val innerVersion = root.optInt("backupSchemaVersion", -1)
+                require(innerVersion == CryptoEngine.BACKUP_SCHEMA_VERSION) {
+                    "Unsupported inner backup schema version: $innerVersion"
+                }
+            }
+
+            // PV-DATA-001: Strictly require a present, non-null JSONArray 'records' property.
+            // Never coerce a missing, null, or wrong-typed 'records' property into an empty array!
+            if (!root.has("records") || root.isNull("records")) {
+                throw IllegalArgumentException("Malformed backup payload: missing required 'records' array.")
+            }
+            val rawRecordsValue = root.get("records")
+            if (rawRecordsValue !is JSONArray) {
+                throw IllegalArgumentException("Malformed backup payload: 'records' must be a JSON array.")
+            }
+            val recordsArray = rawRecordsValue
 
             require(recordsArray.length() <= MAX_RECORDS_PER_BACKUP) {
                 "Backup contains too many records (${recordsArray.length()} > $MAX_RECORDS_PER_BACKUP)."
             }
 
+            val exportedAt = root.optLong("exportedAtEpochMs", 0L)
+            require(exportedAt >= 0L) {
+                "Malformed backup payload: invalid exportedAtEpochMs timestamp."
+            }
+            val appVersion = root.optString("appVersionName", "unknown")
+            require(appVersion.length <= 64) {
+                "Malformed backup payload: invalid appVersionName length."
+            }
+
             val items = mutableListOf<VaultItem>()
             val seenIds = HashSet<String>(recordsArray.length())
             for (i in 0 until recordsArray.length()) {
-                val obj = recordsArray.optJSONObject(i)
-                    ?: throw IllegalArgumentException("Malformed record at index $i in backup.")
-                val decoded = VaultRecordCodec.decodeFromJsonObject(obj)
+                if (recordsArray.isNull(i)) {
+                    throw IllegalArgumentException("Malformed record at index $i in backup: null element.")
+                }
+                val elem = recordsArray.get(i)
+                val obj = elem as? JSONObject
+                    ?: throw IllegalArgumentException("Malformed record at index $i in backup: expected JSON object.")
+                if (!obj.has("id") || obj.isNull("id") || obj.optString("id", "").isBlank()) {
+                    throw IllegalArgumentException("Malformed record at index $i in backup: missing or blank record ID.")
+                }
+                if (!obj.has("recordType") || obj.isNull("recordType")) {
+                    throw IllegalArgumentException("Malformed record at index $i in backup: missing recordType.")
+                }
+
+                val decoded = try {
+                    VaultRecordCodec.decodeFromJsonObject(obj)
+                } catch (e: Exception) {
+                    throw IllegalArgumentException("Malformed record at index $i in backup: ${e.message}")
+                }
                 validateDecodedRecordLimits(decoded)
                 require(seenIds.add(decoded.id)) {
                     "Backup contains duplicate record ID: ${decoded.id}"
                 }
                 items.add(decoded)
             }
+
+            validateFolderReferences(items)
 
             return BackupPayload(
                 exportedAtEpochMs = exportedAt,
@@ -226,20 +311,47 @@ object PortableBackupEngine {
         require(item.id.isNotBlank() && item.id.length <= 128) {
             "Invalid record ID length in backup."
         }
+        require(item.createdAtEpochMs >= 0L && item.updatedAtEpochMs >= 0L) {
+            "Invalid negative timestamp in backup record."
+        }
         when (item) {
             is NoteRecord -> {
-                require(item.title.length <= MAX_FIELD_CHARS && item.body.length <= MAX_FIELD_CHARS) {
-                    "Note record in backup exceeds maximum allowed text length."
+                require(
+                    item.title.length <= MAX_FIELD_CHARS &&
+                        item.body.length <= MAX_FIELD_CHARS &&
+                        item.category.length <= 120 &&
+                        item.folderName.isNotBlank() &&
+                        item.folderName.length <= 120 &&
+                        item.folderId.isNotBlank() &&
+                        item.folderId.length <= 128 &&
+                        !VaultFolder.isReservedAllName(item.folderName)
+                ) {
+                    "Note record in backup has invalid field lengths or folder metadata."
+                }
+                require(item.checklistItems.size <= 1_000) {
+                    "Note record in backup exceeds maximum checklist item count."
                 }
             }
             is CredentialRecord -> {
                 require(
-                    item.serviceName.length <= MAX_FIELD_CHARS &&
+                    item.serviceName.isNotBlank() &&
+                        item.serviceName.length <= MAX_FIELD_CHARS &&
+                        item.accountLabel.length <= 120 &&
                         item.username.length <= MAX_FIELD_CHARS &&
                         item.password.length <= MAX_FIELD_CHARS &&
-                        item.notes.length <= MAX_FIELD_CHARS
+                        item.websiteUrl.length <= MAX_FIELD_CHARS &&
+                        item.notes.length <= MAX_FIELD_CHARS &&
+                        item.category.length <= 120 &&
+                        item.folderName.isNotBlank() &&
+                        item.folderName.length <= 120 &&
+                        item.folderId.isNotBlank() &&
+                        item.folderId.length <= 128 &&
+                        !VaultFolder.isReservedAllName(item.folderName)
                 ) {
-                    "Credential record in backup exceeds maximum allowed field length."
+                    "Credential record in backup has invalid field lengths or folder metadata."
+                }
+                require(item.customFields.size <= 200) {
+                    "Credential record in backup exceeds maximum custom field count."
                 }
             }
             is VaultFolder -> {
@@ -249,6 +361,47 @@ object PortableBackupEngine {
                 require(!VaultFolder.isReservedAllName(item.name)) {
                     "Folder record in backup uses reserved filter name 'All'."
                 }
+            }
+        }
+    }
+
+    /**
+     * Ensures no note or credential references a folder defined for the wrong scope (e.g., a Note
+     * pointing to a CREDENTIALS folder ID) and rejects duplicate folder names within the same scope.
+     */
+    private fun validateFolderReferences(items: List<VaultItem>) {
+        val folders = items.filterIsInstance<VaultFolder>()
+        val foldersById = folders.associateBy { it.id }
+
+        items.forEach { item ->
+            when (item) {
+                is NoteRecord -> {
+                    val referencedFolder = foldersById[item.folderId]
+                    if (referencedFolder != null && referencedFolder.scope != FolderScope.NOTES) {
+                        throw IllegalArgumentException(
+                            "Malformed backup: note references a folder from the ${referencedFolder.scope} scope."
+                        )
+                    }
+                    if (item.folderId == VaultFolder.DEFAULT_CREDENTIAL_FOLDER_ID) {
+                        throw IllegalArgumentException(
+                            "Malformed backup: note references the default credentials folder ID."
+                        )
+                    }
+                }
+                is CredentialRecord -> {
+                    val referencedFolder = foldersById[item.folderId]
+                    if (referencedFolder != null && referencedFolder.scope != FolderScope.CREDENTIALS) {
+                        throw IllegalArgumentException(
+                            "Malformed backup: credential references a folder from the ${referencedFolder.scope} scope."
+                        )
+                    }
+                    if (item.folderId == VaultFolder.DEFAULT_NOTE_FOLDER_ID) {
+                        throw IllegalArgumentException(
+                            "Malformed backup: credential references the default notes folder ID."
+                        )
+                    }
+                }
+                else -> {}
             }
         }
     }
@@ -287,7 +440,6 @@ object PortableBackupEngine {
                     folderIdRemap[item.id] = item
                 } else {
                     val winner = if (item.updatedAtEpochMs > existingFolder.updatedAtEpochMs) {
-                        // Keep stable existing ID when possible, or update name casing
                         existingFolder.copy(
                             name = item.name.trim(),
                             updatedAtEpochMs = item.updatedAtEpochMs

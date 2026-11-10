@@ -3,6 +3,7 @@ package com.example.security
 import android.content.Context
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import androidx.biometric.BiometricManager
@@ -10,15 +11,18 @@ import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * Manages hardware-backed Android Keystore wrapping of the Real Vault DEK when Decoy Mode is disabled.
+ * Manages Android Keystore wrapping of the Real Vault DEK when Decoy Mode is disabled.
  *
  * Security Rules:
  * - Biometric unlock is ONLY permitted when Decoy Mode is disabled.
  * - Enabling Decoy Mode immediately deletes the Keystore key and wipes any biometric wrapper bytes.
  * - BiometricPrompt must authenticate a cryptographic Cipher object, never a boolean UI callback.
+ * - PV-SEC-001 & PV-SEC-005: Enforces per-operation Class 3 (BIOMETRIC_STRONG) authentication
+ *   parameters on API 30+ and queries `KeyInfo` before reporting hardware-backed key storage.
  */
 object BiometricKeyEnvelopeHelper {
 
@@ -32,10 +36,45 @@ object BiometricKeyEnvelopeHelper {
         val ciphertext: ByteArray
     )
 
-    fun hasHardwareKey(): Boolean {
+    /**
+     * Checks whether the Android Keystore contains the enrolled biometric wrapper key alias.
+     * Note: Alias presence alone does not guarantee hardware TEE/StrongBox backing (`PV-SEC-001`).
+     */
+    fun hasKeystoreKey(): Boolean {
         return try {
             val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
             keyStore.containsAlias(KEY_ALIAS_REAL_VAULT_BIO)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    @Deprecated(
+        message = "Use hasKeystoreKey() for alias checks or isHardwareBackedKey() to verify hardware backing.",
+        replaceWith = ReplaceWith("hasKeystoreKey()")
+    )
+    fun hasHardwareKey(): Boolean = hasKeystoreKey()
+
+    /**
+     * Queries Android Keystore `KeyInfo` to determine whether the enrolled biometric key is
+     * genuinely backed by secure hardware (TEE or StrongBox) rather than software (`PV-SEC-001`).
+     */
+    fun isHardwareBackedKey(): Boolean {
+        return try {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+            val secretKey = keyStore.getKey(KEY_ALIAS_REAL_VAULT_BIO, null) as? SecretKey
+                ?: return false
+            val factory = SecretKeyFactory.getInstance(secretKey.algorithm, ANDROID_KEYSTORE)
+            val keyInfo = factory.getKeySpec(secretKey, KeyInfo::class.java) as? KeyInfo
+                ?: return false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val level = keyInfo.securityLevel
+                level == KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT ||
+                    level == KeyProperties.SECURITY_LEVEL_STRONGBOX
+            } else {
+                @Suppress("DEPRECATION")
+                keyInfo.isInsideSecureHardware
+            }
         } catch (_: Exception) {
             false
         }
@@ -53,6 +92,14 @@ object BiometricKeyEnvelopeHelper {
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                 .setKeySize(256)
                 .setUserAuthenticationRequired(true)
+
+            // PV-SEC-005: Explicitly enforce per-operation Class 3 strong biometric authentication
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                builder.setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
+            } else {
+                @Suppress("DEPRECATION")
+                builder.setUserAuthenticationValidityDurationSeconds(-1)
+            }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                 builder.setInvalidatedByBiometricEnrollment(true)

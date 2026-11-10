@@ -1025,6 +1025,338 @@ class ExampleRobolectricTest {
         )
     }
 
+    @Test
+    fun `PV-DATA-001 & PV-BUG-009 - Malformed backup JSON variants fail closed before any DB write and empty backup sets isEmptyBackup`() = runBlocking {
+        val realPass = "RealVaultIntegrity!100".toCharArray()
+        val decoyPass = "DecoyVaultIntegrity!200".toCharArray()
+        val realSession = repository.initializeNewVault(
+            realMasterPasswordChars = realPass,
+            optionalDecoyPasswordChars = decoyPass,
+            seedSampleDataInRealVault = false,
+            seedSampleDataInDecoyVault = false
+        )
+
+        val protectedRealNote = NoteRecord(
+            id = "protected-real-note-001",
+            title = "Critical Real Vault Note",
+            body = "Must never be wiped by malformed backup payload"
+        )
+        repository.saveVaultItem(realSession.sessionId, protectedRealNote)
+
+        sessionManager.lockNow()
+        val decoySession = (repository.unlockWithPassword(decoyPass) as VaultRepository.UnlockResult.Success).session
+        val protectedDecoyNote = NoteRecord(
+            id = "protected-decoy-note-001",
+            title = "Critical Decoy Vault Note",
+            body = "Inactive slot must also remain untouched"
+        )
+        repository.saveVaultItem(decoySession.sessionId, protectedDecoyNote)
+
+        sessionManager.lockNow()
+        val unlockedReal = (repository.unlockWithPassword(realPass) as VaultRepository.UnlockResult.Success).session
+
+        val backupPass = "MalformedTestBackupPass!99".toCharArray()
+        val malformedJsonPayloads = listOf(
+            """{"containerFormat":"PVAULT-PORTABLE-V1","exportedAtEpochMs":1700000000000}""", // missing records
+            """{"containerFormat":"PVAULT-PORTABLE-V1","exportedAtEpochMs":1700000000000,"records":null}""", // null records
+            """{"containerFormat":"PVAULT-PORTABLE-V1","exportedAtEpochMs":1700000000000,"records":"corrupted"}""", // string records
+            """{"containerFormat":"PVAULT-PORTABLE-V1","exportedAtEpochMs":1700000000000,"records":12345}""", // number records
+            """{"containerFormat":"PVAULT-PORTABLE-V1","exportedAtEpochMs":1700000000000,"records":{}}""", // object records
+            """{"containerFormat":"PVAULT-PORTABLE-V1","exportedAtEpochMs":1700000000000,"records":[null]}""", // null array item
+            """{"containerFormat":"PVAULT-PORTABLE-V1","exportedAtEpochMs":1700000000000,"records":[{"id":"","recordType":"NOTE"}]}""", // blank id
+            """{"containerFormat":"PVAULT-PORTABLE-V1","exportedAtEpochMs":1700000000000,"records":[{"id":"x1","recordType":"UNKNOWN_TYPE"}]}""" // invalid recordType
+        )
+
+        for (rawJson in malformedJsonPayloads) {
+            val craftedBackupBytes = craftSignedBackupContainerForRawJson(rawJson, backupPass)
+            var rejected = false
+            try {
+                repository.applyVerifiedBackupRestore(
+                    sessionId = unlockedReal.sessionId,
+                    backupBytes = craftedBackupBytes,
+                    backupPasswordChars = backupPass.copyOf(),
+                    restoreMode = PortableBackupEngine.RestoreMode.REPLACE_ACTIVE_VAULT
+                )
+            } catch (_: IllegalArgumentException) {
+                rejected = true
+            }
+            assertTrue("Expected malformed payload '$rawJson' to be rejected with IllegalArgumentException", rejected)
+        }
+
+        // Verify active Real slot AND inactive Decoy slot remain 100% intact after all rejected REPLACE attempts
+        val remainingRealNotes = repository.loadDecryptedRecordsForSession(unlockedReal.sessionId)
+            .filterIsInstance<NoteRecord>()
+        assertEquals(1, remainingRealNotes.size)
+        assertEquals("Critical Real Vault Note", remainingRealNotes.first().title)
+
+        sessionManager.lockNow()
+        val reUnlockedDecoy = (repository.unlockWithPassword(decoyPass) as VaultRepository.UnlockResult.Success).session
+        val remainingDecoyNotes = repository.loadDecryptedRecordsForSession(reUnlockedDecoy.sessionId)
+            .filterIsInstance<NoteRecord>()
+        assertEquals(1, remainingDecoyNotes.size)
+        assertEquals("Critical Decoy Vault Note", remainingDecoyNotes.first().title)
+
+        // Verify valid empty backup {"records":[]} is recognized with isEmptyBackup = true
+        val validEmptyJson = """{"backupSchemaVersion":1,"exportedAtEpochMs":1700000000000,"appVersionName":"1.0.4","records":[]}"""
+        val validEmptyBytes = craftSignedBackupContainerForRawJson(validEmptyJson, backupPass)
+        val parsedEmpty = PortableBackupEngine.decryptAndVerifyBackupBytes(validEmptyBytes, backupPass.copyOf())
+        assertTrue(parsedEmpty.isEmptyBackup)
+        assertEquals(0, parsedEmpty.items.size)
+
+        // PV-BUG-009: Verify selective export scope (NOTES_ONLY vs PASSWORDS_ONLY)
+        sessionManager.lockNow()
+        val realForScope = (repository.unlockWithPassword(realPass) as VaultRepository.UnlockResult.Success).session
+        repository.saveVaultItem(
+            realForScope.sessionId,
+            CredentialRecord(
+                id = "scope-cred-001",
+                serviceName = "Scoped Service",
+                username = "scoped_user",
+                password = "ScopedPassword!123",
+                accountLabel = "Work Account",
+                isArchived = true
+            )
+        )
+        val notesOnlyBytes = repository.prepareEncryptedBackupBytes(
+            sessionId = realForScope.sessionId,
+            backupPasswordChars = backupPass.copyOf(),
+            exportScope = PortableBackupEngine.BackupExportScope.NOTES_ONLY
+        )
+        val parsedNotesOnly = PortableBackupEngine.decryptAndVerifyBackupBytes(notesOnlyBytes, backupPass.copyOf())
+        assertEquals(1, parsedNotesOnly.notesCount)
+        assertEquals(0, parsedNotesOnly.credentialsCount)
+
+        val passwordsOnlyBytes = repository.prepareEncryptedBackupBytes(
+            sessionId = realForScope.sessionId,
+            backupPasswordChars = backupPass.copyOf(),
+            exportScope = PortableBackupEngine.BackupExportScope.PASSWORDS_ONLY
+        )
+        val parsedPasswordsOnly = PortableBackupEngine.decryptAndVerifyBackupBytes(passwordsOnlyBytes, backupPass.copyOf())
+        assertEquals(0, parsedPasswordsOnly.notesCount)
+        assertEquals(1, parsedPasswordsOnly.credentialsCount)
+        val restoredCred = parsedPasswordsOnly.items.filterIsInstance<CredentialRecord>().first()
+        assertEquals("Work Account", restoredCred.accountLabel)
+        assertTrue(restoredCred.isArchived)
+    }
+
+    @Test
+    fun `PV-CRYPTO-001, PV-SEC-006, PV-SEC-009, PV-SEC-010, PV-SEC-011 - Strict envelope header validation, unguessable dummy slot, zero-row empty vault, atomic DEK rotation, and Unicode NFC normalization`() = runBlocking {
+        // 1. PV-CRYPTO-001: Tamper with inner envelope header fields before wrapping and verify unwrapEnvelopePayloadOrNull rejects them
+        val kek = CryptoEngine.generateDek()
+        val dek = CryptoEngine.generateDek()
+        val nonce = CryptoEngine.generateNonce()
+        val validWrapped = CryptoEngine.wrapEnvelopePayload(
+            kekBytes = kek,
+            nonce = nonce,
+            slotId = 0,
+            envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
+            params = testKdfParams,
+            payload = CryptoEngine.UnwrappedEnvelopePayload(
+                slotRoleFlag = CryptoEngine.SLOT_ROLE_ACTIVE,
+                decoyPolicyFlag = CryptoEngine.DECOY_POLICY_DISABLED,
+                createdAtEpochMs = 1_700_000_000_000L,
+                rotatedAtEpochMs = 1_700_000_000_000L,
+                dekBytes = dek
+            )
+        )
+        assertNotNull(
+            CryptoEngine.unwrapEnvelopePayloadOrNull(
+                kekBytes = kek,
+                nonce = nonce,
+                slotId = 0,
+                envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
+                params = testKdfParams,
+                wrappedCiphertext = validWrapped
+            )
+        )
+
+        // Craft an envelope with invalid roleFlag (0x7F) and verify unwrap returns null
+        val invalidRoleCiphertext = CryptoEngine.wrapEnvelopePayload(
+            kekBytes = kek,
+            nonce = nonce,
+            slotId = 0,
+            envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
+            params = testKdfParams,
+            payload = CryptoEngine.UnwrappedEnvelopePayload(
+                slotRoleFlag = 0x7F.toByte(),
+                decoyPolicyFlag = CryptoEngine.DECOY_POLICY_DISABLED,
+                createdAtEpochMs = 1_700_000_000_000L,
+                rotatedAtEpochMs = 1_700_000_000_000L,
+                dekBytes = dek
+            )
+        )
+        assertEquals(
+            null,
+            CryptoEngine.unwrapEnvelopePayloadOrNull(
+                kekBytes = kek,
+                nonce = nonce,
+                slotId = 0,
+                envelopeVersion = CryptoEngine.ENVELOPE_VERSION,
+                params = testKdfParams,
+                wrappedCiphertext = invalidRoleCiphertext
+            )
+        )
+
+        // 2. PV-SEC-006 & PV-SEC-009: Initialize vault with Decoy disabled and seedSampleData = false
+        val nfcPass = "Caf\u00E9VaultMaster!2026".toCharArray() // precomposed 'é' (U+00E9)
+        val nfdPass = "Cafe\u0301VaultMaster!2026".toCharArray() // decomposed 'e' + U+0301
+        val session = repository.initializeNewVault(
+            realMasterPasswordChars = nfcPass.copyOf(),
+            optionalDecoyPasswordChars = null,
+            seedSampleDataInRealVault = false,
+            seedSampleDataInDecoyVault = false
+        )
+
+        // PV-SEC-009: Verify zero rows written to encrypted_records when seedSampleData is false, while default folders are synthesized in memory
+        assertEquals(0, database.vaultDao().countRecordsForSlot(VaultSessionManager.REAL_SLOT))
+        assertEquals(0, database.vaultDao().countRecordsForSlot(VaultSessionManager.DECOY_SLOT))
+        val synthesizedItems = repository.loadDecryptedRecordsForSession(session.sessionId)
+        assertEquals(2, synthesizedItems.filterIsInstance<VaultFolder>().size)
+
+        // PV-SEC-006: Verify dummy Slot 1 cannot be unlocked with "xxxxxxxxxxxxxxxx"
+        sessionManager.lockNow()
+        val dummyUnlockAttempt = repository.unlockWithPassword("xxxxxxxxxxxxxxxx".toCharArray())
+        assertTrue(dummyUnlockAttempt is VaultRepository.UnlockResult.InvalidCredentials)
+
+        // 3. PV-SEC-011: Verify decomposed NFD password unlocks the vault created with precomposed NFC password
+        val nfdUnlock = repository.unlockWithPassword(nfdPass.copyOf())
+        assertTrue("Decomposed NFD password must unlock NFC-created vault (PV-SEC-011)", nfdUnlock is VaultRepository.UnlockResult.Success)
+
+        // 4. PV-SEC-010: Full cryptographic DEK rotation re-encrypts all records in the active slot atomically
+        val activeSession = (nfdUnlock as VaultRepository.UnlockResult.Success).session
+        val noteBeforeRekey = NoteRecord(
+            id = "rekey-note-001",
+            title = "Rekey Atomic Verification",
+            body = "Ciphertext must change when DEK rotates",
+            isArchived = true
+        )
+        repository.saveVaultItem(activeSession.sessionId, noteBeforeRekey)
+        val rawBeforeRekey = database.vaultDao().getRecordById(VaultSessionManager.REAL_SLOT, noteBeforeRekey.id)!!
+
+        val rotatedPass = "NewRotatedMasterPass!2027".toCharArray()
+        repository.changeActiveVaultPassword(
+            sessionId = activeSession.sessionId,
+            currentPasswordChars = nfcPass.copyOf(),
+            newPasswordChars = rotatedPass.copyOf(),
+            rekeyAllRecordsWithNewDek = true
+        )
+
+        val rawAfterRekey = database.vaultDao().getRecordById(VaultSessionManager.REAL_SLOT, noteBeforeRekey.id)!!
+        assertFalse(
+            "Record ciphertext must be re-encrypted under a new DEK when rekeyAllRecordsWithNewDek = true",
+            rawBeforeRekey.ciphertext.contentEquals(rawAfterRekey.ciphertext)
+        )
+
+        val loadedAfterRekey = repository.loadDecryptedRecordsForSession(activeSession.sessionId)
+            .filterIsInstance<NoteRecord>()
+            .first { it.id == noteBeforeRekey.id }
+        assertEquals("Rekey Atomic Verification", loadedAfterRekey.title)
+        assertTrue(loadedAfterRekey.isArchived)
+    }
+
+    @Test
+    fun `PV-SEC-003, PV-SEC-007, PV-SEC-008, PV-BUG-003, PV-BUG-007 - Unbiased generator error reporting, passphrase entropy, proactive background lock, decoy-neutral biometric state, and note dirty guard`() = runBlocking {
+        // 1. PV-SEC-003: Generator returns explicit InvalidConfig when all character sets are disabled
+        val invalidGen = com.example.security.PasswordGeneratorEngine.generate(
+            com.example.security.PasswordGeneratorEngine.GeneratorConfig(
+                includeUppercase = false,
+                includeLowercase = false,
+                includeDigits = false,
+                includeSymbols = false
+            )
+        )
+        assertTrue(invalidGen is com.example.security.PasswordGeneratorEngine.GenerationResult.InvalidConfig)
+
+        // Multi-word passphrase evaluation awards realistic word-list entropy
+        val passphraseReport = OfflinePasswordStrengthEstimator.evaluate("Amber-Anchor-Apollo-Arctic-Arrow-Atlas-42")
+        assertTrue(
+            "6-word passphrase must achieve STRONG or FORTRESS rating (got ${passphraseReport.band}, score=${passphraseReport.score})",
+            passphraseReport.score >= 70
+        )
+
+        // 2. PV-SEC-008 & PV-BUG-003 & PV-BUG-007: Verify ViewModel decoy-neutral biometric policy, note dirty guard, and duplicate/archive helpers
+        val realPass = "RealNeutralBio!100".toCharArray()
+        val decoyPass = "DecoyNeutralBio!200".toCharArray()
+        val realSession = repository.initializeNewVault(
+            realMasterPasswordChars = realPass,
+            optionalDecoyPasswordChars = decoyPass,
+            seedSampleDataInRealVault = false,
+            seedSampleDataInDecoyVault = false
+        )
+
+        val prefsRepo = AppPreferencesRepository(context)
+        val viewModel = VaultViewModel(
+            appContext = context,
+            vaultRepository = repository,
+            preferencesRepository = prefsRepo,
+            otaUpdateManager = OtaUpdateManager(context),
+            enableStartupOtaCheck = false
+        )
+        viewModel.refreshActiveVaultItems(realSession.sessionId)?.join()
+        assertTrue("Real session with Decoy Mode enabled must expose isBiometricBlockedByPolicy = true", viewModel.uiState.value.isBiometricBlockedByPolicy)
+
+        // PV-BUG-003: Create a note with a known past timestamp, open it in the editor, and verify isDirty is false when untouched
+        val fixedPastTime = 1_650_000_000_000L
+        val existingNote = NoteRecord(
+            id = "untouched-note-001",
+            title = "Untouched Note",
+            body = "Original body",
+            createdAtEpochMs = fixedPastTime,
+            updatedAtEpochMs = fixedPastTime
+        )
+        repository.saveVaultItem(realSession.sessionId, existingNote)
+        viewModel.refreshActiveVaultItems(realSession.sessionId)?.join()
+
+        viewModel.openExistingNoteDraft(existingNote)
+        assertFalse("Newly opened existing note must have isDirty == false", viewModel.uiState.value.activeNoteDraft?.isDirty ?: true)
+        viewModel.commitActiveNoteDraft(closeOnSuccess = true, isSilentAutosave = true)
+        val afterCloseNoEdit = repository.loadDecryptedRecordsForSession(realSession.sessionId)
+            .filterIsInstance<NoteRecord>()
+            .first { it.id == existingNote.id }
+        assertEquals(
+            "Closing an untouched note must not mutate updatedAtEpochMs (PV-BUG-003)",
+            fixedPastTime,
+            afterCloseNoEdit.updatedAtEpochMs
+        )
+
+        // Unlock Decoy Vault and verify identical isBiometricBlockedByPolicy == true (PV-SEC-008)
+        sessionManager.lockNow()
+        val decoySession = (repository.unlockWithPassword(decoyPass) as VaultRepository.UnlockResult.Success).session
+        viewModel.refreshActiveVaultItems(decoySession.sessionId)?.join()
+        assertTrue("Decoy session must expose identical isBiometricBlockedByPolicy = true", viewModel.uiState.value.isBiometricBlockedByPolicy)
+
+        // 3. PV-SEC-007: Proactive background auto-lock with 0ms timeout locks immediately on background
+        viewModel.setAutoLockTimeoutMs(0L)
+        viewModel.onAppBackgrounded()
+        assertFalse("Session must lock immediately when backgrounded with 0ms auto-lock timeout", sessionManager.isSessionActive(decoySession.sessionId))
+    }
+
+    private fun craftSignedBackupContainerForRawJson(
+        rawJson: String,
+        passwordChars: CharArray
+    ): ByteArray {
+        val salt = CryptoEngine.generateSalt()
+        val nonce = CryptoEngine.generateNonce()
+        val header = ByteArray(PortableBackupEngine.HEADER_BYTES)
+        java.nio.ByteBuffer.wrap(header)
+            .put("PVAULTB1".toByteArray(Charsets.US_ASCII))
+            .putInt(CryptoEngine.BACKUP_SCHEMA_VERSION)
+            .putInt(testKdfParams.memoryKb)
+            .putInt(testKdfParams.iterations)
+            .putInt(testKdfParams.parallelism)
+            .put(salt)
+            .put(nonce)
+        val key = CryptoEngine.deriveKeyArgon2id(passwordChars, salt, testKdfParams)
+        val aad = CryptoEngine.buildBackupAad(CryptoEngine.BACKUP_SCHEMA_VERSION, testKdfParams)
+        val ciphertext = CryptoEngine.encryptAesGcm(
+            keyBytes = key,
+            nonce = nonce,
+            plaintext = rawJson.toByteArray(Charsets.UTF_8),
+            aad = aad
+        )
+        return header + ciphertext
+    }
+
     private fun generateRsaKeyPair(): java.security.KeyPair {
         val kpg = KeyPairGenerator.getInstance("RSA")
         kpg.initialize(2048)

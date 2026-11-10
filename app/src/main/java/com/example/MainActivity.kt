@@ -98,7 +98,6 @@ import com.example.ota.OtaUpdateManager
 import com.example.security.VaultSessionManager
 import com.example.ui.AboutVaultScreen
 import com.example.ui.BackupAndRestoreScreen
-import com.example.ui.GeneratorAndStrengthScreen
 import com.example.ui.NotesTabScreen
 import com.example.ui.OtaThreeOptionUpdateDialog
 import com.example.ui.OtaUpdatesScreen
@@ -106,8 +105,9 @@ import com.example.ui.PasswordsTabScreen
 import com.example.ui.PrimaryTab
 import com.example.ui.SecondaryDestination
 import com.example.ui.SecurityAndDecoySettingsScreen
+import com.example.ui.SettingsHubScreen
 import com.example.ui.SetupVaultScreen
-import com.example.ui.StrengthAuditTabScreen
+import com.example.ui.ToolsTabScreen
 import com.example.ui.UnlockVaultScreen
 import com.example.ui.VaultUiState
 import com.example.ui.VaultViewModel
@@ -322,6 +322,9 @@ fun PrivateVaultRootApp(
             onRetryDownload = { manifest ->
                 viewModel.onOtaUpdateNowSelected(manifest)
             },
+            onCancelDownload = {
+                viewModel.cancelOtaDownload()
+            },
             onDismissError = {
                 viewModel.otaUpdateManager.dismissUpdatePrompt()
             }
@@ -428,6 +431,9 @@ fun PrivateVaultRootApp(
     // Active Unlocked Vault Shell
     var topMenuExpanded by remember { mutableStateOf(false) }
     val isEditorOpen = uiState.activeNoteDraft != null || uiState.activeCredentialDraft != null
+    val isToolsSelected = uiState.primaryTab == PrimaryTab.TOOLS ||
+        uiState.primaryTab == PrimaryTab.GENERATOR ||
+        uiState.primaryTab == PrimaryTab.STRENGTH_AUDIT
 
     BoxWithConstraints(
         modifier = Modifier
@@ -460,7 +466,7 @@ fun PrivateVaultRootApp(
                                         fontWeight = FontWeight.Bold
                                     )
                                     Text(
-                                        text = "AES-256-GCM • Offline Encrypted",
+                                        text = "Encrypted on this device • Offline",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -575,18 +581,18 @@ fun PrivateVaultRootApp(
                             modifier = Modifier.testTag("nav_tab_passwords")
                         )
                         NavigationBarItem(
-                            selected = uiState.primaryTab == PrimaryTab.GENERATOR,
-                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.GENERATOR) },
-                            icon = { Icon(Icons.Filled.Refresh, contentDescription = "Generator") },
-                            label = { Text("Generator") },
-                            modifier = Modifier.testTag("nav_tab_generator")
+                            selected = isToolsSelected,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.TOOLS) },
+                            icon = { Icon(Icons.Filled.Refresh, contentDescription = "Tools") },
+                            label = { Text("Tools") },
+                            modifier = Modifier.testTag("nav_tab_tools")
                         )
                         NavigationBarItem(
-                            selected = uiState.primaryTab == PrimaryTab.STRENGTH_AUDIT,
-                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.STRENGTH_AUDIT) },
-                            icon = { Icon(Icons.Filled.Security, contentDescription = "Strength") },
-                            label = { Text("Strength") },
-                            modifier = Modifier.testTag("nav_tab_strength")
+                            selected = uiState.primaryTab == PrimaryTab.SETTINGS,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.SETTINGS) },
+                            icon = { Icon(Icons.Filled.Settings, contentDescription = "Settings") },
+                            label = { Text("Settings") },
+                            modifier = Modifier.testTag("nav_tab_settings")
                         )
                     }
                 }
@@ -621,17 +627,17 @@ fun PrivateVaultRootApp(
                         )
                         NavigationRailItem(
                             selected = uiState.secondaryDestination == SecondaryDestination.NONE &&
-                                uiState.primaryTab == PrimaryTab.GENERATOR,
-                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.GENERATOR) },
-                            icon = { Icon(Icons.Filled.Refresh, contentDescription = "Generator") },
-                            label = { Text("Generator") }
+                                isToolsSelected,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.TOOLS) },
+                            icon = { Icon(Icons.Filled.Refresh, contentDescription = "Tools") },
+                            label = { Text("Tools") }
                         )
                         NavigationRailItem(
                             selected = uiState.secondaryDestination == SecondaryDestination.NONE &&
-                                uiState.primaryTab == PrimaryTab.STRENGTH_AUDIT,
-                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.STRENGTH_AUDIT) },
-                            icon = { Icon(Icons.Filled.Security, contentDescription = "Strength") },
-                            label = { Text("Strength") }
+                                uiState.primaryTab == PrimaryTab.SETTINGS,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.SETTINGS) },
+                            icon = { Icon(Icons.Filled.Settings, contentDescription = "Settings") },
+                            label = { Text("Settings") }
                         )
                     }
                 }
@@ -719,13 +725,17 @@ fun PrivateVaultRootApp(
                                     viewModel = viewModel
                                 )
 
-                                PrimaryTab.GENERATOR -> GeneratorAndStrengthScreen(
+                                PrimaryTab.TOOLS,
+                                PrimaryTab.GENERATOR,
+                                PrimaryTab.STRENGTH_AUDIT -> ToolsTabScreen(
                                     uiState = uiState,
                                     viewModel = viewModel
                                 )
 
-                                PrimaryTab.STRENGTH_AUDIT -> StrengthAuditTabScreen(
+                                PrimaryTab.SETTINGS -> SettingsHubScreen(
                                     uiState = uiState,
+                                    preferences = preferences,
+                                    otaState = otaState,
                                     viewModel = viewModel
                                 )
                             }
@@ -743,6 +753,7 @@ private fun LockedOtaStatusDialogIfActive(
     onInstallVerifiedApk: (java.io.File) -> Unit,
     onOpenUnknownSourcesSettings: () -> Unit,
     onRetryDownload: (OtaUpdateManager.UpdateManifest) -> Unit,
+    onCancelDownload: () -> Unit,
     onDismissError: () -> Unit
 ) {
     when (otaState) {
@@ -768,7 +779,15 @@ private fun LockedOtaStatusDialogIfActive(
                         )
                     }
                 },
-                confirmButton = {}
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(
+                        onClick = onCancelDownload,
+                        modifier = Modifier.testTag("locked_ota_cancel_download_button")
+                    ) {
+                        Text("Cancel Download")
+                    }
+                }
             )
         }
 

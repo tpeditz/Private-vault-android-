@@ -109,6 +109,20 @@ interface VaultDao {
         upsertEnvelopes(listOf(updatedRealEnvelope, dummyDecoyEnvelope))
         deleteAllRecordsForSlot(decoySlotId)
     }
+
+    /**
+     * PV-SEC-010 Fix: Atomic full-DEK rotation transaction for an active vault slot.
+     * Replaces the slot's key envelope and all re-encrypted records inside a single SQLite transaction.
+     */
+    @Transaction
+    suspend fun rekeySlotAtomically(
+        slotId: Int,
+        updatedEnvelope: VaultEnvelopeEntity,
+        reEncryptedRecords: List<EncryptedRecordEntity>
+    ) {
+        upsertEnvelope(updatedEnvelope)
+        replaceAllRecordsForSlot(slotId, reEncryptedRecords)
+    }
 }
 
 @Database(
