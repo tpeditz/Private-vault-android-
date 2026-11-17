@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      Task 2 Production Release Manifest Hardening:
+      1. Explicitly enforce android:debuggable="false" in the merged release manifest.
+      2. Explicitly remove any development/preview/test activities if any library attempts to merge them.
+      3. Restrict ProfileInstallReceiver so no unnecessary exported receiver is exposed in production.
+    -->
+    <application
+        android:debuggable="false"
+        tools:replace="android:debuggable">
+
+        <activity
+            android:name="androidx.compose.ui.tooling.PreviewActivity"
+            tools:node="remove" />
+
+        <activity
+            android:name="androidx.activity.ComponentActivity"
+            tools:node="remove" />
+
+        <receiver
+            android:name="androidx.profileinstaller.ProfileInstallReceiver"
+            android:exported="false"
+            tools:replace="android:exported" />
+    </application>
+
+</manifest>

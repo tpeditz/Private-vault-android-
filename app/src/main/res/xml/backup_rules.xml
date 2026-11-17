@@ -4,4 +4,5 @@
     <exclude domain="sharedpref" path="." />
     <exclude domain="file" path="." />
     <exclude domain="root" path="." />
+    <exclude domain="no_backup" path="." />
 </full-backup-content>

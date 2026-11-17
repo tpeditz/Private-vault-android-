@@ -2,19 +2,25 @@ package com.example.data
 
 import com.example.security.BiometricKeyEnvelopeHelper
 import com.example.security.CryptoEngine
+import com.example.security.SafeVaultLogger
+import com.example.security.StreamingMediaCryptoEngine
 import com.example.security.VaultSessionManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.InputStream
 import java.util.Arrays
+import java.util.Base64
 import java.util.UUID
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 
 /**
  * Primary repository coordinating encrypted SQLite persistence, two-slot (Real + Decoy) key
- * envelopes, authenticated record CRUD, folder lifecycle, and portable `.pvault` backups.
+ * envelopes, authenticated record CRUD, folder lifecycle, encrypted photo/video vault storage,
+ * and portable `.pvault` backups.
  *
  * Security Invariants:
  * - Both Slot 0 (Real) and Slot 1 (Decoy) envelopes are ALWAYS evaluated during `unlockWithPassword`
@@ -28,14 +34,34 @@ import javax.crypto.Cipher
  *   prohibit biometric enrollment (`R01`).
  * - Record decryption distinguishes valid records from corrupted/unreadable records (`N02`) so
  *   backup export and merge restore never silently drop or delete corrupted ciphertext.
+ * - Imported photos and videos use per-file 256-bit AES-GCM keys (`fileMediaKey` + `thumbnailKey`)
+ *   wrapped inside the slot's `MediaRecord`, and EVERY encrypted chunk (`0 .. N-1`) is verified
+ *   with AES-256-GCM authentication before transitioning from `STAGING` to `COMMITTED`.
  */
 class VaultRepository(
     private val vaultDao: VaultDao,
     val sessionManager: VaultSessionManager = VaultSessionManager(),
-    private val defaultKdfParamsProvider: () -> CryptoEngine.KdfParams = { CryptoEngine.KdfParams() }
+    private val defaultKdfParamsProvider: () -> CryptoEngine.KdfParams = { CryptoEngine.KdfParams() },
+    private val mediaRootDirProvider: () -> File = {
+        File(System.getProperty("java.io.tmpdir"), "pv_vault_media_default")
+    }
 ) {
 
     private val kdfMutex = Mutex()
+
+    private fun getSlotMediaDir(slotId: Int): File {
+        val dir = File(mediaRootDirProvider(), "slot_$slotId")
+        if (!dir.exists()) {
+            dir.mkdirs()
+        }
+        return dir
+    }
+
+    private fun getMediaFile(slotId: Int, mediaId: String): File =
+        File(getSlotMediaDir(slotId), "$mediaId.pvmedia")
+
+    private fun getThumbnailFile(slotId: Int, mediaId: String): File =
+        File(getSlotMediaDir(slotId), "$mediaId.pvthumb")
 
     sealed interface UnlockResult {
         data class Success(
@@ -842,6 +868,8 @@ class VaultRepository(
                         decoySlotId = VaultSessionManager.DECOY_SLOT,
                         seedRecords = seedEntities
                     )
+                    vaultDao.deleteAllMediaFilesForSlot(VaultSessionManager.DECOY_SLOT)
+                    getSlotMediaDir(VaultSessionManager.DECOY_SLOT).deleteRecursively()
                 }
                 sessionManager.updateRealVaultDecoyPolicyState(sessionId, isDecoyConfigured = true)
             } finally {
@@ -1053,6 +1081,8 @@ class VaultRepository(
                         dummyDecoyEnvelope = dummyEnv1,
                         decoySlotId = VaultSessionManager.DECOY_SLOT
                     )
+                    vaultDao.deleteAllMediaFilesForSlot(VaultSessionManager.DECOY_SLOT)
+                    getSlotMediaDir(VaultSessionManager.DECOY_SLOT).deleteRecursively()
                 }
                 sessionManager.updateRealVaultDecoyPolicyState(sessionId, isDecoyConfigured = false)
             } finally {
@@ -1290,20 +1320,396 @@ class VaultRepository(
     }
 
     /**
+     * Cleans up any interrupted `STAGING` media imports, `.tmp` files, or orphaned `.pvmedia` / `.pvthumb`
+     * ciphertext files not backed by a `COMMITTED` row in `encrypted_media_files`.
+     */
+    suspend fun cleanupUncommittedAndOrphanMediaFiles() = withContext(Dispatchers.IO) {
+        for (slotId in listOf(VaultSessionManager.REAL_SLOT, VaultSessionManager.DECOY_SLOT)) {
+            val slotDir = getSlotMediaDir(slotId)
+            // 1. Delete any temporary staging files
+            slotDir.listFiles()?.forEach { file ->
+                if (file.name.endsWith(".tmp")) {
+                    file.delete()
+                }
+            }
+            // 2. Remove STAGING rows and their partial files
+            val allRows = vaultDao.getAllMediaFileEntitiesForSlot(slotId)
+            val stagingRows = allRows.filter {
+                it.importStatus != EncryptedMediaFileEntity.IMPORT_STATUS_COMMITTED
+            }
+            stagingRows.forEach { staging ->
+                getMediaFile(slotId, staging.mediaId).delete()
+                getThumbnailFile(slotId, staging.mediaId).delete()
+                vaultDao.deleteMediaFileEntity(slotId, staging.mediaId)
+            }
+            // 3. Remove any .pvmedia/.pvthumb files on disk not backed by a COMMITTED row
+            val committedIds = allRows
+                .filter { it.importStatus == EncryptedMediaFileEntity.IMPORT_STATUS_COMMITTED }
+                .map { it.mediaId }
+                .toHashSet()
+            slotDir.listFiles()?.forEach { file ->
+                val name = file.name
+                val mediaId = when {
+                    name.endsWith(".pvmedia") -> name.removeSuffix(".pvmedia")
+                    name.endsWith(".pvthumb") -> name.removeSuffix(".pvthumb")
+                    else -> null
+                }
+                if (mediaId != null && mediaId !in committedIds) {
+                    file.delete()
+                }
+            }
+        }
+    }
+
+    /**
+     * Imports a photo or video stream into the currently active vault slot using streaming
+     * `256 KiB` chunked AES-256-GCM encryption (`PVM1`) and verifies EVERY encrypted chunk
+     * (`0 .. N-1`) with AES-256-GCM authentication BEFORE marking the item `COMMITTED`.
+     *
+     * Never modifies, moves, or deletes the user's original external media file.
+     */
+    suspend fun importMediaStreamToActiveVault(
+        sessionId: Long,
+        inputStreamProvider: () -> InputStream,
+        expectedPlaintextSize: Long,
+        displayTitle: String,
+        mimeType: String,
+        mediaKind: MediaKind,
+        widthPx: Int,
+        heightPx: Int,
+        durationMs: Long,
+        thumbnailPlainBytes: ByteArray,
+        onProgress: (processedBytes: Long, stage: String) -> Unit = { _, _ -> }
+    ): MediaRecord = withContext(Dispatchers.IO) {
+        val initialSession = sessionManager.requireActiveSession(sessionId)
+        val originSlotId = initialSession.slotId
+        require(displayTitle.isNotBlank()) { "Media title cannot be blank." }
+        require(thumbnailPlainBytes.isNotEmpty()) { "Thumbnail image bytes cannot be empty." }
+        require(expectedPlaintextSize > 0L) { "Cannot import an empty (0-byte) media file." }
+
+        val slotDir = getSlotMediaDir(originSlotId)
+        val usableSpace = slotDir.usableSpace
+        if (usableSpace > 0L && expectedPlaintextSize > 0L) {
+            val requiredSpace = expectedPlaintextSize + (16L * 1024L * 1024L)
+            require(usableSpace >= requiredSpace) {
+                "Insufficient free device storage to safely encrypt and verify this media file."
+            }
+        }
+
+        val mediaId = UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+        val fileMediaKey = CryptoEngine.randomBytes(CryptoEngine.DEK_BYTES)
+        val thumbnailKey = CryptoEngine.randomBytes(CryptoEngine.DEK_BYTES)
+
+        val tempMediaFile = File(slotDir, "$mediaId.pvmedia.tmp")
+        val tempThumbFile = File(slotDir, "$mediaId.pvthumb.tmp")
+        val finalMediaFile = getMediaFile(originSlotId, mediaId)
+        val finalThumbFile = getThumbnailFile(originSlotId, mediaId)
+        val relativeMediaPath = "slot_$originSlotId/$mediaId.pvmedia"
+        val relativeThumbPath = "slot_$originSlotId/$mediaId.pvthumb"
+
+        var committed = false
+        try {
+            // 1. Insert STAGING marker row in encrypted_media_files
+            val stagingEntity = EncryptedMediaFileEntity(
+                vaultSlot = originSlotId,
+                mediaId = mediaId,
+                formatVersion = StreamingMediaCryptoEngine.FORMAT_VERSION_V1,
+                relativeMediaPath = relativeMediaPath,
+                relativeThumbPath = relativeThumbPath,
+                encryptedSizeBytes = 0L,
+                chunkCount = 1,
+                ciphertextSha256 = "",
+                importStatus = EncryptedMediaFileEntity.IMPORT_STATUS_STAGING,
+                createdAtEpochMs = now
+            )
+            vaultDao.upsertMediaFileEntity(stagingEntity)
+
+            // 2. Stream-encrypt source media into tempMediaFile in 256 KiB chunks
+            onProgress(0L, "Encrypting media chunks...")
+            val parsedHeader = inputStreamProvider().use { rawStream ->
+                StreamingMediaCryptoEngine.encryptStreamToMediaFile(
+                    inputStream = rawStream,
+                    expectedPlaintextSize = expectedPlaintextSize,
+                    targetFile = tempMediaFile,
+                    mediaId = mediaId,
+                    vaultSlot = originSlotId,
+                    fileMediaKey = fileMediaKey,
+                    onProgress = { bytes, _ ->
+                        check(sessionManager.isSessionActive(sessionId)) {
+                            "Vault locked during media import; aborting."
+                        }
+                        onProgress(bytes, "Encrypting media chunks...")
+                    }
+                )
+            }
+
+            // 3. Encrypt downsampled thumbnail into tempThumbFile
+            onProgress(parsedHeader.totalPlaintextBytes, "Encrypting thumbnail...")
+            StreamingMediaCryptoEngine.encryptThumbnailToFile(
+                plaintextThumbBytes = thumbnailPlainBytes,
+                targetFile = tempThumbFile,
+                mediaId = mediaId,
+                vaultSlot = originSlotId,
+                thumbnailKey = thumbnailKey
+            )
+
+            // 4. Mandatory Correction 1: Verify EVERY encrypted chunk (0 .. N-1) and thumbnail AEAD tag on disk
+            onProgress(parsedHeader.totalPlaintextBytes, "Verifying all ${parsedHeader.totalChunks} encrypted chunk(s)...")
+            val fullVerifyReport = StreamingMediaCryptoEngine.verifyEncryptedMediaFileEveryChunk(
+                encryptedFile = tempMediaFile,
+                mediaId = mediaId,
+                vaultSlot = originSlotId,
+                fileMediaKey = fileMediaKey,
+                onVerifyProgress = { chunkIdx, total ->
+                    check(sessionManager.isSessionActive(sessionId)) {
+                        "Vault locked during media verification; aborting."
+                    }
+                    onProgress(parsedHeader.totalPlaintextBytes, "Verified chunk $chunkIdx / $total")
+                }
+            )
+            check(fullVerifyReport.header.totalPlaintextBytes == expectedPlaintextSize) {
+                "Verified plaintext byte total mismatch after encryption."
+            }
+            check(fullVerifyReport.header.totalChunks == parsedHeader.totalChunks) {
+                "Verified chunk count mismatch after encryption."
+            }
+
+            val verifiedThumb = StreamingMediaCryptoEngine.decryptThumbnailFromFile(
+                encryptedThumbFile = tempThumbFile,
+                mediaId = mediaId,
+                vaultSlot = originSlotId,
+                thumbnailKey = thumbnailKey
+            )
+            try {
+                if (!verifiedThumb.contentEquals(thumbnailPlainBytes)) {
+                    throw IllegalStateException("Thumbnail verification mismatch after encryption.")
+                }
+            } finally {
+                Arrays.fill(verifiedThumb, 0.toByte())
+            }
+
+            // 5. Rename verified temp files to final ciphertext paths
+            if (finalMediaFile.exists()) finalMediaFile.delete()
+            if (finalThumbFile.exists()) finalThumbFile.delete()
+            check(tempMediaFile.renameTo(finalMediaFile)) {
+                "Failed to finalize verified encrypted media file."
+            }
+            check(tempThumbFile.renameTo(finalThumbFile)) {
+                "Failed to finalize verified encrypted thumbnail file."
+            }
+
+            // 6. Verify session is still active on the same slot before atomic DB commit
+            val currentSession = sessionManager.requireActiveSession(sessionId)
+            check(currentSession.slotId == originSlotId) {
+                "Vault session changed during media import; aborting commit."
+            }
+
+            val encoder = Base64.getEncoder()
+            val cleanTitle = displayTitle.trim().take(255)
+            val mediaRecord = MediaRecord(
+                id = mediaId,
+                title = cleanTitle,
+                originalFileName = cleanTitle,
+                mimeType = mimeType.trim().ifBlank { "application/octet-stream" },
+                mediaKind = mediaKind,
+                originalSizeBytes = fullVerifyReport.header.totalPlaintextBytes,
+                encryptedSizeBytes = fullVerifyReport.encryptedFileBytes,
+                chunkCount = fullVerifyReport.header.totalChunks,
+                formatVersion = fullVerifyReport.header.formatVersion,
+                widthPx = widthPx.coerceAtLeast(0),
+                heightPx = heightPx.coerceAtLeast(0),
+                durationMs = durationMs.coerceAtLeast(0L),
+                fileMediaKeyBase64 = encoder.encodeToString(fileMediaKey),
+                thumbnailKeyBase64 = encoder.encodeToString(thumbnailKey),
+                ciphertextSha256Hex = fullVerifyReport.ciphertextSha256Hex,
+                createdAtEpochMs = now,
+                updatedAtEpochMs = now
+            )
+
+            val committedEntity = EncryptedMediaFileEntity(
+                vaultSlot = originSlotId,
+                mediaId = mediaId,
+                formatVersion = fullVerifyReport.header.formatVersion,
+                relativeMediaPath = relativeMediaPath,
+                relativeThumbPath = relativeThumbPath,
+                encryptedSizeBytes = fullVerifyReport.encryptedFileBytes,
+                chunkCount = fullVerifyReport.header.totalChunks,
+                ciphertextSha256 = fullVerifyReport.ciphertextSha256Hex,
+                importStatus = EncryptedMediaFileEntity.IMPORT_STATUS_COMMITTED,
+                createdAtEpochMs = now
+            )
+
+            val dekCopy = currentSession.borrowDekCopy()
+            try {
+                val recordEntity = encryptItemForSlot(originSlotId, dekCopy, mediaRecord)
+                val commitCheckSession = sessionManager.requireActiveSession(sessionId)
+                check(commitCheckSession.slotId == originSlotId) {
+                    "Vault locked before media import commit."
+                }
+                vaultDao.commitVerifiedMediaAtomically(
+                    encryptedRecord = recordEntity,
+                    committedMediaEntity = committedEntity
+                )
+                committed = true
+            } finally {
+                Arrays.fill(dekCopy, 0.toByte())
+            }
+
+            mediaRecord
+        } finally {
+            Arrays.fill(fileMediaKey, 0.toByte())
+            Arrays.fill(thumbnailKey, 0.toByte())
+            if (!committed) {
+                tempMediaFile.delete()
+                tempThumbFile.delete()
+                finalMediaFile.delete()
+                finalThumbFile.delete()
+                runCatching { vaultDao.deleteMediaFileEntity(originSlotId, mediaId) }
+            }
+        }
+    }
+
+    /**
+     * Decrypts a committed media item's thumbnail in memory for the active vault slot.
+     */
+    suspend fun loadDecryptedThumbnailBytes(
+        sessionId: Long,
+        mediaRecord: MediaRecord
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val session = sessionManager.requireActiveSession(sessionId)
+        val thumbFile = getThumbnailFile(session.slotId, mediaRecord.id)
+        require(thumbFile.exists() && thumbFile.isFile) {
+            "Encrypted thumbnail file is missing."
+        }
+        val thumbKey = Base64.getDecoder().decode(mediaRecord.thumbnailKeyBase64)
+        try {
+            StreamingMediaCryptoEngine.decryptThumbnailFromFile(
+                encryptedThumbFile = thumbFile,
+                mediaId = mediaRecord.id,
+                vaultSlot = session.slotId,
+                thumbnailKey = thumbKey
+            )
+        } finally {
+            Arrays.fill(thumbKey, 0.toByte())
+        }
+    }
+
+    /**
+     * Decrypts a committed photo into memory after verifying its full-file SHA-256 and every
+     * encrypted chunk's AES-256-GCM authentication tag.
+     */
+    suspend fun loadDecryptedPhotoBytes(
+        sessionId: Long,
+        mediaRecord: MediaRecord
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val session = sessionManager.requireActiveSession(sessionId)
+        val mediaFile = getMediaFile(session.slotId, mediaRecord.id)
+        require(mediaFile.exists() && mediaFile.isFile) {
+            "Encrypted photo file is missing."
+        }
+        val fileKey = Base64.getDecoder().decode(mediaRecord.fileMediaKeyBase64)
+        try {
+            val verifyReport = StreamingMediaCryptoEngine.verifyEncryptedMediaFileEveryChunk(
+                encryptedFile = mediaFile,
+                mediaId = mediaRecord.id,
+                vaultSlot = session.slotId,
+                fileMediaKey = fileKey
+            )
+            require(verifyReport.ciphertextSha256Hex.equals(mediaRecord.ciphertextSha256Hex, ignoreCase = true)) {
+                "Encrypted photo SHA-256 integrity mismatch."
+            }
+            StreamingMediaCryptoEngine.decryptMediaFileToMemoryBytes(
+                encryptedFile = mediaFile,
+                mediaId = mediaRecord.id,
+                vaultSlot = session.slotId,
+                fileMediaKey = fileKey
+            )
+        } finally {
+            Arrays.fill(fileKey, 0.toByte())
+        }
+    }
+
+    /**
+     * Opens a zero-disk-plaintext `EncryptedChunkMediaDataSource` for in-app encrypted video playback.
+     * The returned `MediaDataSource` maintains a bounded 2-chunk (`512 KiB`) in-memory ring buffer
+     * and zeros both the ring buffer and its key copy on `close()`.
+     */
+    suspend fun openEncryptedVideoDataSource(
+        sessionId: Long,
+        mediaRecord: MediaRecord
+    ): StreamingMediaCryptoEngine.EncryptedChunkMediaDataSource = withContext(Dispatchers.IO) {
+        val session = sessionManager.requireActiveSession(sessionId)
+        val mediaFile = getMediaFile(session.slotId, mediaRecord.id)
+        require(mediaFile.exists() && mediaFile.isFile) {
+            "Encrypted video file is missing."
+        }
+        val fileKey = Base64.getDecoder().decode(mediaRecord.fileMediaKeyBase64)
+        try {
+            StreamingMediaCryptoEngine.EncryptedChunkMediaDataSource(
+                encryptedFile = mediaFile,
+                mediaId = mediaRecord.id,
+                vaultSlot = session.slotId,
+                fileMediaKey = fileKey
+            )
+        } finally {
+            Arrays.fill(fileKey, 0.toByte())
+        }
+    }
+
+    /**
+     * Correction 3 — Cryptographic Deletion:
+     * Permanently deletes a media item from the active vault slot by:
+     * 1. Atomically deleting the encrypted `MediaRecord` row from `encrypted_records` (which destroys
+     *    the item's unique 256-bit `fileMediaKey` and `thumbnailKey`) and the `EncryptedMediaFileEntity`
+     *    row from `encrypted_media_files`.
+     * 2. Unlinking the `.pvmedia` and `.pvthumb` ciphertext files from internal storage.
+     *
+     * Note on Flash Storage Threat Model: Because mobile flash storage (UFS/eMMC/F2FS/ext4) uses
+     * wear-leveling, overwriting a file in place does not guarantee physical flash block erasure.
+     * Destroying the per-file 256-bit AES-GCM keys in `encrypted_records` renders any residual
+     * `.pvmedia` or `.pvthumb` ciphertext blocks on flash computationally unrecoverable.
+     */
+    suspend fun deleteMediaItemPermanently(
+        sessionId: Long,
+        mediaId: String
+    ) = withContext(Dispatchers.IO) {
+        val session = sessionManager.requireActiveSession(sessionId)
+        val slotId = session.slotId
+        vaultDao.deleteMediaRecordAndEntityAtomically(
+            vaultSlot = slotId,
+            mediaId = mediaId
+        )
+        getMediaFile(slotId, mediaId).delete()
+        getThumbnailFile(slotId, mediaId).delete()
+    }
+
+    /**
      * Generates an encrypted `.pvault` byte array for the active session's slot.
      *
      * N02 Fix: If any record in the active slot fails AEAD authentication or decoding, aborts
      * the ordinary export with `VaultRecordIntegrityException` unless the caller explicitly sets
      * `allowSkipCorruptedRecords = true` (Recovery Export mode).
-     * PV-BUG-009 Fix: Supports scoped export (`ALL_DATA`, `NOTES_ONLY`, `PASSWORDS_ONLY`).
+     *
+     * Correction 2 — Portable Backup Capacity vs. Media Backup:
+     * - `ALL_DATA` exports Notes, Passwords, and Folders (`MediaRecord`s excluded so standard
+     *   backups stay fast and compact).
+     * - `ALL_DATA_WITH_MEDIA` includes all active-slot `MediaRecord`s and embeds their verified
+     *   `.pvmedia` and `.pvthumb` ciphertext blobs. If active-slot media exceeds the `22 MiB`
+     *   raw media ciphertext limit (`MAX_RAW_MEDIA_BYTES_FOR_PORTABLE_BACKUP`) of the `32 MiB`
+     *   portable `.pvault` container, or if any media file is missing/corrupted on disk, export
+     *   fails closed with an explicit error—never silently skipping files or claiming a partial
+     *   backup is complete.
      */
     suspend fun prepareEncryptedBackupBytes(
         sessionId: Long,
         backupPasswordChars: CharArray,
-        appVersionName: String = "1.0.4",
+        appVersionName: String = "1.0.5",
         allowSkipCorruptedRecords: Boolean = false,
         exportScope: PortableBackupEngine.BackupExportScope = PortableBackupEngine.BackupExportScope.ALL_DATA
     ): ByteArray = withContext(Dispatchers.Default) {
+        val session = sessionManager.requireActiveSession(sessionId)
+        val slotId = session.slotId
         val snapshot = loadDecryptedSlotSnapshotForSession(sessionId)
         if (snapshot.hasCorruptedRecords && !allowSkipCorruptedRecords) {
             throw VaultRecordIntegrityException(
@@ -1312,7 +1718,8 @@ class VaultRepository(
             )
         }
         val filteredItems = when (exportScope) {
-            PortableBackupEngine.BackupExportScope.ALL_DATA -> snapshot.items
+            PortableBackupEngine.BackupExportScope.ALL_DATA -> snapshot.items.filterNot { it is MediaRecord }
+            PortableBackupEngine.BackupExportScope.ALL_DATA_WITH_MEDIA -> snapshot.items
             PortableBackupEngine.BackupExportScope.NOTES_ONLY -> snapshot.items.filter { item ->
                 item is NoteRecord || (item is VaultFolder && item.scope == FolderScope.NOTES)
             }
@@ -1320,12 +1727,78 @@ class VaultRepository(
                 item is CredentialRecord || (item is VaultFolder && item.scope == FolderScope.CREDENTIALS)
             }
         }
+
+        val mediaBlobs = LinkedHashMap<String, PortableBackupEngine.EmbeddedMediaBlob>()
+        if (exportScope == PortableBackupEngine.BackupExportScope.ALL_DATA_WITH_MEDIA) {
+            val mediaRecords = filteredItems.filterIsInstance<MediaRecord>()
+            var runningRawBytes = 0L
+            for (record in mediaRecords) {
+                val mediaFile = getMediaFile(slotId, record.id)
+                val thumbFile = getThumbnailFile(slotId, record.id)
+                require(mediaFile.exists() && thumbFile.exists()) {
+                    "Backup aborted: encrypted media files for \"${record.title}\" are missing on disk. Portable backups never silently skip files."
+                }
+                runningRawBytes += mediaFile.length() + thumbFile.length()
+                require(runningRawBytes <= PortableBackupEngine.MAX_RAW_MEDIA_BYTES_FOR_PORTABLE_BACKUP.toLong()) {
+                    val totalMiB = String.format(java.util.Locale.US, "%.1f", runningRawBytes.toDouble() / (1024.0 * 1024.0))
+                    "Active vault media ($totalMiB MiB) exceeds the 22.0 MiB raw media capacity of a single 32 MiB portable .pvault container. Export using \"Notes & Passwords\" scope so no media files are silently skipped."
+                }
+
+                // Verify every chunk (0 .. N-1) and thumbnail AEAD tag before embedding in backup
+                val fileKey = Base64.getDecoder().decode(record.fileMediaKeyBase64)
+                val thumbKey = Base64.getDecoder().decode(record.thumbnailKeyBase64)
+                try {
+                    val verifyReport = withContext(Dispatchers.IO) {
+                        StreamingMediaCryptoEngine.verifyEncryptedMediaFileEveryChunk(
+                            encryptedFile = mediaFile,
+                            mediaId = record.id,
+                            vaultSlot = slotId,
+                            fileMediaKey = fileKey
+                        )
+                    }
+                    require(verifyReport.header.totalPlaintextBytes == record.originalSizeBytes) {
+                        "Media plaintext size mismatch during backup verification."
+                    }
+                    require(verifyReport.header.totalChunks == record.chunkCount) {
+                        "Media chunk count mismatch during backup verification."
+                    }
+                    require(verifyReport.ciphertextSha256Hex.equals(record.ciphertextSha256Hex, ignoreCase = true)) {
+                        "Media SHA-256 mismatch during backup verification."
+                    }
+                    val verifiedThumb = withContext(Dispatchers.IO) {
+                        StreamingMediaCryptoEngine.decryptThumbnailFromFile(
+                            encryptedThumbFile = thumbFile,
+                            mediaId = record.id,
+                            vaultSlot = slotId,
+                            thumbnailKey = thumbKey
+                        )
+                    }
+                    Arrays.fill(verifiedThumb, 0.toByte())
+
+                    val mediaBytes = withContext(Dispatchers.IO) { mediaFile.readBytes() }
+                    val thumbBytes = withContext(Dispatchers.IO) { thumbFile.readBytes() }
+                    mediaBlobs[record.id] = PortableBackupEngine.EmbeddedMediaBlob(
+                        mediaId = record.id,
+                        formatVersion = verifyReport.header.formatVersion,
+                        chunkCount = verifyReport.header.totalChunks,
+                        ciphertextSha256 = verifyReport.ciphertextSha256Hex,
+                        mediaCiphertextBytes = mediaBytes,
+                        thumbCiphertextBytes = thumbBytes
+                    )
+                } finally {
+                    Arrays.fill(fileKey, 0.toByte())
+                    Arrays.fill(thumbKey, 0.toByte())
+                }
+            }
+        }
+
         val params = defaultKdfParamsProvider()
         PortableBackupEngine.createEncryptedBackupBytes(
             items = filteredItems,
             backupPasswordChars = backupPasswordChars,
             appVersionName = appVersionName,
-            kdfParams = params
+            kdfParams = params,
+            mediaBlobs = mediaBlobs
         )
     }
 
@@ -1333,11 +1806,10 @@ class VaultRepository(
      * Decrypts, verifies, and applies a `.pvault` backup into the currently unlocked vault slot.
      *
      * - Authenticates the entire `.pvault` file in memory before touching SQLite.
+     * - If the backup contains `MediaRecord` items and `mediaBlobs`, re-encrypts or verifies every
+     *   restored media item's chunks (`0 .. N-1`) for `originSlotId` before committing to SQLite.
      * - Binds `originSlotId` at the start and verifies `sessionManager.requireActiveSession(sessionId)`
      *   matches `originSlotId` immediately before committing the Room transaction.
-     * - N02 Fix: In `MERGE_KEEP_NEWEST` mode, if any existing record in the active slot is corrupted,
-     *   aborts before modifying SQLite so corrupted ciphertext is never silently deleted! Also writes
-     *   merged records via `upsertRecords` rather than `deleteAllRecordsForSlot`.
      */
     suspend fun applyVerifiedBackupRestore(
         sessionId: Long,
@@ -1376,9 +1848,170 @@ class VaultRepository(
             }
         }
 
+        val stagedMediaFiles = mutableListOf<Pair<File, File>>()
+        val restoredMediaEntities = mutableListOf<EncryptedMediaFileEntity>()
+
         val dekCopy = currentSession.borrowDekCopy()
         try {
-            val newEntities = finalItems.map { item ->
+            // 3. Stage and verify every restored media blob (every chunk 0..N-1) before touching SQLite
+            val slotDir = getSlotMediaDir(originSlotId)
+            val resolvedFinalItems = finalItems.map { item ->
+                if (item is MediaRecord) {
+                    val blob = verifiedPayload.mediaBlobs[item.id]
+                    if (blob != null) {
+                        val tempMedia = File(slotDir, "${item.id}.pvmedia.restore.tmp")
+                        val tempThumb = File(slotDir, "${item.id}.pvthumb.restore.tmp")
+                        val finalMedia = getMediaFile(originSlotId, item.id)
+                        val finalThumb = getThumbnailFile(originSlotId, item.id)
+                        val relativeMediaPath = "slot_$originSlotId/${item.id}.pvmedia"
+                        val relativeThumbPath = "slot_$originSlotId/${item.id}.pvthumb"
+
+                        withContext(Dispatchers.IO) {
+                            tempMedia.writeBytes(blob.mediaCiphertextBytes)
+                            tempThumb.writeBytes(blob.thumbCiphertextBytes)
+                        }
+                        stagedMediaFiles.add(tempMedia to finalMedia)
+                        stagedMediaFiles.add(tempThumb to finalThumb)
+
+                        val fileKey = Base64.getDecoder().decode(item.fileMediaKeyBase64)
+                        val thumbKey = Base64.getDecoder().decode(item.thumbnailKeyBase64)
+                        try {
+                            val altSlotId = if (originSlotId == VaultSessionManager.REAL_SLOT) {
+                                VaultSessionManager.DECOY_SLOT
+                            } else {
+                                VaultSessionManager.REAL_SLOT
+                            }
+                            var effectiveSha256 = item.ciphertextSha256Hex
+                            val report = try {
+                                val r = withContext(Dispatchers.IO) {
+                                    StreamingMediaCryptoEngine.verifyEncryptedMediaFileEveryChunk(
+                                        encryptedFile = tempMedia,
+                                        mediaId = item.id,
+                                        vaultSlot = originSlotId,
+                                        fileMediaKey = fileKey
+                                    )
+                                }
+                                require(r.header.totalPlaintextBytes == item.originalSizeBytes) {
+                                    "Restored media plaintext size mismatch."
+                                }
+                                require(r.header.totalChunks == item.chunkCount) {
+                                    "Restored media chunk count mismatch."
+                                }
+                                require(r.ciphertextSha256Hex.equals(item.ciphertextSha256Hex, ignoreCase = true)) {
+                                    "Restored media SHA-256 mismatch."
+                                }
+                                val thumbPlain = withContext(Dispatchers.IO) {
+                                    StreamingMediaCryptoEngine.decryptThumbnailFromFile(
+                                        encryptedThumbFile = tempThumb,
+                                        mediaId = item.id,
+                                        vaultSlot = originSlotId,
+                                        thumbnailKey = thumbKey
+                                    )
+                                }
+                                Arrays.fill(thumbPlain, 0.toByte())
+                                r
+                            } catch (_: AEADBadTagException) {
+                                // Backup was created in the other slot; verify every chunk under altSlotId and re-bind to originSlotId
+                                val altVerify = withContext(Dispatchers.IO) {
+                                    StreamingMediaCryptoEngine.verifyEncryptedMediaFileEveryChunk(
+                                        encryptedFile = tempMedia,
+                                        mediaId = item.id,
+                                        vaultSlot = altSlotId,
+                                        fileMediaKey = fileKey
+                                    )
+                                }
+                                require(altVerify.ciphertextSha256Hex.equals(item.ciphertextSha256Hex, ignoreCase = true)) {
+                                    "Restored cross-slot media SHA-256 mismatch."
+                                }
+                                val plainMedia = withContext(Dispatchers.IO) {
+                                    StreamingMediaCryptoEngine.decryptMediaFileToMemoryBytes(
+                                        encryptedFile = tempMedia,
+                                        mediaId = item.id,
+                                        vaultSlot = altSlotId,
+                                        fileMediaKey = fileKey
+                                    )
+                                }
+                                val plainThumb = withContext(Dispatchers.IO) {
+                                    StreamingMediaCryptoEngine.decryptThumbnailFromFile(
+                                        encryptedThumbFile = tempThumb,
+                                        mediaId = item.id,
+                                        vaultSlot = altSlotId,
+                                        thumbnailKey = thumbKey
+                                    )
+                                }
+                                try {
+                                    withContext(Dispatchers.IO) {
+                                        java.io.ByteArrayInputStream(plainMedia).use { bais ->
+                                            StreamingMediaCryptoEngine.encryptStreamToMediaFile(
+                                                inputStream = bais,
+                                                expectedPlaintextSize = plainMedia.size.toLong(),
+                                                targetFile = tempMedia,
+                                                mediaId = item.id,
+                                                vaultSlot = originSlotId,
+                                                fileMediaKey = fileKey
+                                            )
+                                        }
+                                        StreamingMediaCryptoEngine.encryptThumbnailToFile(
+                                            plaintextThumbBytes = plainThumb,
+                                            targetFile = tempThumb,
+                                            mediaId = item.id,
+                                            vaultSlot = originSlotId,
+                                            thumbnailKey = thumbKey
+                                        )
+                                        val reboundReport = StreamingMediaCryptoEngine.verifyEncryptedMediaFileEveryChunk(
+                                            encryptedFile = tempMedia,
+                                            mediaId = item.id,
+                                            vaultSlot = originSlotId,
+                                            fileMediaKey = fileKey
+                                        )
+                                        effectiveSha256 = reboundReport.ciphertextSha256Hex
+                                        reboundReport
+                                    }
+                                } finally {
+                                    Arrays.fill(plainMedia, 0.toByte())
+                                    Arrays.fill(plainThumb, 0.toByte())
+                                }
+                            }
+
+                            restoredMediaEntities.add(
+                                EncryptedMediaFileEntity(
+                                    vaultSlot = originSlotId,
+                                    mediaId = item.id,
+                                    formatVersion = report.header.formatVersion,
+                                    relativeMediaPath = relativeMediaPath,
+                                    relativeThumbPath = relativeThumbPath,
+                                    encryptedSizeBytes = report.encryptedFileBytes,
+                                    chunkCount = report.header.totalChunks,
+                                    ciphertextSha256 = effectiveSha256,
+                                    importStatus = EncryptedMediaFileEntity.IMPORT_STATUS_COMMITTED,
+                                    createdAtEpochMs = item.createdAtEpochMs
+                                )
+                            )
+                            item.copy(
+                                encryptedSizeBytes = report.encryptedFileBytes,
+                                ciphertextSha256Hex = effectiveSha256
+                            )
+                        } finally {
+                            Arrays.fill(fileKey, 0.toByte())
+                            Arrays.fill(thumbKey, 0.toByte())
+                        }
+                    } else {
+                        if (restoreMode == PortableBackupEngine.RestoreMode.MERGE_KEEP_NEWEST) {
+                            val existingEntity = withContext(Dispatchers.IO) {
+                                vaultDao.getMediaFileEntity(originSlotId, item.id)
+                            }
+                            if (existingEntity != null) {
+                                restoredMediaEntities.add(existingEntity)
+                            }
+                        }
+                        item
+                    }
+                } else {
+                    item
+                }
+            }
+
+            val newEntities = resolvedFinalItems.map { item ->
                 encryptItemForSlot(originSlotId, dekCopy, item)
             }
 
@@ -1389,16 +2022,33 @@ class VaultRepository(
             }
 
             withContext(Dispatchers.IO) {
+                for ((tempFile, destFile) in stagedMediaFiles) {
+                    if (destFile.exists()) destFile.delete()
+                    check(tempFile.renameTo(destFile)) {
+                        "Failed to finalize restored encrypted media file."
+                    }
+                }
                 when (restoreMode) {
                     PortableBackupEngine.RestoreMode.REPLACE_ACTIVE_VAULT -> {
-                        vaultDao.replaceAllRecordsForSlot(originSlotId, newEntities)
+                        vaultDao.replaceAllRecordsAndMediaForSlot(
+                            vaultSlot = originSlotId,
+                            newRecords = newEntities,
+                            newMediaEntities = restoredMediaEntities
+                        )
                     }
                     PortableBackupEngine.RestoreMode.MERGE_KEEP_NEWEST -> {
                         vaultDao.upsertRecords(newEntities)
+                        if (restoredMediaEntities.isNotEmpty()) {
+                            vaultDao.upsertMediaFileEntities(restoredMediaEntities)
+                        }
                     }
                 }
+                cleanupUncommittedAndOrphanMediaFiles()
             }
             verifiedPayload
+        } catch (t: Throwable) {
+            stagedMediaFiles.forEach { (tempFile, _) -> tempFile.delete() }
+            throw t
         } finally {
             Arrays.fill(dekCopy, 0.toByte())
         }

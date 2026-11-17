@@ -199,7 +199,7 @@ fun SettingsHubScreen(
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "Export or restore encrypted backups (${uiState.notes.size} notes, ${uiState.credentials.size} passwords)",
+                        text = "Export or restore encrypted backups (${uiState.notes.size} notes, ${uiState.credentials.size} passwords, ${uiState.mediaItems.size} media)",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -504,12 +504,12 @@ fun BackupAndRestoreScreen(
                         tint = MaterialTheme.colorScheme.primary
                     )
                     Text(
-                        text = "Export Active Vault (${uiState.notes.size} notes, ${uiState.credentials.size} credentials)",
+                        text = "Export Active Vault (${uiState.notes.size} notes, ${uiState.credentials.size} credentials, ${uiState.mediaItems.size} media)",
                         style = MaterialTheme.typography.titleMedium
                     )
                 }
 
-                // PV-BUG-009 Fix: Selective Backup Export Scope
+                // PV-BUG-009 & Correction 2 Fix: Selective Backup Export Scope with explicit 22 MiB raw media ceiling notice
                 Text(
                     text = "Export Scope:",
                     style = MaterialTheme.typography.labelMedium
@@ -529,6 +529,11 @@ fun BackupAndRestoreScreen(
                         )
                     }
                 }
+                Text(
+                    text = "Capacity Notice: A portable .pvault container has a 32 MiB maximum file limit (~22 MiB raw encrypted media after Base64 encoding). Selecting \"All Data + Media (≤22 MiB)\" verifies every encrypted chunk before export and fails closed if active-slot media exceeds 22 MiB—never silently skipping files.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
 
                 OutlinedTextField(
                     value = exportPassword,

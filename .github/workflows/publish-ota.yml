@@ -190,6 +190,22 @@ jobs:
             exit 1
           fi
 
+          # Verify merged release manifest has debuggable=false and no development PreviewActivity
+          if [ "${SIGNING_MODE}" = "release_keystore" ]; then
+            MERGED_MANIFEST="app/build/intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml"
+            if [ -f "${MERGED_MANIFEST}" ]; then
+              if grep -q 'android:debuggable="true"' "${MERGED_MANIFEST}"; then
+                echo "::error::CRITICAL: Merged release manifest has android:debuggable=true! Aborting release."
+                exit 1
+              fi
+              if grep -q 'PreviewActivity' "${MERGED_MANIFEST}"; then
+                echo "::error::CRITICAL: Merged release manifest contains development PreviewActivity! Aborting release."
+                exit 1
+              fi
+              echo "Confirmed merged release manifest has debuggable=false and zero PreviewActivity entries."
+            fi
+          fi
+
           TARGET_EXPECTED="${EXPECTED_CERT:-${SECRET_EXPECTED_CERT:-}}"
           if [ -n "${TARGET_EXPECTED}" ]; then
             NORM_EXPECTED="$(echo "${TARGET_EXPECTED}" | tr -d '[:space:]:' | tr '[:lower:]' '[:upper:]')"

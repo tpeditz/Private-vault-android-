@@ -11,6 +11,7 @@ import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.biometric.BiometricManager
@@ -45,6 +46,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SaveAlt
 import androidx.compose.material.icons.filled.Security
@@ -98,6 +100,7 @@ import com.example.ota.OtaUpdateManager
 import com.example.security.VaultSessionManager
 import com.example.ui.AboutVaultScreen
 import com.example.ui.BackupAndRestoreScreen
+import com.example.ui.MediaTabScreen
 import com.example.ui.NotesTabScreen
 import com.example.ui.OtaThreeOptionUpdateDialog
 import com.example.ui.OtaUpdatesScreen
@@ -275,6 +278,42 @@ fun PrivateVaultRootApp(
             viewModel.setErrorBanner("No file manager app found on this device to select a .pvault file.")
         } catch (e: Exception) {
             viewModel.setErrorBanner("Could not open file selector: ${e.message}")
+        }
+    }
+
+    val pickMultipleVisualMediaLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(25)
+    ) { uris: List<Uri> ->
+        viewModel.importMediaUris(uris)
+    }
+
+    val openMultipleDocumentsMediaLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        viewModel.importMediaUris(uris)
+    }
+
+    val launchPhotoVideoPicker: () -> Unit = {
+        try {
+            pickMultipleVisualMediaLauncher.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+            )
+        } catch (_: ActivityNotFoundException) {
+            try {
+                openMultipleDocumentsMediaLauncher.launch(arrayOf("image/*", "video/*"))
+            } catch (_: Exception) {
+                viewModel.setErrorBanner("No photo or document picker app found on this device.")
+            }
+        } catch (_: Exception) {
+            viewModel.setErrorBanner("Could not open photo and video picker.")
+        }
+    }
+
+    val launchDocumentMediaPicker: () -> Unit = {
+        try {
+            openMultipleDocumentsMediaLauncher.launch(arrayOf("image/*", "video/*"))
+        } catch (_: Exception) {
+            viewModel.setErrorBanner("Could not open document selector for media.")
         }
     }
 
@@ -581,6 +620,13 @@ fun PrivateVaultRootApp(
                             modifier = Modifier.testTag("nav_tab_passwords")
                         )
                         NavigationBarItem(
+                            selected = uiState.primaryTab == PrimaryTab.MEDIA,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.MEDIA) },
+                            icon = { Icon(Icons.Filled.PhotoLibrary, contentDescription = "Media") },
+                            label = { Text("Media") },
+                            modifier = Modifier.testTag("nav_tab_media")
+                        )
+                        NavigationBarItem(
                             selected = isToolsSelected,
                             onClick = { viewModel.selectPrimaryTab(PrimaryTab.TOOLS) },
                             icon = { Icon(Icons.Filled.Refresh, contentDescription = "Tools") },
@@ -624,6 +670,13 @@ fun PrivateVaultRootApp(
                             onClick = { viewModel.selectPrimaryTab(PrimaryTab.PASSWORDS) },
                             icon = { Icon(Icons.Filled.Key, contentDescription = "Passwords") },
                             label = { Text("Passwords") }
+                        )
+                        NavigationRailItem(
+                            selected = uiState.secondaryDestination == SecondaryDestination.NONE &&
+                                uiState.primaryTab == PrimaryTab.MEDIA,
+                            onClick = { viewModel.selectPrimaryTab(PrimaryTab.MEDIA) },
+                            icon = { Icon(Icons.Filled.PhotoLibrary, contentDescription = "Media") },
+                            label = { Text("Media") }
                         )
                         NavigationRailItem(
                             selected = uiState.secondaryDestination == SecondaryDestination.NONE &&
@@ -723,6 +776,13 @@ fun PrivateVaultRootApp(
                                 PrimaryTab.PASSWORDS -> PasswordsTabScreen(
                                     uiState = uiState,
                                     viewModel = viewModel
+                                )
+
+                                PrimaryTab.MEDIA -> MediaTabScreen(
+                                    uiState = uiState,
+                                    viewModel = viewModel,
+                                    onLaunchPhotoVideoPicker = launchPhotoVideoPicker,
+                                    onLaunchDocumentMediaPicker = launchDocumentMediaPicker
                                 )
 
                                 PrimaryTab.TOOLS,

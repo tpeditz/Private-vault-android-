@@ -1,0 +1,228 @@
+PRIVATE VAULT — GOOGLE AI STUDIO IMPLEMENTATION PROMPT
+Scope: ONLY TWO TASKS
+1. Implement an encrypted Photo & Video Vault.
+2. Fix debug/release configuration and harden the production APK against unauthorized inspection and data exposure.
+
+PROJECT CONTEXT
+- Application: PRIVATE VAULT
+- Android package: com.tpeditz.privatevault
+- Existing application: Kotlin, Jetpack Compose, Material 3, MVVM, Room, and existing vault/security functionality.
+- The current APK previously inspected was version 1.0.4 (versionCode 5). Treat this only as reference information; inspect the actual project source and current build configuration before making changes.
+- The user is not asking for a new application. Modify the existing project carefully.
+- The user wants ONLY the two tasks listed in this prompt. Do not add unrelated features, redesign the app, introduce cloud services, or change the product direction.
+
+YOUR ROLE
+Act as a senior Android security engineer and Kotlin developer. First inspect the complete existing project. Understand its architecture, encryption/key-management implementation, database, navigation, storage handling, build variants, manifest, backup rules, and existing tests. Then prepare a precise implementation plan for approval BEFORE changing any source files.
+
+IMPORTANT WORKFLOW
+1. Inspect the existing source code and project configuration.
+2. Identify reusable components and all affected files.
+3. Identify security risks, compatibility concerns, and migration requirements.
+4. Produce an implementation plan with:
+   - exact files to create, modify, or remove;
+   - the purpose of each change;
+   - encryption and key-management design;
+   - data migration and failure-recovery strategy;
+   - testing plan;
+   - risks and limitations.
+5. STOP and present the plan. Do not implement until the user approves it.
+6. After approval, implement incrementally, build the app, run available tests, and report the actual results.
+
+NON-NEGOTIABLE PROJECT RULES
+- Preserve all existing working features, screens, navigation, data, and business logic.
+- Do not replace the existing app with a new project or rewrite the architecture unnecessarily.
+- Do not delete or reset the existing Room database or vault contents.
+- Do not break the existing Real Vault, Decoy Vault, encrypted notes, credentials, folders, backup/restore, biometric authentication, or update mechanism.
+- Reuse the existing encryption and key-management code only after verifying that it is correct and suitable for media encryption.
+- Do not invent APIs, claim tests passed when they were not run, or hide build errors.
+- Do not add Firebase, cloud sync, accounts, a VPS, paid services, analytics, ads, or any backend.
+- Do not add unrelated features. The scope is strictly the two tasks below.
+- Keep the existing design and navigation. Add only the UI required to use the Photo & Video Vault, matching the app's current design system.
+- Never hardcode encryption keys, passwords, secrets, signing credentials, or private tokens.
+
+============================================================
+TASK 1 — IMPLEMENT A SECURE ENCRYPTED PHOTO & VIDEO VAULT
+============================================================
+
+OBJECTIVE
+Add private photo and video storage to the existing PRIVATE VAULT application. Imported media must be encrypted before being stored in the app's private vault storage. The app must decrypt media only when an authorized user opens or plays it.
+
+A. MEDIA IMPORT
+- Allow the user to select photos and videos using Android's supported system photo picker / Storage Access Framework where appropriate.
+- Request only the permissions actually required. Prefer the Android Photo Picker and content URIs instead of broad storage permissions.
+- Support importing multiple files.
+- Support common image and video formats supported by Android.
+- Handle large video files without loading the complete file into memory.
+- Copy the selected content into a controlled import pipeline and encrypt it before considering the import complete.
+- Do not delete or modify the original gallery file automatically.
+- If offering a move-like workflow is considered, it must be explicitly user initiated and must happen only after the encrypted copy has been fully verified. Do not implement automatic deletion of originals in this task.
+
+B. ENCRYPTION AND KEY MANAGEMENT
+- Use authenticated encryption. AES-256-GCM may be used if the existing implementation is reviewed and found suitable.
+- Use a unique, securely generated nonce/IV for every encryption operation. Never reuse a nonce with the same key.
+- Use cryptographically secure random generation.
+- Store encryption keys securely using Android Keystore-backed key management, following the existing app's established security design where safe.
+- Never store raw encryption keys beside encrypted media.
+- Never hardcode keys or derive a media key directly from a fixed string.
+- Authenticate/decrypt data before displaying it. Detect tampering, truncation, wrong keys, and corrupted data.
+- Define a versioned encrypted-file format so future upgrades can be handled safely.
+- Keep required metadata minimal. Protect sensitive filenames and other private metadata where practical; do not expose original filenames in public/shared storage or logs.
+- If the existing key architecture cannot safely support media encryption, explain the issue and propose a compatible design before implementation. Do not silently weaken or replace existing key handling.
+
+C. LARGE FILES AND VIDEO STREAMING
+- Do not read an entire video into RAM.
+- Design a streaming/chunked encryption format for large media. Each chunk must be authenticated, and the format must prevent undetected reordering, omission, duplication, or truncation of chunks.
+- Use unique nonces for chunks and bind relevant file/chunk metadata as authenticated associated data where appropriate.
+- Verify the final file structure and authentication before treating an import as successful.
+- Ensure video playback can read decrypted data through a controlled mechanism without creating a permanent plaintext copy.
+- If the chosen media playback approach requires temporary plaintext files, explain the risk and use app-private cache only, strict lifecycle cleanup, restrictive file permissions, and best-effort secure deletion. Do not claim flash storage deletion is guaranteed.
+- Handle interrupted imports safely. An incomplete import must never appear as a valid vault item.
+
+D. PRIVATE STORAGE AND PREVIEWS
+- Store encrypted media only in app-private internal storage, not public Downloads, DCIM, Pictures, Movies, or shared external folders.
+- Do not leave plaintext originals, thumbnails, preview images, temporary files, or extracted metadata in persistent app storage.
+- Generate thumbnails only through a controlled decrypted-memory or protected temporary pipeline.
+- Do not place sensitive thumbnails in public MediaStore, shared caches, or unprotected disk caches.
+- Clear sensitive in-memory buffers and temporary resources when no longer needed, to the extent supported by the platform.
+- Prevent accidental exposure through logs, notifications, intents, content providers, file sharing, and recent-app previews.
+- Apply FLAG_SECURE to relevant sensitive screens where appropriate, while explaining that it does not prevent every possible capture method.
+
+E. USER EXPERIENCE — ONLY WHAT IS REQUIRED FOR THIS FEATURE
+- Add a Photo & Video section within the existing vault.
+- Let users browse their encrypted photos and videos after vault authentication.
+- Provide basic photo preview and video playback.
+- Allow users to select and import multiple items.
+- Show import progress and clear success/failure messages.
+- Allow users to delete an encrypted media item after confirmation.
+- Keep the UI consistent with the existing application. Do not redesign unrelated screens.
+- Do not add cloud upload, sharing, AI, editing, social features, or unrelated media tools.
+
+F. DATABASE AND RELIABILITY
+- Inspect the existing Room schema before making changes.
+- Add only the minimum required entities/fields and use a proper Room migration.
+- Never use destructive migration for existing user data.
+- Store references to encrypted files, encrypted metadata, format version, media type, size, timestamps, and integrity/status information as appropriate.
+- Keep database records and encrypted files consistent.
+- Handle low storage, permission denial, invalid media, unsupported formats, app termination, and process death.
+- If encryption or verification fails, do not register the item as successfully imported.
+- Ensure deletion removes the database record and encrypted file consistently, with safe recovery handling if one operation fails.
+
+G. BACKUP COMPATIBILITY
+- Inspect the existing encrypted backup/restore implementation.
+- Determine how encrypted media should be included in backup exports without breaking existing backups.
+- Do not silently change the existing backup format.
+- If media backup cannot safely be included in this implementation, clearly document the limitation rather than creating an insecure workaround.
+- Never place plaintext media in backups.
+- Test restoring media and its metadata together if media backup support is implemented.
+
+============================================================
+TASK 2 — FIX DEBUG CONFIGURATION AND HARDEN PRODUCTION
+============================================================
+
+OBJECTIVE
+Ensure the distributed production APK is a proper non-debuggable release build and reduce exposure of vault contents, secrets, and internal implementation details. This is not a promise that an Android app can be made impossible to inspect, especially on a rooted or compromised device.
+
+A. BUILD TYPES AND DEBUGGABLE FLAG
+- Inspect every Gradle module and build variant.
+- Ensure the production/release variant has debuggable disabled.
+- Do not set android:debuggable="true" in the production manifest.
+- Prefer Gradle build-type configuration and manifest merging rules rather than relying on a manually edited manifest value.
+- Verify the final merged release manifest and the actual generated release APK.
+- Keep debug builds usable for development, but ensure they cannot be mistaken for production releases.
+- Do not break the existing signing or GitHub-based update process.
+
+B. REMOVE DEVELOPMENT-ONLY COMPONENTS FROM RELEASE
+- Inspect the manifest and source for debug activities, preview activities, test screens, debug menus, update simulators, fake data generators, and development-only entry points.
+- Exclude development-only components from the production variant.
+- Review all exported activities, services, receivers, and providers.
+- Set android:exported="false" unless external access is explicitly required.
+- For any component that must be exported, document why and protect it with appropriate permissions and input validation.
+- Do not remove legitimate user-facing functionality.
+
+C. LOGGING AND SENSITIVE DATA
+- Search the entire project for Log.*, println, stack traces, debug logging, and exception messages that could expose:
+  - passwords, PINs, recovery material, tokens, notes, filenames, media paths;
+  - encryption keys or key identifiers that should remain private;
+  - database contents or sensitive authentication state.
+- Remove or safely redact sensitive production logs.
+- Do not swallow security-relevant exceptions. Handle them safely without displaying secrets.
+- Ensure crash/error messages shown to users do not contain private vault data.
+- Do not log decrypted media content or plaintext metadata.
+
+D. BACKUP AND DATA EXPOSURE REVIEW
+- Inspect AndroidManifest.xml, backup rules, data-extraction rules, file-provider paths, cache locations, and exported content providers.
+- Verify that vault databases, encryption material, decrypted media, temporary plaintext files, and sensitive preferences are excluded from inappropriate Android cloud backup/device-transfer paths.
+- Preserve the app's existing intentional encrypted backup/restore feature.
+- Ensure FileProvider does not expose the vault's internal storage or decrypted temporary files.
+- Confirm cleartext network traffic remains disabled unless a specifically required and justified exception exists.
+- Do not add broad storage permissions without a demonstrated need.
+
+E. APK RELEASE HYGIENE
+- Check that release builds do not include debug-only dependencies or test tooling unnecessarily.
+- Review R8/minification configuration and resource shrinking for release, but do not enable settings blindly if they break reflection, serialization, Compose, Room, or update verification.
+- Preserve signing identity and trusted signer checks used by the existing update manager.
+- Do not generate, replace, expose, or commit signing keys.
+- Do not claim code obfuscation is encryption. Obfuscation only makes inspection harder; it does not protect data by itself.
+- Verify that the production APK is signed and installable.
+
+F. SECURITY VERIFICATION
+Provide evidence for each check that can actually be performed:
+- Inspect the generated release APK's manifest and confirm debuggable is false.
+- Confirm development-only activities and debug components are absent from release.
+- Confirm sensitive values are not emitted by production logging paths.
+- Confirm exported components and FileProvider paths are appropriately restricted.
+- Confirm backup/data-extraction rules exclude sensitive app data as intended.
+- Confirm release APK signature and update signer verification remain compatible.
+- Run available unit tests, instrumentation tests, lint, and release build.
+- Report any tests that could not be run and why.
+
+============================================================
+ACCEPTANCE CRITERIA
+============================================================
+
+TASK 1 — PHOTO & VIDEO VAULT
+1. A user can import supported photos and videos.
+2. Imported media is encrypted before being stored as a completed vault item.
+3. Encrypted media is stored in private app storage.
+4. The app can authenticate, decrypt, preview photos, and play videos.
+5. Large videos do not require loading the entire file into RAM.
+6. Tampered, corrupted, incomplete, or incorrectly keyed media is rejected safely.
+7. No persistent plaintext media or thumbnails are left in exposed/shared locations.
+8. Existing vault records and features remain intact.
+9. Room migrations are non-destructive.
+10. Import, deletion, low-storage, interruption, and error paths are tested.
+
+TASK 2 — PRODUCTION DEBUG & SECURITY FIX
+1. The generated release APK has debuggable=false.
+2. Debug-only activities/tools are excluded from release.
+3. Sensitive information is not written to production logs.
+4. Exported components and providers are reviewed and restricted.
+5. Backup rules do not expose sensitive vault data.
+6. Existing encrypted backup/restore remains functional.
+7. Existing APK signing and update verification remain functional.
+8. The release APK builds, installs, and passes available tests.
+
+REGRESSION REQUIREMENTS
+- Existing Real Vault and Decoy Vault must continue to work.
+- Existing authentication and biometric flows must continue to work.
+- Existing encrypted notes, credentials, folders, and records must remain accessible.
+- Existing encrypted backup/restore must not be broken.
+- Existing GitHub-based OTA update mechanism must not be broken.
+- No existing user data may be deleted, reset, or silently migrated in a destructive way.
+
+FINAL REPORT REQUIRED
+After implementation, provide:
+1. Summary of changes for Task 1.
+2. Summary of changes for Task 2.
+3. Exact files changed and why.
+4. Encryption format and key-management explanation.
+5. Room migration details.
+6. Tests run and their actual results.
+7. Release APK build result and debuggable verification evidence.
+8. Known limitations and remaining risks.
+9. Any manual steps the app owner must perform.
+
+Do not claim “fully secure”, “unhackable”, or “nobody can ever read it”. State exactly what is protected and against which realistic threats.
+
+FINAL INSTRUCTION
+For now, inspect the project and return the implementation plan ONLY. Do not modify files until the user has reviewed and approved the plan. Stay strictly within the two tasks in this prompt.

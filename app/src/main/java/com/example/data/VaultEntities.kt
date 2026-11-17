@@ -56,8 +56,9 @@ data class VaultEnvelopeEntity(
  * Security & Metadata Minimization (B02 / N01):
  * - Composite primary key `(vault_slot, record_id)` guarantees that an identical `record_id`
  *   imported or created in Slot 0 and Slot 1 can NEVER collide or overwrite the other slot's record (`N01`).
- * - Both Notes, Credentials, and Vault Folders are stored in this single table.
- * - No plaintext titles, usernames, URLs, categories, record types, or timestamps exist in SQLite columns.
+ * - Notes, Credentials, Vault Folders, and MediaRecords are stored in this single table.
+ * - No plaintext titles, usernames, URLs, filenames, MIME types, categories, record types, or
+ *   per-file media keys exist in SQLite columns.
  * - Every record's entire metadata and payload is serialized and encrypted inside `ciphertext`
  *   with AES-256-GCM bound to `AAD = "PV1-REC|slot=$vaultSlot|id=$recordId|ver=$schemaVersion"`.
  */
@@ -82,3 +83,56 @@ data class EncryptedRecordEntity(
     @ColumnInfo(name = "ciphertext", typeAffinity = ColumnInfo.BLOB)
     val ciphertext: ByteArray
 )
+
+/**
+ * Encrypted media file lifecycle and integrity tracking row (`encrypted_media_files`, added in Room v4).
+ *
+ * Purpose:
+ * - Tracks app-private encrypted media files (`.pvmedia`) and encrypted thumbnails (`.pvthumb`)
+ *   without storing any sensitive filenames, MIME types, or keys in plaintext columns.
+ * - `importStatus`: `0` (`IMPORT_STATUS_STAGING`) while streaming encryption & every-chunk verification
+ *   are in flight; `1` (`IMPORT_STATUS_COMMITTED`) only after all chunks pass AEAD verification and
+ *   the corresponding encrypted `MediaRecord` is committed in `encrypted_records`.
+ * - Enables deterministic cleanup of interrupted imports and orphan files across app restarts.
+ */
+@Entity(
+    tableName = "encrypted_media_files",
+    primaryKeys = ["vault_slot", "media_id"],
+    indices = [Index(value = ["vault_slot"])]
+)
+data class EncryptedMediaFileEntity(
+    @ColumnInfo(name = "vault_slot")
+    val vaultSlot: Int,
+
+    @ColumnInfo(name = "media_id")
+    val mediaId: String,
+
+    @ColumnInfo(name = "format_version")
+    val formatVersion: Int,
+
+    @ColumnInfo(name = "relative_media_path")
+    val relativeMediaPath: String,
+
+    @ColumnInfo(name = "relative_thumb_path")
+    val relativeThumbPath: String,
+
+    @ColumnInfo(name = "encrypted_size_bytes")
+    val encryptedSizeBytes: Long,
+
+    @ColumnInfo(name = "chunk_count")
+    val chunkCount: Int,
+
+    @ColumnInfo(name = "ciphertext_sha256")
+    val ciphertextSha256: String,
+
+    @ColumnInfo(name = "import_status")
+    val importStatus: Int,
+
+    @ColumnInfo(name = "created_at_epoch_ms")
+    val createdAtEpochMs: Long
+) {
+    companion object {
+        const val IMPORT_STATUS_STAGING: Int = 0
+        const val IMPORT_STATUS_COMMITTED: Int = 1
+    }
+}

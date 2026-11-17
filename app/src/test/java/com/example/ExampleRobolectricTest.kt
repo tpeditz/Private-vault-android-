@@ -14,7 +14,10 @@ import com.example.data.AppPreferencesRepository
 import com.example.data.ChecklistEntry
 import com.example.data.CredentialRecord
 import com.example.data.CustomCredentialField
+import com.example.data.EncryptedMediaFileEntity
 import com.example.data.FolderScope
+import com.example.data.MediaKind
+import com.example.data.MediaRecord
 import com.example.data.NoteBodyFormat
 import com.example.data.NoteRecord
 import com.example.data.OtaReminderPolicy
@@ -26,7 +29,9 @@ import com.example.data.VaultRepository
 import com.example.ota.OtaUpdateManager
 import com.example.security.CryptoEngine
 import com.example.security.OfflinePasswordStrengthEstimator
+import com.example.security.SafeVaultLogger
 import com.example.security.SensitiveClipboardManager
+import com.example.security.StreamingMediaCryptoEngine
 import com.example.security.VaultSessionManager
 import com.example.ui.VaultViewModel
 import kotlinx.coroutines.CoroutineScope
@@ -81,6 +86,7 @@ class ExampleRobolectricTest {
 
     private lateinit var context: Context
     private lateinit var dbFile: File
+    private lateinit var mediaRootDir: File
     private lateinit var database: PrivateVaultDatabase
     private lateinit var sessionManager: VaultSessionManager
     private lateinit var repository: VaultRepository
@@ -99,15 +105,21 @@ class ExampleRobolectricTest {
         }
         context = ApplicationProvider.getApplicationContext()
         dbFile = context.getDatabasePath("test_private_vault_${UUID.randomUUID()}.db")
+        mediaRootDir = File(context.filesDir, "test_vault_media_${UUID.randomUUID()}")
         database = Room.databaseBuilder(context, PrivateVaultDatabase::class.java, dbFile.name)
             .allowMainThreadQueries()
-            .addMigrations(PrivateVaultDatabase.MIGRATION_1_2, PrivateVaultDatabase.MIGRATION_2_3)
+            .addMigrations(
+                PrivateVaultDatabase.MIGRATION_1_2,
+                PrivateVaultDatabase.MIGRATION_2_3,
+                PrivateVaultDatabase.MIGRATION_3_4
+            )
             .build()
         sessionManager = VaultSessionManager()
         repository = VaultRepository(
             vaultDao = database.vaultDao(),
             sessionManager = sessionManager,
-            defaultKdfParamsProvider = { testKdfParams }
+            defaultKdfParamsProvider = { testKdfParams },
+            mediaRootDirProvider = { mediaRootDir }
         )
     }
 
@@ -118,6 +130,7 @@ class ExampleRobolectricTest {
         dbFile.delete()
         File("${dbFile.absolutePath}-wal").delete()
         File("${dbFile.absolutePath}-shm").delete()
+        mediaRootDir.deleteRecursively()
     }
 
     @Test
@@ -694,9 +707,13 @@ class ExampleRobolectricTest {
             v1Helper.writableDatabase.close()
             v1Helper.close()
 
-            // Open with Room at Version 3 using MIGRATION_1_2 and MIGRATION_2_3
+            // Open with Room at Version 4 using MIGRATION_1_2, MIGRATION_2_3, and MIGRATION_3_4
             val migratedRoomDb = Room.databaseBuilder(context, PrivateVaultDatabase::class.java, migrationDbName)
-                .addMigrations(PrivateVaultDatabase.MIGRATION_1_2, PrivateVaultDatabase.MIGRATION_2_3)
+                .addMigrations(
+                    PrivateVaultDatabase.MIGRATION_1_2,
+                    PrivateVaultDatabase.MIGRATION_2_3,
+                    PrivateVaultDatabase.MIGRATION_3_4
+                )
                 .allowMainThreadQueries()
                 .build()
 
@@ -722,7 +739,7 @@ class ExampleRobolectricTest {
                 NoteRecord(
                     id = realNoteId,
                     title = "Pre-Update Real Vault Note",
-                    body = "Survived v1 -> v2 -> v3 migration",
+                    body = "Survived v1 -> v2 -> v3 -> v4 migration",
                     format = NoteBodyFormat.CHECKLIST,
                     checklistItems = listOf(ChecklistEntry(text = "Check composite PK", isChecked = true))
                 )
@@ -731,7 +748,11 @@ class ExampleRobolectricTest {
             migratedRoomDb.close()
 
             val reopenedDb = Room.databaseBuilder(context, PrivateVaultDatabase::class.java, migrationDbName)
-                .addMigrations(PrivateVaultDatabase.MIGRATION_1_2, PrivateVaultDatabase.MIGRATION_2_3)
+                .addMigrations(
+                    PrivateVaultDatabase.MIGRATION_1_2,
+                    PrivateVaultDatabase.MIGRATION_2_3,
+                    PrivateVaultDatabase.MIGRATION_3_4
+                )
                 .allowMainThreadQueries()
                 .build()
             val postUpgradeSessionMgr = VaultSessionManager()
@@ -1329,6 +1350,234 @@ class ExampleRobolectricTest {
         viewModel.setAutoLockTimeoutMs(0L)
         viewModel.onAppBackgrounded()
         assertFalse("Session must lock immediately when backgrounded with 0ms auto-lock timeout", sessionManager.isSessionActive(decoySession.sessionId))
+    }
+
+    @Test
+    fun `Task1_Correction1 - StreamingMediaCryptoEngine multi-chunk encryption, every-chunk AES-GCM verification, middle-chunk bit-flip rejection, and zero-disk-plaintext MediaDataSource`() {
+        // Create a 600 KiB synthetic video payload spanning 3 chunks (256 KiB + 256 KiB + 88 KiB)
+        val totalPlainBytes = 600 * 1024
+        val originalMedia = ByteArray(totalPlainBytes) { idx -> ((idx * 31 + 17) and 0xFF).toByte() }
+        val fileMediaKey = CryptoEngine.randomBytes(CryptoEngine.DEK_BYTES)
+        val mediaId = "test-video-media-001"
+        val destFile = File(mediaRootDir.apply { mkdirs() }, "$mediaId.pvmedia")
+
+        val encryptHeader = originalMedia.inputStream().use { input ->
+            StreamingMediaCryptoEngine.encryptStreamToMediaFile(
+                inputStream = input,
+                expectedPlaintextSize = totalPlainBytes.toLong(),
+                targetFile = destFile,
+                mediaId = mediaId,
+                vaultSlot = VaultSessionManager.REAL_SLOT,
+                fileMediaKey = fileMediaKey
+            )
+        }
+        assertEquals(3, encryptHeader.totalChunks)
+        assertEquals(totalPlainBytes.toLong(), encryptHeader.totalPlaintextBytes)
+
+        // 1. Verify EVERY chunk (0, 1, 2) succeeds on intact file
+        val verifiedReport = StreamingMediaCryptoEngine.verifyEncryptedMediaFileEveryChunk(
+            encryptedFile = destFile,
+            mediaId = mediaId,
+            vaultSlot = VaultSessionManager.REAL_SLOT,
+            fileMediaKey = fileMediaKey
+        )
+        assertEquals(3, verifiedReport.header.totalChunks)
+        assertEquals(totalPlainBytes.toLong(), verifiedReport.header.totalPlaintextBytes)
+
+        // 2. Correction 1: Flip 1 bit inside the MIDDLE chunk (chunkIndex = 1) while leaving
+        // chunk 0 (first) and chunk 2 (last) untouched. Prove verifyEncryptedMediaFileEveryChunk rejects it!
+        val tamperedMiddleFile = File(mediaRootDir, "$mediaId-tampered-middle.pvmedia")
+        val tamperedBytes = destFile.readBytes()
+        val middleChunkByteOffset = StreamingMediaCryptoEngine.HEADER_BYTES +
+            StreamingMediaCryptoEngine.FULL_CHUNK_FRAME_BYTES + 100 // inside chunk 1 ciphertext
+        tamperedBytes[middleChunkByteOffset] = (tamperedBytes[middleChunkByteOffset].toInt() xor 0x01).toByte()
+        tamperedMiddleFile.writeBytes(tamperedBytes)
+
+        var middleTamperRejected = false
+        try {
+            StreamingMediaCryptoEngine.verifyEncryptedMediaFileEveryChunk(
+                encryptedFile = tamperedMiddleFile,
+                mediaId = mediaId,
+                vaultSlot = VaultSessionManager.REAL_SLOT,
+                fileMediaKey = fileMediaKey
+            )
+        } catch (_: AEADBadTagException) {
+            middleTamperRejected = true
+        }
+        assertTrue("Middle-chunk bit-flip MUST be rejected by every-chunk AES-256-GCM verification (Correction 1)", middleTamperRejected)
+
+        // 3. Verify EncryptedChunkMediaDataSource random-access reads across chunk boundaries and ring-buffer zeroing on close()
+        val dataSource = StreamingMediaCryptoEngine.EncryptedChunkMediaDataSource(
+            encryptedFile = destFile,
+            mediaId = mediaId,
+            vaultSlot = VaultSessionManager.REAL_SLOT,
+            fileMediaKey = fileMediaKey
+        )
+        assertEquals(totalPlainBytes.toLong(), dataSource.size)
+
+        // Read 20 KiB straddling the boundary between chunk 0 and chunk 1 (offset 250 KiB .. 270 KiB)
+        val boundaryOffset = 250 * 1024
+        val boundaryLen = 20 * 1024
+        val readBuf = ByteArray(boundaryLen)
+        var totalRead = 0
+        while (totalRead < boundaryLen) {
+            val n = dataSource.readAt(
+                (boundaryOffset + totalRead).toLong(),
+                readBuf,
+                totalRead,
+                boundaryLen - totalRead
+            )
+            assertTrue(n > 0)
+            totalRead += n
+        }
+        assertArrayEquals(
+            originalMedia.copyOfRange(boundaryOffset, boundaryOffset + boundaryLen),
+            readBuf
+        )
+
+        // Close dataSource and verify subsequent readAt throws IOException when closed
+        dataSource.close()
+        assertEquals(-1L, dataSource.size)
+        var readAfterCloseRejected = false
+        try {
+            dataSource.readAt(0L, ByteArray(64), 0, 64)
+        } catch (_: java.io.IOException) {
+            readAfterCloseRejected = true
+        }
+        assertTrue("EncryptedChunkMediaDataSource must reject readAt after close()", readAfterCloseRejected)
+    }
+
+    @Test
+    fun `Task1_Task2_Corrections2_3_4 - Media vault import, Real-Decoy isolation, interrupted staging cleanup, cryptographic deletion, 22MiB backup capacity guard, and log redaction`() = runBlocking {
+        val realPass = "RealMediaVault!2026".toCharArray()
+        val decoyPass = "DecoyMediaVault!2026".toCharArray()
+        val realSession = repository.initializeNewVault(
+            realMasterPasswordChars = realPass,
+            optionalDecoyPasswordChars = decoyPass,
+            seedSampleDataInRealVault = false,
+            seedSampleDataInDecoyVault = false
+        )
+
+        // 1. Import a multi-chunk (300 KiB) media item into Slot 0 (Real Vault)
+        val photoBytes = ByteArray(300 * 1024) { idx -> ((idx * 13 + 7) and 0xFF).toByte() }
+        val thumbBytes = ByteArray(2048) { idx -> ((idx * 5 + 3) and 0xFF).toByte() }
+        val importedMedia = repository.importMediaStreamToActiveVault(
+            sessionId = realSession.sessionId,
+            inputStreamProvider = { photoBytes.inputStream() },
+            expectedPlaintextSize = photoBytes.size.toLong(),
+            displayTitle = "Confidential Blueprint.jpg",
+            mimeType = "image/jpeg",
+            mediaKind = MediaKind.PHOTO,
+            widthPx = 1920,
+            heightPx = 1080,
+            durationMs = 0L,
+            thumbnailPlainBytes = thumbBytes
+        )
+        assertEquals(2, importedMedia.chunkCount)
+        assertArrayEquals(thumbBytes, repository.loadDecryptedThumbnailBytes(realSession.sessionId, importedMedia))
+        assertArrayEquals(photoBytes, repository.loadDecryptedPhotoBytes(realSession.sessionId, importedMedia))
+
+        // 2. Verify Decoy Vault (Slot 1) cannot see or decrypt Real Vault media
+        sessionManager.lockNow()
+        val decoySession = (repository.unlockWithPassword(decoyPass) as VaultRepository.UnlockResult.Success).session
+        val decoyItems = repository.loadDecryptedRecordsForSession(decoySession.sessionId)
+        assertTrue("Decoy Vault must have 0 media items from Real Vault", decoyItems.filterIsInstance<MediaRecord>().isEmpty())
+
+        // 3. Switch back to Real Vault and verify ALL_DATA_WITH_MEDIA backup & restore round-trip
+        sessionManager.lockNow()
+        val reUnlockedReal = (repository.unlockWithPassword(realPass) as VaultRepository.UnlockResult.Success).session
+        val backupPass = "MediaBackupPass!2026".toCharArray()
+        val mediaBackupBytes = repository.prepareEncryptedBackupBytes(
+            sessionId = reUnlockedReal.sessionId,
+            backupPasswordChars = backupPass.copyOf(),
+            exportScope = PortableBackupEngine.BackupExportScope.ALL_DATA_WITH_MEDIA
+        )
+        val verifiedBackup = PortableBackupEngine.decryptAndVerifyBackupBytes(mediaBackupBytes, backupPass.copyOf())
+        assertEquals(1, verifiedBackup.mediaCount)
+        assertTrue(verifiedBackup.mediaBlobs.containsKey(importedMedia.id))
+
+        // 4. Correction 3 — Cryptographic Deletion: delete media item permanently and verify keys & files are gone
+        repository.deleteMediaItemPermanently(reUnlockedReal.sessionId, importedMedia.id)
+        val afterDeleteItems = repository.loadDecryptedRecordsForSession(reUnlockedReal.sessionId)
+        assertTrue("MediaRecord and its per-file keys must be deleted from encrypted_records", afterDeleteItems.filterIsInstance<MediaRecord>().isEmpty())
+        assertEquals(null, database.vaultDao().getMediaFileEntity(VaultSessionManager.REAL_SLOT, importedMedia.id))
+        assertFalse(File(File(mediaRootDir, "slot_0"), "${importedMedia.id}.pvmedia").exists())
+        assertFalse(File(File(mediaRootDir, "slot_0"), "${importedMedia.id}.pvthumb").exists())
+
+        // Restore from the ALL_DATA_WITH_MEDIA backup and verify the media item and its chunks are restored and verified
+        repository.applyVerifiedBackupRestore(
+            sessionId = reUnlockedReal.sessionId,
+            backupBytes = mediaBackupBytes,
+            backupPasswordChars = backupPass.copyOf(),
+            restoreMode = PortableBackupEngine.RestoreMode.REPLACE_ACTIVE_VAULT
+        )
+        val restoredMedia = repository.loadDecryptedRecordsForSession(reUnlockedReal.sessionId)
+            .filterIsInstance<MediaRecord>()
+            .single()
+        assertEquals("Confidential Blueprint.jpg", restoredMedia.title)
+        assertArrayEquals(photoBytes, repository.loadDecryptedPhotoBytes(reUnlockedReal.sessionId, restoredMedia))
+
+        // 5. Correction 2: Verify PortableBackupEngine fails closed when media exceeds MAX_RAW_MEDIA_BYTES_FOR_PORTABLE_BACKUP (22 MiB)
+        var oversizeRejected = false
+        try {
+            val oversizedMediaBytes = ByteArray(PortableBackupEngine.MAX_RAW_MEDIA_BYTES_FOR_PORTABLE_BACKUP + 1024)
+            val sha = StreamingMediaCryptoEngine.sha256Hex(oversizedMediaBytes)
+            val oversizedRecord = restoredMedia.copy(
+                id = "oversize-media-001",
+                ciphertextSha256Hex = sha
+            )
+            PortableBackupEngine.createEncryptedBackupBytes(
+                items = listOf(oversizedRecord),
+                backupPasswordChars = backupPass.copyOf(),
+                kdfParams = testKdfParams,
+                mediaBlobs = mapOf(
+                    "oversize-media-001" to PortableBackupEngine.EmbeddedMediaBlob(
+                        mediaId = "oversize-media-001",
+                        formatVersion = 1,
+                        chunkCount = 90,
+                        ciphertextSha256 = sha,
+                        mediaCiphertextBytes = oversizedMediaBytes,
+                        thumbCiphertextBytes = thumbBytes
+                    )
+                )
+            )
+        } catch (_: IllegalArgumentException) {
+            oversizeRejected = true
+        }
+        assertTrue("Media exceeding 22 MiB raw portable limit must fail closed rather than silently skipping files (Correction 2)", oversizeRejected)
+
+        // 6. Interrupted STAGING cleanup: insert a STAGING row and .tmp file and verify cleanupUncommittedAndOrphanMediaFiles removes them
+        val orphanStagingId = "interrupted-staging-media-999"
+        val slot0Dir = File(mediaRootDir, "slot_0").apply { mkdirs() }
+        val tmpStagingFile = File(slot0Dir, "$orphanStagingId.pvmedia.tmp").apply { writeBytes(ByteArray(128)) }
+        database.vaultDao().upsertMediaFileEntity(
+            EncryptedMediaFileEntity(
+                vaultSlot = VaultSessionManager.REAL_SLOT,
+                mediaId = orphanStagingId,
+                formatVersion = 1,
+                relativeMediaPath = "slot_0/$orphanStagingId.pvmedia",
+                relativeThumbPath = "slot_0/$orphanStagingId.pvthumb",
+                encryptedSizeBytes = 0L,
+                chunkCount = 1,
+                ciphertextSha256 = "",
+                importStatus = EncryptedMediaFileEntity.IMPORT_STATUS_STAGING,
+                createdAtEpochMs = System.currentTimeMillis()
+            )
+        )
+        repository.cleanupUncommittedAndOrphanMediaFiles()
+        assertFalse(tmpStagingFile.exists())
+        assertEquals(null, database.vaultDao().getMediaFileEntity(VaultSessionManager.REAL_SLOT, orphanStagingId))
+        // Committed restored media remains intact
+        assertNotNull(database.vaultDao().getMediaFileEntity(VaultSessionManager.REAL_SLOT, restoredMedia.id))
+
+        // 7. Correction 4: Verify SafeVaultLogger redacts internal file paths and content:// URIs
+        val sanitizedMsg = SafeVaultLogger.sanitizeUserFacingMessage(
+            rawMessage = "Failed to open /data/user/0/com.tpeditz.privatevault/files/vault_media/slot_0/secret.pvmedia from content://media/picker/0/12345",
+            fallbackMessage = "Fallback"
+        )
+        assertFalse(sanitizedMsg.contains("/data/user/0"))
+        assertFalse(sanitizedMsg.contains("content://"))
+        assertTrue(sanitizedMsg.contains("[redacted-path]"))
     }
 
     private fun craftSignedBackupContainerForRawJson(

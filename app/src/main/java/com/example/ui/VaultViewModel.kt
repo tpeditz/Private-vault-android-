@@ -1,6 +1,11 @@
 package com.example.ui
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.lifecycle.ViewModel
@@ -11,6 +16,8 @@ import com.example.data.ChecklistEntry
 import com.example.data.CredentialRecord
 import com.example.data.CustomCredentialField
 import com.example.data.FolderScope
+import com.example.data.MediaKind
+import com.example.data.MediaRecord
 import com.example.data.NoteBodyFormat
 import com.example.data.NoteRecord
 import com.example.data.OtaReminderPolicy
@@ -25,7 +32,9 @@ import com.example.ota.OtaUpdateManager
 import com.example.security.CryptoEngine
 import com.example.security.OfflinePasswordStrengthEstimator
 import com.example.security.PasswordGeneratorEngine
+import com.example.security.SafeVaultLogger
 import com.example.security.SensitiveClipboardManager
+import com.example.security.StreamingMediaCryptoEngine
 import com.example.security.VaultSessionManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +59,7 @@ import javax.crypto.Cipher
 enum class PrimaryTab {
     NOTES,
     PASSWORDS,
+    MEDIA,
     TOOLS,
     SETTINGS,
     GENERATOR,
@@ -160,6 +170,7 @@ data class VerifiedRestorePreviewState(
     val notesCount: Int,
     val credentialsCount: Int,
     val foldersCount: Int,
+    val mediaCount: Int = 0,
     val isEmptyBackup: Boolean = false
 )
 
@@ -179,6 +190,8 @@ data class VaultUiState(
     // Active unlocked vault data
     val notes: List<NoteRecord> = emptyList(),
     val credentials: List<CredentialRecord> = emptyList(),
+    val mediaItems: List<MediaRecord> = emptyList(),
+    val decryptedThumbnailsById: Map<String, ByteArray> = emptyMap(),
     val folders: List<VaultFolder> = emptyList(),
     val corruptedRecordCount: Int = 0,
 
@@ -198,6 +211,12 @@ data class VaultUiState(
     val credentialsFavoritesOnly: Boolean = false,
     val credentialsArchiveOnly: Boolean = false,
     val credentialsTrashOnly: Boolean = false,
+
+    // Encrypted Media Vault search, filter & import progress state
+    val mediaSearchQuery: String = "",
+    val mediaFilterMode: MediaFilterMode = MediaFilterMode.ALL,
+    val isImportingMedia: Boolean = false,
+    val mediaImportStatusText: String = "",
 
     // Session-scoped active drafts surviving rotation & keyboard resize (R10)
     val activeNoteDraft: NoteEditorDraftState? = null,
@@ -267,7 +286,14 @@ class VaultViewModel(
         super.onCleared()
         backgroundAutoLockJob?.cancel()
         clipboardManager.shutdown()
+        wipeCachedThumbnails()
         cleanupStaleBackupStagingFiles()
+    }
+
+    private fun wipeCachedThumbnails() {
+        _uiState.value.decryptedThumbnailsById.values.forEach { bytes ->
+            Arrays.fill(bytes, 0.toByte())
+        }
     }
 
     private fun observePreferences() {
@@ -298,9 +324,7 @@ class VaultViewModel(
                     is VaultSessionManager.SessionState.Locked -> {
                         backgroundAutoLockJob?.cancel()
                         backgroundAutoLockJob = null
-                        // Note: If the user is in the middle of the Android system Save As picker (U01),
-                        // we keep stagedBackupMetadata (which points only to an already-encrypted
-                        // .pvault file on disk) so the CreateDocument callback can finish copying it!
+                        wipeCachedThumbnails()
                         val inPickerWindow = vaultRepository.sessionManager.isInFilePickerTransitionWindow()
                         if (!inPickerWindow) {
                             deleteStagedBackupFile(_uiState.value.stagedBackupMetadata)
@@ -310,6 +334,8 @@ class VaultViewModel(
                                 sessionState = VaultSessionManager.SessionState.Locked,
                                 notes = emptyList(),
                                 credentials = emptyList(),
+                                mediaItems = emptyList(),
+                                decryptedThumbnailsById = emptyMap(),
                                 folders = emptyList(),
                                 corruptedRecordCount = 0,
                                 isDecoyModeEnabled = false,
@@ -317,6 +343,8 @@ class VaultViewModel(
                                 isDecoyPolicySheetUnlocked = false,
                                 activeNoteDraft = null,
                                 activeCredentialDraft = null,
+                                isImportingMedia = false,
+                                mediaImportStatusText = "",
                                 backupOperationStage = if (inPickerWindow) state.backupOperationStage else BackupOperationStage.IDLE,
                                 stagedBackupMetadata = if (inPickerWindow) state.stagedBackupMetadata else null,
                                 selectedRestoreUriString = null,
@@ -324,7 +352,8 @@ class VaultViewModel(
                                 verifiedRestorePreview = null,
                                 strengthCheckerInput = "",
                                 notesSearchQuery = "",
-                                credentialsSearchQuery = ""
+                                credentialsSearchQuery = "",
+                                mediaSearchQuery = ""
                             )
                         }
                     }
@@ -348,6 +377,7 @@ class VaultViewModel(
     private fun initializeStartupChecks() {
         viewModelScope.launch {
             val provisioned = vaultRepository.isVaultProvisioned()
+            runCatching { vaultRepository.cleanupUncommittedAndOrphanMediaFiles() }
             val bioEnrolled = vaultRepository.isBiometricUnlockEnrolled()
             val bioHardwareBacked = vaultRepository.isBiometricKeyHardwareBacked()
             val defaultCfg = OfflinePasswordStrengthEstimator.GeneratorConfig()
@@ -415,12 +445,14 @@ class VaultViewModel(
 
                 val notes = snapshot.items.filterIsInstance<NoteRecord>()
                 val creds = snapshot.items.filterIsInstance<CredentialRecord>()
+                val media = snapshot.items.filterIsInstance<MediaRecord>()
                 val folders = snapshot.items.filterIsInstance<VaultFolder>()
 
                 _uiState.update { state ->
                     state.copy(
                         notes = notes,
                         credentials = creds,
+                        mediaItems = media,
                         folders = folders,
                         corruptedRecordCount = snapshot.corruptedRecordIds.size,
                         isDecoyModeEnabled = decoyEnabled,
@@ -1436,6 +1468,372 @@ class VaultViewModel(
     }
 
     // ============================================================================================
+    // Encrypted Photo & Video Vault Actions (Task 1)
+    // ============================================================================================
+
+    fun setMediaSearchQuery(query: String) {
+        _uiState.update { it.copy(mediaSearchQuery = query) }
+    }
+
+    fun setMediaFilterMode(mode: MediaFilterMode) {
+        _uiState.update { it.copy(mediaFilterMode = mode) }
+    }
+
+    fun ensureMediaThumbnailLoaded(record: MediaRecord) {
+        if (_uiState.value.decryptedThumbnailsById.containsKey(record.id)) return
+        val sessionId = currentSessionIdOrNull() ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val thumbBytes = vaultRepository.loadDecryptedThumbnailBytes(sessionId, record)
+                if (!vaultRepository.sessionManager.isSessionActive(sessionId)) {
+                    Arrays.fill(thumbBytes, 0.toByte())
+                    return@launch
+                }
+                _uiState.update { state ->
+                    state.copy(
+                        decryptedThumbnailsById = state.decryptedThumbnailsById + (record.id to thumbBytes)
+                    )
+                }
+            } catch (_: Exception) {
+                // Ignore if vault locked or thumbnail unavailable
+            }
+        }
+    }
+
+    suspend fun loadDecryptedPhotoBytes(record: MediaRecord): ByteArray {
+        val sessionId = currentSessionIdOrNull()
+            ?: throw IllegalStateException("Vault is locked.")
+        return vaultRepository.loadDecryptedPhotoBytes(sessionId, record)
+    }
+
+    suspend fun openEncryptedVideoDataSource(
+        record: MediaRecord
+    ): StreamingMediaCryptoEngine.EncryptedChunkMediaDataSource {
+        val sessionId = currentSessionIdOrNull()
+            ?: throw IllegalStateException("Vault is locked.")
+        return vaultRepository.openEncryptedVideoDataSource(sessionId, record)
+    }
+
+    fun toggleMediaFavorite(record: MediaRecord) {
+        val sessionId = currentSessionIdOrNull() ?: return
+        viewModelScope.launch {
+            try {
+                vaultRepository.saveVaultItem(
+                    sessionId,
+                    record.copy(
+                        isFavorite = !record.isFavorite,
+                        updatedAtEpochMs = System.currentTimeMillis()
+                    )
+                )
+                refreshActiveVaultItems(sessionId)
+            } catch (e: Exception) {
+                setErrorBanner(SafeVaultLogger.sanitizeUserFacingMessage(e.message, "Could not update media item."))
+            }
+        }
+    }
+
+    fun toggleMediaTrash(record: MediaRecord) {
+        val sessionId = currentSessionIdOrNull() ?: return
+        val nextTrashed = !record.isTrashed
+        viewModelScope.launch {
+            try {
+                vaultRepository.saveVaultItem(
+                    sessionId,
+                    record.copy(
+                        isTrashed = nextTrashed,
+                        updatedAtEpochMs = System.currentTimeMillis()
+                    )
+                )
+                refreshActiveVaultItems(sessionId)
+                setStatusBanner(if (nextTrashed) "Media moved to Trash." else "Media restored from Trash.")
+            } catch (e: Exception) {
+                setErrorBanner(SafeVaultLogger.sanitizeUserFacingMessage(e.message, "Could not update media item."))
+            }
+        }
+    }
+
+    /**
+     * Correction 3 — Cryptographic Deletion:
+     * Destroys the item's unique 256-bit `fileMediaKey` and `thumbnailKey` in `encrypted_records`
+     * and unlinks its `.pvmedia` and `.pvthumb` ciphertext files from internal storage.
+     */
+    fun deleteMediaPermanently(mediaId: String) {
+        val sessionId = currentSessionIdOrNull() ?: return
+        viewModelScope.launch {
+            try {
+                vaultRepository.deleteMediaItemPermanently(sessionId, mediaId)
+                _uiState.update { state ->
+                    state.decryptedThumbnailsById[mediaId]?.let { Arrays.fill(it, 0.toByte()) }
+                    state.copy(
+                        decryptedThumbnailsById = state.decryptedThumbnailsById - mediaId,
+                        statusBannerMessage = "Media encryption keys destroyed and ciphertext deleted."
+                    )
+                }
+                refreshActiveVaultItems(sessionId)
+            } catch (e: Exception) {
+                setErrorBanner(SafeVaultLogger.sanitizeUserFacingMessage(e.message, "Could not delete media item."))
+            }
+        }
+    }
+
+    /**
+     * Imports one or more user-selected photos or videos into the active vault slot using
+     * streaming `256 KiB` chunked AES-256-GCM encryption (`PVM1`) and verifies every chunk (`0..N-1`)
+     * before marking each imported item `COMMITTED`.
+     */
+    fun importMediaUris(uris: List<Uri>): Job? {
+        vaultRepository.sessionManager.endFilePickerTransitionWindow()
+        if (uris.isEmpty()) return null
+        val sessionId = currentSessionIdOrNull() ?: run {
+            setErrorBanner("Vault must be unlocked before importing photos or videos.")
+            return null
+        }
+
+        return viewModelScope.launch(Dispatchers.IO) {
+            _uiState.update {
+                it.copy(
+                    isImportingMedia = true,
+                    mediaImportStatusText = "Preparing to encrypt ${uris.size} media item(s)…",
+                    errorBannerMessage = null
+                )
+            }
+
+            var importedCount = 0
+            var failedCount = 0
+            var lastErrorReason: String? = null
+
+            for ((index, uri) in uris.withIndex()) {
+                if (!vaultRepository.sessionManager.isSessionActive(sessionId)) {
+                    break
+                }
+                val itemNumber = index + 1
+                try {
+                    val displayName = resolveDisplayNameForUri(uri).ifBlank { "vault_media_$itemNumber" }
+                    val mimeType = resolveMimeTypeForUri(uri, displayName)
+                    val mediaKind = if (mimeType.startsWith("video/", ignoreCase = true)) {
+                        MediaKind.VIDEO
+                    } else {
+                        MediaKind.PHOTO
+                    }
+                    val expectedSize = resolveByteSizeForUri(uri)
+                    val meta = extractThumbnailAndMetadataForUri(uri, mediaKind, displayName)
+
+                    val record = vaultRepository.importMediaStreamToActiveVault(
+                        sessionId = sessionId,
+                        inputStreamProvider = {
+                            openInputStreamForUri(uri)
+                                ?: throw FileNotFoundException("Selected media stream could not be opened.")
+                        },
+                        expectedPlaintextSize = expectedSize,
+                        displayTitle = displayName,
+                        mimeType = mimeType,
+                        mediaKind = mediaKind,
+                        widthPx = meta.widthPx,
+                        heightPx = meta.heightPx,
+                        durationMs = meta.durationMs,
+                        thumbnailPlainBytes = meta.thumbnailJpegBytes,
+                        onProgress = { _, stage ->
+                            _uiState.update {
+                                it.copy(
+                                    mediaImportStatusText = "Item $itemNumber/${uris.size}: $stage"
+                                )
+                            }
+                        }
+                    )
+                    Arrays.fill(meta.thumbnailJpegBytes, 0.toByte())
+                    ensureMediaThumbnailLoaded(record)
+                    importedCount++
+                } catch (e: Exception) {
+                    failedCount++
+                    lastErrorReason = SafeVaultLogger.sanitizeUserFacingMessage(
+                        e.message,
+                        "Media encryption or full-chunk verification failed."
+                    )
+                    SafeVaultLogger.warn("VaultViewModel", "MEDIA_IMPORT_ITEM_FAILED")
+                }
+            }
+
+            refreshActiveVaultItems(sessionId)?.join()
+
+            _uiState.update { state ->
+                val statusMsg = when {
+                    importedCount > 0 && failedCount == 0 ->
+                        "Encrypted & verified $importedCount media item(s). Your original device files remain untouched unless you delete them yourself."
+                    importedCount > 0 && failedCount > 0 ->
+                        "Encrypted & verified $importedCount item(s); $failedCount failed verification."
+                    else -> null
+                }
+                val errMsg = if (failedCount > 0 && importedCount == 0) {
+                    lastErrorReason ?: "Media import failed."
+                } else {
+                    state.errorBannerMessage
+                }
+                state.copy(
+                    isImportingMedia = false,
+                    mediaImportStatusText = "",
+                    statusBannerMessage = statusMsg ?: state.statusBannerMessage,
+                    errorBannerMessage = errMsg
+                )
+            }
+        }
+    }
+
+    private data class ExtractedMediaMeta(
+        val widthPx: Int,
+        val heightPx: Int,
+        val durationMs: Long,
+        val thumbnailJpegBytes: ByteArray
+    )
+
+    private fun resolveMimeTypeForUri(uri: Uri, displayName: String): String {
+        val resolverType = runCatching { appContext.contentResolver.getType(uri) }.getOrNull()
+        if (!resolverType.isNullOrBlank()) return resolverType
+        val lower = displayName.lowercase(java.util.Locale.ROOT)
+        return when {
+            lower.endsWith(".mp4") || lower.endsWith(".m4v") -> "video/mp4"
+            lower.endsWith(".mkv") -> "video/x-matroska"
+            lower.endsWith(".webm") -> "video/webm"
+            lower.endsWith(".mov") -> "video/quicktime"
+            lower.endsWith(".png") -> "image/png"
+            lower.endsWith(".webp") -> "image/webp"
+            else -> "image/jpeg"
+        }
+    }
+
+    private fun resolveByteSizeForUri(uri: Uri): Long {
+        if (uri.scheme.equals("file", ignoreCase = true)) {
+            val f = uri.path?.let { File(it) }
+            if (f != null && f.exists()) return f.length()
+        }
+        val columnSize = runCatching {
+            appContext.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)
+                ?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (idx >= 0 && !cursor.isNull(idx)) cursor.getLong(idx) else -1L
+                    } else {
+                        -1L
+                    }
+                } ?: -1L
+        }.getOrDefault(-1L)
+        if (columnSize > 0L) return columnSize
+
+        val afdSize = runCatching {
+            appContext.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                afd.length
+            } ?: -1L
+        }.getOrDefault(-1L)
+        if (afdSize > 0L) return afdSize
+
+        return runCatching {
+            openInputStreamForUri(uri)?.use { stream ->
+                val buf = ByteArray(32 * 1024)
+                var total = 0L
+                while (true) {
+                    val n = stream.read(buf)
+                    if (n == -1) break
+                    total += n
+                }
+                total
+            } ?: -1L
+        }.getOrDefault(-1L)
+    }
+
+    private fun extractThumbnailAndMetadataForUri(
+        uri: Uri,
+        mediaKind: MediaKind,
+        displayName: String
+    ): ExtractedMediaMeta {
+        if (mediaKind == MediaKind.PHOTO) {
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            runCatching {
+                openInputStreamForUri(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream, null, boundsOpts)
+                }
+            }
+            val origW = boundsOpts.outWidth.coerceAtLeast(0)
+            val origH = boundsOpts.outHeight.coerceAtLeast(0)
+            var sampleSize = 1
+            while (origW / sampleSize > 320 || origH / sampleSize > 320) {
+                sampleSize *= 2
+            }
+            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize.coerceAtLeast(1) }
+            val decodedBitmap = runCatching {
+                openInputStreamForUri(uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream, null, decodeOpts)
+                }
+            }.getOrNull()
+
+            if (decodedBitmap != null) {
+                val out = ByteArrayOutputStream()
+                decodedBitmap.compress(Bitmap.CompressFormat.JPEG, 82, out)
+                decodedBitmap.recycle()
+                val jpeg = out.toByteArray()
+                if (jpeg.isNotEmpty()) {
+                    return ExtractedMediaMeta(
+                        widthPx = origW,
+                        heightPx = origH,
+                        durationMs = 0L,
+                        thumbnailJpegBytes = jpeg
+                    )
+                }
+            }
+        } else {
+            val retriever = MediaMetadataRetriever()
+            try {
+                if (uri.scheme.equals("file", ignoreCase = true) && uri.path != null) {
+                    retriever.setDataSource(uri.path)
+                } else {
+                    retriever.setDataSource(appContext, uri)
+                }
+                val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+                val dur = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                val frame = retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                if (frame != null) {
+                    val scaled = Bitmap.createScaledBitmap(frame, 320, 180, true)
+                    val out = ByteArrayOutputStream()
+                    scaled.compress(Bitmap.CompressFormat.JPEG, 80, out)
+                    if (scaled != frame) scaled.recycle()
+                    frame.recycle()
+                    val jpeg = out.toByteArray()
+                    if (jpeg.isNotEmpty()) {
+                        return ExtractedMediaMeta(
+                            widthPx = w,
+                            heightPx = h,
+                            durationMs = dur,
+                            thumbnailJpegBytes = jpeg
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+            } finally {
+                runCatching { retriever.release() }
+            }
+        }
+
+        // Clean fallback thumbnail if codec metadata is unavailable
+        val fallbackBmp = Bitmap.createBitmap(240, 180, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(fallbackBmp)
+        val paint = Paint().apply {
+            color = if (mediaKind == MediaKind.VIDEO) android.graphics.Color.rgb(28, 43, 68) else android.graphics.Color.rgb(34, 62, 54)
+        }
+        canvas.drawRect(0f, 0f, 240f, 180f, paint)
+        val out = ByteArrayOutputStream()
+        fallbackBmp.compress(Bitmap.CompressFormat.JPEG, 80, out)
+        fallbackBmp.recycle()
+        val bytes = out.toByteArray().let {
+            if (it.isNotEmpty()) it else displayName.toByteArray(Charsets.UTF_8)
+        }
+        return ExtractedMediaMeta(
+            widthPx = 240,
+            heightPx = 180,
+            durationMs = 0L,
+            thumbnailJpegBytes = bytes
+        )
+    }
+
+    // ============================================================================================
     // Password Generator & Offline Strength Checker (PV-SEC-003)
     // ============================================================================================
 
@@ -1859,6 +2257,7 @@ class VaultViewModel(
                     notesCount = verifiedPayload.notesCount,
                     credentialsCount = verifiedPayload.credentialsCount,
                     foldersCount = verifiedPayload.foldersCount,
+                    mediaCount = verifiedPayload.mediaCount,
                     isEmptyBackup = verifiedPayload.isEmptyBackup
                 )
                 _uiState.update {
@@ -1869,7 +2268,7 @@ class VaultViewModel(
                         statusBannerMessage = if (preview.isEmptyBackup) {
                             "Backup verified: This .pvault file contains 0 records (empty backup)."
                         } else {
-                            "Backup verified: ${preview.notesCount} notes, ${preview.credentialsCount} credentials, ${preview.foldersCount} folders."
+                            "Backup verified: ${preview.notesCount} notes, ${preview.credentialsCount} credentials, ${preview.mediaCount} media, ${preview.foldersCount} folders."
                         }
                     )
                 }
@@ -1976,6 +2375,7 @@ class VaultViewModel(
                     notesCount = payload.notesCount,
                     credentialsCount = payload.credentialsCount,
                     foldersCount = payload.foldersCount,
+                    mediaCount = payload.mediaCount,
                     isEmptyBackup = payload.isEmptyBackup
                 )
                 refreshActiveVaultItems(sessionId)
@@ -1986,7 +2386,11 @@ class VaultViewModel(
                         selectedRestoreUriString = null,
                         selectedRestoreFileName = null,
                         verifiedRestorePreview = preview,
-                        statusBannerMessage = "Restored ${payload.notesCount} notes & ${payload.credentialsCount} credentials."
+                        statusBannerMessage = if (payload.mediaCount > 0) {
+                            "Restored ${payload.notesCount} notes, ${payload.credentialsCount} credentials & ${payload.mediaCount} media item(s)."
+                        } else {
+                            "Restored ${payload.notesCount} notes & ${payload.credentialsCount} credentials."
+                        }
                     )
                 }
             } catch (_: AEADBadTagException) {
@@ -2513,7 +2917,12 @@ class VaultViewModel(
     }
 
     fun setErrorBanner(message: String?) {
-        _uiState.update { it.copy(errorBannerMessage = message, statusBannerMessage = null) }
+        val sanitized = if (message != null) {
+            SafeVaultLogger.sanitizeUserFacingMessage(message, "Operation could not be completed.")
+        } else {
+            null
+        }
+        _uiState.update { it.copy(errorBannerMessage = sanitized, statusBannerMessage = null) }
     }
 
     private fun currentSessionIdOrNull(): Long? {
@@ -2526,7 +2935,10 @@ class VaultViewModel(
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             val appContext = context.applicationContext
             val db = PrivateVaultDatabase.getInstance(appContext)
-            val repo = VaultRepository(db.vaultDao())
+            val repo = VaultRepository(
+                vaultDao = db.vaultDao(),
+                mediaRootDirProvider = { File(appContext.filesDir, "vault_media") }
+            )
             val prefs = AppPreferencesRepository(appContext)
             val ota = OtaUpdateManager(appContext)
             return VaultViewModel(

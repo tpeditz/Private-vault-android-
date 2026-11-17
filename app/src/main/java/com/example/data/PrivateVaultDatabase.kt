@@ -51,11 +51,79 @@ interface VaultDao {
     @Query("SELECT COUNT(*) FROM encrypted_records WHERE vault_slot = :vaultSlot")
     suspend fun countRecordsForSlot(vaultSlot: Int): Int
 
+    // ============================================================================================
+    // Encrypted Media Files (`encrypted_media_files` — Room Schema v4)
+    // ============================================================================================
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertMediaFileEntity(entity: EncryptedMediaFileEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertMediaFileEntities(entities: List<EncryptedMediaFileEntity>)
+
+    @Query("SELECT * FROM encrypted_media_files WHERE vault_slot = :vaultSlot AND media_id = :mediaId LIMIT 1")
+    suspend fun getMediaFileEntity(vaultSlot: Int, mediaId: String): EncryptedMediaFileEntity?
+
+    @Query("SELECT * FROM encrypted_media_files WHERE vault_slot = :vaultSlot")
+    suspend fun getAllMediaFileEntitiesForSlot(vaultSlot: Int): List<EncryptedMediaFileEntity>
+
+    @Query("SELECT * FROM encrypted_media_files")
+    suspend fun getAllMediaFileEntities(): List<EncryptedMediaFileEntity>
+
+    @Query("DELETE FROM encrypted_media_files WHERE vault_slot = :vaultSlot AND media_id = :mediaId")
+    suspend fun deleteMediaFileEntity(vaultSlot: Int, mediaId: String)
+
+    @Query("DELETE FROM encrypted_media_files WHERE vault_slot = :vaultSlot")
+    suspend fun deleteAllMediaFilesForSlot(vaultSlot: Int)
+
+    @Query("DELETE FROM encrypted_media_files")
+    suspend fun deleteAllMediaFiles()
+
+    /**
+     * Atomically commits a verified media item into both `encrypted_records` (which holds the
+     * per-file 256-bit keys and metadata encrypted under the slot DEK) and `encrypted_media_files`
+     * (`import_status = COMMITTED`).
+     */
+    @Transaction
+    suspend fun commitVerifiedMediaAtomically(
+        encryptedRecord: EncryptedRecordEntity,
+        committedMediaEntity: EncryptedMediaFileEntity
+    ) {
+        upsertRecord(encryptedRecord)
+        upsertMediaFileEntity(committedMediaEntity)
+    }
+
+    /**
+     * Atomically deletes both the encrypted `MediaRecord` (destroying its wrapped per-file keys)
+     * and the `EncryptedMediaFileEntity` tracking row.
+     */
+    @Transaction
+    suspend fun deleteMediaRecordAndEntityAtomically(vaultSlot: Int, mediaId: String) {
+        deleteRecord(vaultSlot, mediaId)
+        deleteMediaFileEntity(vaultSlot, mediaId)
+    }
+
     @Transaction
     suspend fun replaceAllRecordsForSlot(vaultSlot: Int, newRecords: List<EncryptedRecordEntity>) {
         deleteAllRecordsForSlot(vaultSlot)
         if (newRecords.isNotEmpty()) {
             upsertRecords(newRecords)
+        }
+    }
+
+    @Transaction
+    suspend fun replaceAllRecordsAndMediaForSlot(
+        vaultSlot: Int,
+        newRecords: List<EncryptedRecordEntity>,
+        newMediaEntities: List<EncryptedMediaFileEntity>
+    ) {
+        deleteAllRecordsForSlot(vaultSlot)
+        deleteAllMediaFilesForSlot(vaultSlot)
+        if (newRecords.isNotEmpty()) {
+            upsertRecords(newRecords)
+        }
+        if (newMediaEntities.isNotEmpty()) {
+            upsertMediaFileEntities(newMediaEntities)
         }
     }
 
@@ -70,6 +138,7 @@ interface VaultDao {
         initialRecords: List<EncryptedRecordEntity>
     ) {
         deleteAllRecords()
+        deleteAllMediaFiles()
         upsertEnvelopes(envelopes)
         if (initialRecords.isNotEmpty()) {
             upsertRecords(initialRecords)
@@ -90,6 +159,7 @@ interface VaultDao {
     ) {
         upsertEnvelopes(listOf(updatedRealEnvelope, updatedDecoyEnvelope))
         deleteAllRecordsForSlot(decoySlotId)
+        deleteAllMediaFilesForSlot(decoySlotId)
         if (seedRecords.isNotEmpty()) {
             upsertRecords(seedRecords)
         }
@@ -108,6 +178,7 @@ interface VaultDao {
     ) {
         upsertEnvelopes(listOf(updatedRealEnvelope, dummyDecoyEnvelope))
         deleteAllRecordsForSlot(decoySlotId)
+        deleteAllMediaFilesForSlot(decoySlotId)
     }
 
     /**
@@ -126,8 +197,12 @@ interface VaultDao {
 }
 
 @Database(
-    entities = [VaultEnvelopeEntity::class, EncryptedRecordEntity::class],
-    version = 3,
+    entities = [
+        VaultEnvelopeEntity::class,
+        EncryptedRecordEntity::class,
+        EncryptedMediaFileEntity::class
+    ],
+    version = 4,
     exportSchema = false
 )
 abstract class PrivateVaultDatabase : RoomDatabase() {
@@ -182,6 +257,35 @@ abstract class PrivateVaultDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Task 1.F: Explicit non-destructive migration v3 -> v4 adding `encrypted_media_files`
+         * while preserving all existing `vault_envelopes` and `encrypted_records` rows intact.
+         */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `encrypted_media_files` (
+                        `vault_slot` INTEGER NOT NULL,
+                        `media_id` TEXT NOT NULL,
+                        `format_version` INTEGER NOT NULL,
+                        `relative_media_path` TEXT NOT NULL,
+                        `relative_thumb_path` TEXT NOT NULL,
+                        `encrypted_size_bytes` INTEGER NOT NULL,
+                        `chunk_count` INTEGER NOT NULL,
+                        `ciphertext_sha256` TEXT NOT NULL,
+                        `import_status` INTEGER NOT NULL,
+                        `created_at_epoch_ms` INTEGER NOT NULL,
+                        PRIMARY KEY(`vault_slot`, `media_id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_encrypted_media_files_vault_slot` ON `encrypted_media_files` (`vault_slot`)"
+                )
+            }
+        }
+
         @Volatile
         private var INSTANCE: PrivateVaultDatabase? = null
 
@@ -192,7 +296,7 @@ abstract class PrivateVaultDatabase : RoomDatabase() {
                     PrivateVaultDatabase::class.java,
                     DATABASE_NAME
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     // Never enable fallbackToDestructiveMigration() so an update can never wipe vaults
                     .build()
                 INSTANCE = instance
@@ -206,7 +310,7 @@ abstract class PrivateVaultDatabase : RoomDatabase() {
                 PrivateVaultDatabase::class.java
             )
                 .allowMainThreadQueries()
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build()
         }
     }
