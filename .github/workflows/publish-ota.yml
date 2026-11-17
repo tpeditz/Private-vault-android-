@@ -19,7 +19,7 @@ on:
       release_notes:
         description: 'Release notes for update.json and GitHub Release'
         required: true
-        default: 'PRIVATE VAULT v1.0.4 security, backup verification, and friendly UI/UX update.'
+        default: 'PRIVATE VAULT v1.0.5 encrypted photo & video vault, security, and release hardening update.'
         type: string
       min_supported_version_code:
         description: 'Minimum supported versionCode for OTA upgrade'
@@ -50,7 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${OTA_TOKEN:-}" ]; then
-            echo "::error::Missing required repository secret OTA_REPO_TOKEN for publishing to ${PUBLIC_OTA_REPO}."
+            echo "::error::Missing required repository secret OTA_REPO_TOKEN. Add OTA_REPO_TOKEN with Contents read/write access to ${PUBLIC_OTA_REPO} under Settings -> Secrets and variables -> Actions."
             exit 1
           fi
 
@@ -71,11 +71,26 @@ jobs:
       - name: Checkout private source repository
         uses: actions/checkout@v4
 
-      - name: Set up Temurin Java 17
+      - name: Set up Temurin Java 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
+
+      - name: Verify Java 21 environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Checking java -version:"
+          java -version
+          if [ -z "${JAVA_HOME:-}" ]; then
+            echo "::error::JAVA_HOME is not set."
+            exit 1
+          fi
+          if ! java -version 2>&1 | grep -qE 'version "21(\.|")'; then
+            echo "::error::Expected Java 21 runtime for Android API 36 / Robolectric 4.16.1."
+            exit 1
+          fi
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
